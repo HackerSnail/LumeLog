@@ -104,6 +104,7 @@ fn search_with_window(
     let re = build_regex(q)?;
     // Each window advances by (window - overlap); the trailing `overlap` bytes
     // are re-read by the next window so a match straddling the seam is seen.
+    debug_assert!(window > overlap, "window must exceed overlap so step > 0");
     let step = (window - overlap) as u64;
     let mut cursor: u64 = 0;
     let mut stats = SearchStats {
