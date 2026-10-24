@@ -300,16 +300,22 @@ export async function loadWindow(
   count: number,
 ): Promise<{ first: number; lines: string[]; invalidCount: number }> {
   const ch = new Channel<ChunkPayload>();
-  let payload: ChunkPayload | null = null;
+  let payload: ChunkPayload | undefined;
   ch.onmessage = (c) => {
     payload = c;
   };
   await docChunk(docId, start, count, ch);
-  if (!payload) return { first: start, lines: [], invalidCount: 0 };
-  const p = payload as ChunkPayload;
-  // The core joins logical lines with `\n`; a trailing newline would add a phantom
-  // empty line, so drop only a single trailing one before splitting.
-  const body = p.text.endsWith("\n") ? p.text.slice(0, -1) : p.text;
-  const lines = count === 0 ? [] : body.split("\n");
+  const p = payload;
+  if (!p) return { first: start, lines: [], invalidCount: 0 };
+  // The core keeps each line's raw terminator in the chunk text, so a CRLF
+  // file arrives with a `\r` before every `\n`. Strip one trailing terminator,
+  // then any per-line trailing `\r` — `pre`-rendered rows and copy-paste must
+  // not carry stray CRs (CodeMirror normalises internally, a raw list does not).
+  const body = p.text.endsWith("\r\n")
+    ? p.text.slice(0, -2)
+    : p.text.endsWith("\n")
+      ? p.text.slice(0, -1)
+      : p.text;
+  const lines = count === 0 ? [] : body.split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
   return { first: p.startLine, lines, invalidCount: p.invalidCount };
 }

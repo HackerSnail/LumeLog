@@ -159,9 +159,11 @@ export class ListView implements TabView {
     this.renderFirst = first;
     this.renderLast = last;
 
-    // Fetch only if the visible window leaves the cached block.
+    // Fetch only if the visible window leaves the cached block — but never
+    // past `indexed`: a window entirely ahead of the index is pure placeholder,
+    // and painting it keeps the "（待索引…）" rows on screen (Task 11 path).
     const needEnd = Math.min(last, indexed);
-    if (first < this.cacheStart || needEnd > this.cacheEnd) {
+    if (needEnd > first && (first < this.cacheStart || needEnd > this.cacheEnd)) {
       void this.fetchAndRender(first, needEnd);
       return; // paint after the fetch resolves
     }
@@ -169,10 +171,6 @@ export class ListView implements TabView {
   }
 
   private async fetchAndRender(first: number, needEnd: number): Promise<void> {
-    if (needEnd <= first) {
-      this.paint(first, first, first);
-      return;
-    }
     const mySeq = ++this.seq;
     let res: { first: number; lines: string[] };
     try {
@@ -184,11 +182,17 @@ export class ListView implements TabView {
     if (this.destroyed || mySeq !== this.seq) return; // superseded by a newer scroll
     this.cache = new Map();
     for (let i = 0; i < res.lines.length; i++) this.cache.set(res.first + i, res.lines[i]);
-    this.cacheStart = first;
-    this.cacheEnd = needEnd;
+    // Derive the cached span from what actually arrived, not from what we
+    // asked for: the core clamps a window that runs past EOF, and claiming the
+    // requested range would serve phantom cache hits on the next scroll.
+    const gotEnd = res.first + res.lines.length;
+    this.cacheStart = Math.min(first, res.first);
+    this.cacheEnd = gotEnd;
     // The window may have moved while awaiting; re-derive from current scroll.
     const total = this.opts.totalLines();
     const w = visibleWindow(this.root.scrollTop, this.root.clientHeight, total);
+    this.renderFirst = w.first;
+    this.renderLast = w.last;
     this.paint(w.first, w.last, Math.min(this.opts.indexedLines(), total));
   }
 

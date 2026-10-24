@@ -29,6 +29,16 @@
 
 **headless-deferred（归 Task 11 checklist）:** `tauri dev` 打开 1GB 日志滚动流畅、GBK 不乱码、Ctrl+G goToLine 实际落位、索引进度条 UI。
 
+### Task 10 CodeReview round 1（CHANGES REQUESTED → fix）
+
+评审范围：c61c902..3796355。无 Critical；2 个 Important 均已修：
+- **F1** `listview.ts` render/fetchAndRender：`indexed < first`（窗口全在未索引区，Task 11 流式索引路径）时旧代码走 `paint(first, first, …)` 清空可见区，"（待索引…）"占位不显示——违背 Task 8/10 Ruling"占位路径必须已就绪"。修：fetch 条件加 `needEnd > first` 门控，纯占位窗口直接 paint 渲染占位行；删除 fetchAndRender 的 `needEnd<=first` 早退分支。
+- **F2** `ipc.ts` `loadWindow`：核实 core `build_chunk` 确实保留每行原始终止符（CRLF 文件每行尾带 `\r`；编辑模式靠 CodeMirror 换行归一化消化，只读列表是裸 DOM 会残留）。修：剥一层尾部 `\r\n`/`\n` 后再按 `\n` split，并逐行剥尾 `\r`。同时修 M2（`payload as ChunkPayload` 强转→`undefined` 窄化）。
+- **M1**（随 F1 一并修）：fetch 落回后 `renderFirst/renderLast` 同步为实际 paint 的窗口，防早退判断与 DOM 错位；cache 区间改为按实际到达数据推导（`res.first + lines.length`），不再声称请求区间（防 EOF clamp 后的幽灵缓存命中）。
+- **M3**（构造时多取一次 201 行）、**M4**（readonly 下语法下拉点击静默 no-op）：ledger 记 deferred，归 Task 11 GUI 抛光。
+
+验证：vitest 10 passed；tsc strict + vite build 干净（本轮未触 Rust 侧，clippy/test 沿用 commit 3796355 结果）。
+
 ## 2026-10-24 — Task 9：前端编辑模式（CodeMirror 6 + Tab + 状态栏）
 
 - 文件：`app/frontend/src/{ipc.ts,encoding-menu.ts,language.ts,editor.ts,tabs.ts,statusbar.ts,main.ts}` + `ipc.test.ts`；`package.json`（+@codemirror/*、@tauri-apps/plugin-dialog、vitest；+test 脚本）；`package-lock.json` 纳入版本库。
