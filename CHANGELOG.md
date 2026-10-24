@@ -39,6 +39,15 @@ round-1 scoped 复审裁定：C1/C2/I1-I5/全部 Minor **均 ADDRESSED**，无�
 - **Ledger 级清理**：`statusbar.ts` 顶注“reopenWithEncoding/re-opens”陈旧→改“re-decodes in place / changeEncoding → doc_set_encoding”；`runSearch` 死参数 `handle` 删除（jumpToLine 取 active tab）。
 - 验证（fix round 2）：`npx vitest run` → 5 passed；`npm run build`（tsc strict）→ 29 模块 0 error（无未用导入/变量）。本轮仅动前端 search + 注释，Rust 壳未变。
 
+### Task 9 fix round 3（仅修常驻 search 面板新引入的两缺陷）
+
+round-2 scoped 复审：4 项 findings 均 ADDRESSED、无回归；但常驻面板改写新引入 2 Important（均为 1–2 行）：
+- **Important（新）**：IME 合成中回车误提交——中文拼音候选词回车确认同样 `key==="Enter"`（`isComposing===true`）→ 半截串触发同步扫描。修：`if (e.key === "Enter" && !e.isComposing)`。
+- **Important（新）**：面板冻结开面板时的 `docId`——切标签后提交仍扫旧文档，而 `jumpToLine` 作用于当前文档→行号错位静默夹紧。修：`submit` 每次重解析 `tabs.active()`；`onActivate` 改调 `hideSearchPanel()`（陈旧命中行不可点）。
+- **Minor（新）**：`onDone` 覆盖“仅显示前 1000”提示。修：`s.matches > SEARCH_RENDER_CAP` 时补回截断提示。
+- **顺手**：`openSearchFlow`/`submit` 在 `searchBusy` 时给提示而非静吞/重建致空白面板；`runSearch` 文档已关时 `statusLine` 提示“文档已关闭”。
+- 验证（fix round 3）：`npx vitest run` → 5 passed；`npm run build`（tsc strict）→ 29 模块 0 error。仅动前端 search。
+
 
 ## 2026-10-24 — Task 8（阶段 B）：Tauri v2 壳 + IPC 命令层
 

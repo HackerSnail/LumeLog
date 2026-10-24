@@ -41,7 +41,11 @@ const statusEl = document.createElement("div");
 statusEl.id = "status";
 
 const tabs = new TabStrip(tabsEl, {
-  onActivate: (id) => (id < 0 ? status.clear() : syncStatus(id)),
+  onActivate: (id) => {
+    hideSearchPanel(); // stale hit rows belong to the previous doc — drop the panel
+    if (id < 0) status.clear();
+    else syncStatus(id);
+  },
   onClose: (id) => void handleClose(id),
   onDirtyChanged: (id, dirty) => {
     if (id === tabs.active()?.info.docId) status.setDirty(dirty);
@@ -324,10 +328,14 @@ function openSearchFlow(): void {
     toastMsg("请先打开一个文档");
     return;
   }
-  renderSearchShell(a.info.docId);
+  if (searchBusy) {
+    toastMsg("搜索进行中，请稍候…");
+    return;
+  }
+  renderSearchShell();
 }
 
-function renderSearchShell(docId: number): void {
+function renderSearchShell(): void {
   const panel = document.getElementById("search-panel");
   if (!panel) return;
   panel.style.display = "";
@@ -350,13 +358,23 @@ function renderSearchShell(docId: number): void {
   const list = document.createElement("div");
   list.className = "search-list";
 
+  // Re-resolve the active doc on every submit: the panel persists across tab
+  // switches, so a frozen docId would scan the wrong document (round-2 fix).
   const submit = () => {
     const pattern = input.value;
-    if (pattern) void runSearch(docId, pattern, statusLine, list);
+    const a = tabs.active();
+    if (!pattern || !a) return;
+    if (searchBusy) {
+      statusLine.textContent = "搜索进行中，请稍候…";
+      return;
+    }
+    void runSearch(a.info.docId, pattern, statusLine, list);
   };
   go.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") submit();
+    // Skip Enter while an IME is composing, else confirming a Chinese candidate
+    // word fires a search on a half-typed pattern.
+    if (e.key === "Enter" && !e.isComposing) submit();
   });
 
   bar.append(input, go, statusLine, closeBtn);
@@ -370,7 +388,11 @@ async function runSearch(
   statusLine: HTMLElement,
   list: HTMLElement,
 ): Promise<void> {
-  if (searchBusy || !docStates.get(docId)) return;
+  if (searchBusy) return;
+  if (!docStates.get(docId)) {
+    statusLine.textContent = "文档已关闭";
+    return;
+  }
   searchBusy = true;
   searchRendered = 0;
   searchTotal = 0;
@@ -384,7 +406,9 @@ async function runSearch(
       caseSensitive: true,
       onBatch: (m) => appendHits(list, m, statusLine),
       onDone: (s) => {
-        statusLine.textContent = `命中 ${s.matches} 处，扫描 ${s.scannedBytes} 字节`;
+        statusLine.textContent =
+          `命中 ${s.matches} 处，扫描 ${s.scannedBytes} 字节` +
+          (s.matches > SEARCH_RENDER_CAP ? `（仅显示前 ${SEARCH_RENDER_CAP}）` : "");
       },
     });
   } catch (err) {
