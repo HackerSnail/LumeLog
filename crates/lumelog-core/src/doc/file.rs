@@ -91,6 +91,24 @@ impl DocFile {
         (self.size, self.mtime)
     }
 
+    // --- crate-internal surface for the search scanner (crate::search) ---
+
+    /// Read up to `len` raw bytes at absolute offset `pos` (short read at EOF).
+    /// Search scans the file in fixed windows through this, without decoding.
+    pub(crate) fn read_window(&mut self, pos: u64, len: usize) -> Result<Vec<u8>, CoreError> {
+        read_at(&mut self.file, pos, len)
+    }
+    /// 0-based line number containing the absolute byte offset `byte`.
+    pub(crate) fn line_at_byte(&self, byte: u64) -> usize {
+        self.index.line_at_byte(byte)
+    }
+
+    /// Raw byte range `[start, end)` of line `n` (search maps a hit's absolute
+    /// byte to a within-line offset through this).
+    pub(crate) fn line_byte_range(&self, n: usize) -> Option<(u64, u64)> {
+        self.index.line_range(n)
+    }
+
     /// Switch the display encoding. Line numbers are byte-based and stay put
     /// (spec §5.2); only the decoded text of chunks changes, so drop the cache.
     pub fn set_encoding(&mut self, label: EncodingLabel) {

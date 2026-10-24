@@ -2,6 +2,18 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 6: 搜索（分块正则 + 重叠去重 + 取消）
+
+- 文件：新增 `src/search.rs`（Mode/SearchQuery/Match/SearchStats + `search_stream`/内部 `search_with_window`/`build_regex`/`make_snippet` + 8 单测）；`doc/file.rs` 加 `pub(crate)` `read_window`/`line_at_byte`/`line_byte_range`（供扫描器按原始字节窗口读 + 字节→行换算）；`lib.rs` 挂 `pub mod search`，并把 `tests_common` 从 `#[cfg(test)]` 改 `pub mod`（criterion bench 目标把本 crate 当外部依赖编译，`cfg(test)` 关闭，需 public 才能用 `gen_log`）；新增 `benches/search.rs` + `Cargo.toml` `[[bench]] name="search"`。
+- 为什么：实现 spec §6.2/A8 超大日志流式搜索（按查询编码匹配磁盘字节）+ Review Focus 4（命中跨搜索块边界不漏不重）+ §5.2 行号与编码无关。
+- 实现决策：
+  - **字节空间扫描**：查询串先按 `q.encoding` `encode_all` 成字节（A8），在原始字节的窗口上跑 `regex::bytes` 匹配——中文 GBK 查询命中磁盘上的 GBK 字节序列（而非其 UTF-8 拼写）。Literal 把每个字节转义成 `\xHH` 并 **`.unicode(false)`**（否则 `\xC4` 被当作标量 U+00C4 匹配成 UTF-8 两字节，实测命中 0）；Regex 保留 unicode 默认，对 UTF-8 文件/ASCII 模式自然逐字节生效。
+  - **跨窗口命中不漏不重**：用 committed-region 法——每窗只提交起点落在 `[win_start, win_start+step)`（step=window-overlap）的命中，尾部 overlap 区留给下一窗完整重读；因 OVERLAP≥命中长度，跨接缝命中必在某一窗被完整匹配且仅提交一次（区别于易误删独立命中的单调去重键）。要求单条命中 ≤ OVERLAP(1024)，v1 界（日志查询短），已在模块注释记。
+  - UTF-16：编码后查询串含 `0x00` → `CoreError::Encoding("UTF-16 search unsupported in v1")`（大文件 UTF-16 搜索进 Plan 3）。
+  - **Ruling**：算法钉 WINDOW=8MB/OVERLAP=1024，但拆出内部 `search_with_window(window, overlap)` 让测试用极小窗口（8/4）在字节级精确钉 seam 不漏不重与取消，免造 >8MB 测试文件；公共 `search_stream` 仅委托常量。
+  - snippet：取所在行 `chunk_at(line,1)` 解码文本 + `char_map.byte_to_line_cu` 定命中的行内 cu16，截 ±40 cu16 去尾换行（Ruling：BMP 文本 cu16==char，astral 罕见）。
+- 验证：`cargo test -p lumelog-core` → 47 lib passed（search 8：`literal_hits_gbk_chinese`/`regex_overlap_match_not_missed_not_doubled`/`cancel_stops_early`/`line_number_correct`/`stats_counts_all_matches_gb18030_file`/`utf16_query_is_rejected`/`case_insensitive_finds_both_cases`/`regex_mode_alternation_over_utf8`）+ chunk_proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。`cargo bench --bench search`（criterion，~0.9GB 合成日志，10 samples，`search_literal_1gb`）：time **[565.99 ms 580.63 ms 595.44 ms]**（P5 目标 <10s 达标，手动记录，不卡 CI）。
+
 ## 2026-10-24 — Task 5: 保存（原子写/EOL/冲突/不可映射）
 
 - 文件：新增 `src/doc/save.rs`（EolStyle/detect_eol、OverwritePolicy、SaveOptions/SaveReport、save_text、atomic_write）；`doc/file.rs`（DocFile 加 `eol_style` 字段，open 时从首部解码窗口 `detect_eol` 记录；加 `eol_style()` getter 与 `pub(crate) note_saved`）；`doc/mod.rs` 挂 `pub mod save` + re-export。

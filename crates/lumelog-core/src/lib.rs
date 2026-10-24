@@ -4,9 +4,12 @@
 pub mod doc;
 pub mod encoding;
 pub mod error;
+pub mod search;
 
-#[cfg(test)]
-mod tests_common;
+// Deterministic log generator, shared by unit tests, integration tests and
+// benches. Kept public (not `cfg(test)`) because a criterion bench target
+// compiles this crate as an external dependency, where `cfg(test)` is off.
+pub mod tests_common;
 
 #[cfg(test)]
 #[test]
