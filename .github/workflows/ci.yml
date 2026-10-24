@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main, feat/m0-m1-editor-core]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One concurrent run per ref; cancel superseded pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain (>= 1.79)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Linux system deps for Tauri (webkit2gtk 4.1, etc.)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt update
+          sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Cache cargo (target + registry)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      # Whole workspace: lumelog-core + lumelog-can + lumelog-app (Tauri shell).
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  frontend:
+    name: Frontend (build + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci
+
+      # tsc --noEmit (strict) + vite build, then the pure-logic unit tests.
+      - name: Build (tsc --noEmit + vite)
+        run: npm run build
+
+      - name: Vitest
+        run: npx vitest run
+
+  # Benchmarks (P4/P5) are deliberately NOT in the PR gate — they build a ~1 GiB
+  # log and are timing-sensitive. Run them from the Actions UI via workflow_dispatch.
+  bench:
+    name: Benchmarks (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux system deps for Tauri
+        run: |
+          sudo apt update
+          sudo apt install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: cargo bench chunk_at + search
+        run: cargo bench -p lumelog-core --bench chunk_at; cargo bench -p lumelog-core --bench search

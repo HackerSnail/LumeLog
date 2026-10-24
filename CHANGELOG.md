@@ -2,6 +2,32 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 11：M1 集成验收 + CI + 发布物（Plan 1 收尾）
+
+**Files:**
+- Create: `docs/test-checklist.md`（三平台 P1–P6 实测记录表 + headless 复跑命令 + GUI 冒烟人工清单 + 发布物 + deferred）
+- Create: `.github/workflows/ci.yml`（三平台 matrix：`cargo test --workspace` + `cargo clippy --all-targets -D warnings` + 前端 `npm ci`/`build`/`vitest`；bench 仅 workflow_dispatch 不进 PR 门禁）
+- Create: `.github/workflows/release.yml`（tag v* 四 target 打包；publish 双重门控 `workflow_dispatch && inputs.publish=='true'` + `secrets.GITEE_TOKEN`）
+- Create: `crates/lumelog-core/src/bin/lumelog-gen.rs`（定种合成日志生成器，与 bench 同源 `tests_common::gen_log`，供 checklist P3/P5 复跑）
+- Modify: `app/src-tauri/tauri.conf.json`（`bundle.active=true`；targets nsis/msi/dmg/deb/appimage；icon 列表；`webviewInstallMode=downloadBootstrapper`；identifier `com.lumelog.app`→`com.lumelog.desktop` 避开 macOS bundle 扩展冲突）
+- Create: `app/src-tauri/icons/*`（`npx tauri icon lumelog-source.png` 生成全套 png/icns/ico）
+- Modify: `docs/claude.md`（「流式加载大文件」`[ ]`→`[x]`，加 M1 交付注）
+
+**Why:** M1 里程碑需把散在各任务的验收收敛成一张可复跑、可门禁的清单 + 三平台 CI + 可发布产物。性能门槛原值锁在 spec §2，checklist 只填实测数字不改门槛。
+
+**Rulings:**
+- **测量口径**：P3/P5 记录为 **CLI 全进程 end-to-end**（含进程启动 + 建全行索引 + 命中逐行写 stdout），比 criterion 隔离口径保守仍达标。语料须为已落盘静止文件——刚生成即测曾因读操作与脏页回写争用测得 5.9s/26.4s 虚高，落盘后复测 P3 528/654ms、P5 1513ms（16,948 命中）。
+- **图标**：ImageGen 额度不可用，改为提交手绘源图 `lumelog-source.png` + `tauri icon` 生成的平台图标全套；一次性生成脚本（pngjs 深路径依赖）与临时测量 harness 均为 scratch，验收后不入库（`pngjs` 已 `npm uninstall` 还原 package.json/lock）。
+- **publish 是 outward 副作用**：release.yml 上传 gitee releases 须维护者手动 dispatch + 批准，不落入自动流，符合 SDD「worktree 外副作用」停止点。
+- **流式索引 / GUI 级 P1·P2**：threaded doc_open + 8MB 进度 tick 与冷启动/首屏秒表测属人工 GUI 冒烟，checklist §2/§4 记 deferred（Plan 2/3）；headless P3 已证明索引本身达标，UI 联调不阻塞本计划收尾。
+
+**验证:**
+- `npx tauri build`（Windows，二次固化 identifier）成功产出：NSIS `LumeLog_0.1.0_x64-setup.exe` **2.59 MiB** + MSI `LumeLog_0.1.0_x64_en-US.msi` **3.80 MiB**（P6 门槛 ≤15MB ✓）
+- 1GB 定种语料 `gen_log(1024)` = 926 MiB / 16,777,217 行；实测填 checklist §1：P3 654ms / 峰值RSS 63MB（index-floor 64MB）· P4 p95=0.230ms · P5 1513ms（criterion 纯扫描 ~580ms）——**P3/P4/P5/P6 全部达标**
+- ci.yml / release.yml 语法自检（workflow_dispatch 就位；bench 不进 PR）；macOS/Linux 实测由 CI 产物后补测，不阻塞本计划收尾
+
+**M1 状态：** Plan 1 全 11 任务 review clean 并合并；核心引擎（编码/索引/取块解码/保存/搜索）+ CLI + Tauri 壳 + IPC + 前端编辑/只读双视图端到端打通；P4/P5/P6 门槛实测通过，P3 索引 headless 通过（UI 级 P1/P2 归后续 GUI 冒烟）。
+
 ## 2026-10-24 — Task 10：前端只读虚拟列表（ListView）+ shell mode 分流 + P4 bench
 
 **Files:**
