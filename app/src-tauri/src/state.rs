@@ -82,7 +82,6 @@ impl AppDocs {
         id
     }
 
-    #[allow(dead_code)] // consumed by the can_parse / can_decode_snippet commands (Task 3)
     pub fn get_dbc(&self, id: u64) -> Option<Arc<Database>> {
         self.dbc.lock().unwrap().get(&id).cloned()
     }

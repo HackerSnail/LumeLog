@@ -6,6 +6,15 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### Task 3. `can_parse` 流式命令 + doc_lines + can_cancel + can_decode_snippet
+**Files:**
+- Modify: `app/src-tauri/Cargo.toml`（dev-dep `tempfile = "3"`）
+- Modify: `app/src-tauri/src/commands.rs`（`doc_lines`（`DocFile` 分块→`Vec<Line>` 1-based）、`parse_frames`（`&mut dyn FrameSource` 批量+逐帧取消）、`can_parse`/`can_cancel`/`can_decode_snippet`）+ 4 单测
+- Modify: `app/src-tauri/src/lib.rs`（注册三命令）
+
+**Why:** spec §9 `can_parse` 采 `search_run` 的 Channel/批量/取消骨架（`PARSE_BATCH=512` 防 IPC 风暴、逐帧查共享 cancel 标志）；行数按 `stats()->SourceStats`。`can_decode_snippet` 支撑§7.4 “识别为报文”（选中行走单行源）。接入后剥除 Task 1/2 的 stale `#[allow(dead_code)]`。
+**验证:** `cargo test -p lumelog-app` 12 pass（新：`doc_lines_preserves_line_order`（CRLF 保序/去行尾）、`parse_frames_decodes_candump_and_counts_skips`（2 解/1 跳/1.5s→1500ms/1-based 行号）、`parse_frames_stops_on_cancel`（早停不 panic）、`frame_json_reconstructs_data_hex_for_full_payload`（dlc=64→128 hex 不越界））+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净 + `cargo check --workspace` 通过。
+
 ### Task 2. DbcStore + `dbc_import` 命令
 **Files:**
 - Modify: `app/src-tauri/src/state.rs`（`AppDocs` 加 `dbc: Mutex<HashMap<u64, Arc<Database>>>` + `next_dbc_id` + `insert_dbc`/`get_dbc` + `dbc_store_roundtrip` 单测）

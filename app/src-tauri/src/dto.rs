@@ -163,7 +163,6 @@ impl IpcError {
     /// Map a CAN engine error to a stable IPC code (spec §9). The five codes
     /// mirror `CanError::ipc_code()` — the frontend's Chinese copy table keys off
     /// exactly these strings, so a rename here MUST land in `ipc.ts` in tandem.
-    #[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
     pub fn from_can(e: CanError) -> Self {
         let (code, detail) = match &e {
             CanError::Io(_) => ("io", None),
@@ -187,7 +186,6 @@ impl IpcError {
 // ---- CAN DTOs (spec §7.4 / §9). camelCase to match ipc.ts ------------------
 
 /// One decoded signal within a frame (mirrors core `SignalValue`).
-#[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignalValueJson {
@@ -200,7 +198,6 @@ pub struct SignalValueJson {
 }
 
 /// One frame + its optional DBC decoding, streamed to the CanPanel.
-#[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameJson {
@@ -222,7 +219,6 @@ pub struct FrameJson {
 }
 
 /// A message row in the `dbc_import` summary.
-#[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbcMsgSummary {
@@ -233,7 +229,6 @@ pub struct DbcMsgSummary {
 }
 
 /// A lenient-parse warning row (from `CanError::DbcSyntax`).
-#[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbcErrorJson {
@@ -243,7 +238,6 @@ pub struct DbcErrorJson {
 }
 
 /// Outcome of `dbc_import`.
-#[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbcInfo {
@@ -253,7 +247,6 @@ pub struct DbcInfo {
 }
 
 /// Terminal `can_parse` tally.
-#[allow(dead_code)] // consumed by the can_parse / dbc_import commands (Tasks 2-3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CanStatsJson {
@@ -261,7 +254,6 @@ pub struct CanStatsJson {
     pub skipped: u64,
 }
 
-#[allow(dead_code)] // consumed by the can_parse command (Task 3)
 fn signal_value_json(s: SignalValue) -> SignalValueJson {
     SignalValueJson {
         name: s.name,
@@ -275,7 +267,6 @@ fn signal_value_json(s: SignalValue) -> SignalValueJson {
 /// Build the wire frame: hex id, ms timestamp, uppercase payload hex, and — when
 /// a DBC message matches by id — its decoded signals. Never panics; a frame with
 /// no matching message just carries its raw hex (`signals: []`, `msg_name: None`).
-#[allow(dead_code)] // consumed by the can_parse command (Task 3)
 pub fn frame_json(f: &Frame, db: Option<&Database>) -> FrameJson {
     let n = f.dlc as usize;
     let data_hex = f.data[..n]

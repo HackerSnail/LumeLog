@@ -152,7 +152,7 @@ Expected: FAIL（未定义）
 
 - [ ] **Step 3: 实现 can_parse / can_cancel / can_decode_snippet 命令**
 
-`can_parse`：`let (req_id, cancel) = state.begin_search();`；取 doc（miss → `end_search` + `unknown_doc`）；解析 `source_kind`（`SourceKind::from_str`，`regex` 且 `regex=None` → `bad_regex`）构造 `Box<dyn FrameSource>`（`RegexSource::new(lines, pattern).map_err(from_can)?`，其余 `::new(lines)`）；`db = dbc_id.and_then(|i| state.get_dbc(i))`；跑 `parse_frames`，`emit` 里 `on_batch.send(...)`（忽略 send 错误=前端已断开，视为取消），`cancelled` 里读 `cancel` 标志；`state.end_search(req_id)`；`on_done.send(CanStatsJson{decoded,skipped})`；`Ok(req_id)`。`can_cancel` 调 `state.cancel(request_id)`（miss → `unknown_request`）。`can_decode_snippet`：`kind = source_kind.map(SourceKind::from_str).unwrap_or(Candump)`；把 `text` 单行喂对应源，取第一个 `Frame`，无 → `IpcError::new("source_format","无法从选中文本解析报文")`；有 → `frame_json(&f, dbc_id.and_then(get_dbc))`。
+`can_parse`：`let (req_id, cancel) = state.begin_search();`；取 doc（miss → `end_search` + `unknown_doc`）；`doc_lines(&mut doc)` 取 `Vec<Line>`；按 `source_kind` 字符串匹配（`"candump"|"asc"|"regex"|other→source_format`）选源并 `Box<dyn FrameSource>`（`regex` 且 `regex=None` → `bad_regex`；`RegexSource::new(lines.into_iter(), pat).map_err(from_can)?`）；`db = dbc_id.and_then(|i| state.get_dbc(i))`；跑 `parse_frames`，`emit` 里 `on_batch.send(...)`（忽略 send 错误=前端已断开），`cancelled` 里读 `cancel` 标志；`state.end_search(req_id)`；`on_done.send(CanStatsJson{decoded,skipped})`；`Ok(req_id)`。`can_cancel` 调 `state.cancel(request_id)`（miss → `unknown_request`）。`can_decode_snippet`：`kind = source_kind.unwrap_or("candump")`；把 `text` 作单行 `(1, text)` 喂对应源（仅 candump/asc），取第一个 `Frame`，无 → `IpcError::new("source_format",...)`；有 → `frame_json(&f, dbc_id.and_then(get_dbc).as_deref())`。
 
 - [ ] **Step 4: 注册 handler + 全绿**
 

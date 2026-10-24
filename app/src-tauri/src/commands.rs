@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 
 use lumelog_can::dbc::{parse_lenient, ParseOutcome};
 use lumelog_can::error::CanError;
+use lumelog_can::source::{AscSource, CandumpSource, FrameSource, Line, RegexSource};
 use lumelog_core::doc::{save_text, DocFile, EolStyle, OverwritePolicy, SaveOptions};
 use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::search::{search_stream, Mode, SearchQuery};
@@ -393,6 +394,182 @@ pub fn dbc_import(
     })
 }
 
+/// Frames flushed to the front end per `can_parse` `on_batch` message (spec §9
+/// "每 ≤2ms 或 4096 条聚合" — bounded well under a storm; tuned for smooth table fill).
+const PARSE_BATCH: usize = 512;
+
+/// Read the whole document into `(1-based line number, text)` pairs for a
+/// `FrameSource`. v1 collects into a Vec (bench logs are moderate); the §3
+/// "never hand the whole file over" invariant holds because only line TEXT (not
+/// the raw file) crosses IPC, and CanPanel targets M2-sized logs.
+fn doc_lines(doc: &mut DocFile) -> Result<Vec<Line>, IpcError> {
+    let total = doc.line_count();
+    let mut out: Vec<Line> = Vec::with_capacity(total.min(MAX_CHUNK_LINES as usize * 4));
+    let mut start = 0usize;
+    while start < total {
+        let count = (MAX_CHUNK_LINES as usize).min(total - start);
+        let chunk = doc.chunk_at(start, count).map_err(IpcError::from_core)?;
+        let base = chunk.start_line; // 0-based index of chunk.text's first line
+        let mut body = chunk.text.as_str();
+        // chunk.text keeps every terminator; drop exactly the last one so the
+        // split yields `count` lines, not a trailing empty one.
+        if let Some(b) = body.strip_suffix("\r\n") {
+            body = b;
+        } else if let Some(b) = body.strip_suffix('\n') {
+            body = b;
+        }
+        for (i, raw) in body.split('\n').enumerate() {
+            let text = raw.strip_suffix('\r').unwrap_or(raw).to_string();
+            out.push(((base + i) as u64 + 1, text));
+        }
+        start += count;
+    }
+    Ok(out)
+}
+
+/// Drain a source into batched `FrameJson`, checking `cancelled` per frame and
+/// flushing at most every `PARSE_BATCH` frames. Returns the source's tallies.
+fn parse_frames(
+    src: &mut dyn FrameSource,
+    db: Option<&lumelog_can::dbc::Database>,
+    emit: &mut dyn FnMut(Vec<FrameJson>),
+    cancelled: &dyn Fn() -> bool,
+) -> (u64, u64) {
+    let mut batch: Vec<FrameJson> = Vec::new();
+    while let Some(f) = src.next_frame() {
+        if cancelled() {
+            break;
+        }
+        batch.push(frame_json(&f, db));
+        if batch.len() >= PARSE_BATCH {
+            emit(std::mem::take(&mut batch));
+        }
+    }
+    if !batch.is_empty() {
+        emit(batch);
+    }
+    let s = src.stats();
+    (s.decoded, s.skipped)
+}
+
+/// Stream a CAN decode of `doc_id` over `on_batch` (spec §9 `can_parse`). Returns
+/// the job id used to `can_cancel`. Batches cap IPC traffic; the cancel flag is
+/// checked per frame so a half-million-frame log stops promptly.
+#[tauri::command]
+pub fn can_parse(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+    dbc_id: Option<u64>,
+    source_kind: String,
+    regex: Option<String>,
+    on_batch: Channel<Vec<FrameJson>>,
+    on_done: Channel<CanStatsJson>,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    let mut doc = match doc_arc.lock() {
+        Ok(d) => d,
+        Err(_) => return Err(fail(IpcError::new("io", "document mutex poisoned"))),
+    };
+    let lines = match doc_lines(&mut doc) {
+        Ok(l) => l,
+        Err(e) => return Err(fail(e)),
+    };
+    let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
+    let db = db_arc.as_deref();
+    let mut src: Box<dyn FrameSource> = match source_kind.as_str() {
+        "candump" => Box::new(CandumpSource::new(lines.into_iter())),
+        "asc" => Box::new(AscSource::new(lines.into_iter())),
+        "regex" => {
+            let pat = match &regex {
+                Some(p) => p,
+                None => {
+                    return Err(fail(IpcError::new(
+                        "bad_regex",
+                        "regex source requires a pattern",
+                    )))
+                }
+            };
+            match RegexSource::new(lines.into_iter(), pat) {
+                Ok(s) => Box::new(s),
+                Err(e) => return Err(fail(IpcError::from_can(e))),
+            }
+        }
+        other => {
+            return Err(fail(IpcError::new(
+                "source_format",
+                format!("unknown source kind '{other}'"),
+            )))
+        }
+    };
+    let mut emit = |batch: Vec<FrameJson>| {
+        // A send error means the front end detached — the per-frame `cancelled`
+        // check will see it next tick via the shared flag staying unset; we keep
+        // draining harmlessly rather than abort the command.
+        let _ = on_batch.send(batch);
+    };
+    let cancelled = || cancel.load(Ordering::Relaxed);
+    let (decoded, skipped) = parse_frames(&mut *src, db, &mut emit, &cancelled);
+    state.end_search(req_id);
+    let _ = on_done.send(CanStatsJson { decoded, skipped });
+    Ok(req_id)
+}
+
+/// Ask an in-flight `can_parse` to stop (shares the generic cancel registry with
+/// `search_cancel`).
+#[tauri::command]
+pub fn can_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
+/// Decode a single editor selection as a frame (spec §7.4 "识别为报文"). The text
+/// is fed through the chosen source; the first frame it yields is decoded. A
+/// selection the source cannot parse returns `source_format`, never a panic.
+#[tauri::command]
+pub fn can_decode_snippet(
+    state: tauri::State<'_, AppDocs>,
+    text: String,
+    dbc_id: Option<u64>,
+    source_kind: Option<String>,
+) -> Result<FrameJson, IpcError> {
+    let kind = source_kind.unwrap_or_else(|| "candump".to_string());
+    let lines = vec![(1u64, text)];
+    let mut src: Box<dyn FrameSource> = match kind.as_str() {
+        "candump" => Box::new(CandumpSource::new(lines.into_iter())),
+        "asc" => Box::new(AscSource::new(lines.into_iter())),
+        other => {
+            return Err(IpcError::new(
+                "source_format",
+                format!("snippet decode supports candump/asc, not '{other}'"),
+            ))
+        }
+    };
+    match src.next_frame() {
+        Some(f) => {
+            let db = dbc_id.and_then(|i| state.get_dbc(i));
+            Ok(frame_json(&f, db.as_deref()))
+        }
+        None => Err(IpcError::new(
+            "source_format",
+            "无法从选中文本解析报文行",
+        )),
+    }
+}
+
 fn eol_str(e: EolStyle) -> String {
     match e {
         EolStyle::Lf => "lf".to_string(),
@@ -458,5 +635,92 @@ mod can_import_tests {
     fn dbc_import_missing_file_is_io_error() {
         let err = import_dbc_info(std::path::Path::new("Z:/no-such-file.dbc")).unwrap_err();
         assert_eq!(err.code, "io");
+    }
+}
+
+#[cfg(test)]
+mod can_parse_tests {
+    use super::*;
+    use lumelog_can::frame::Frame;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn doc_of(content: &str) -> (NamedTempFile, DocFile) {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let doc = DocFile::open(f.path(), SIZE_LIMIT).unwrap();
+        (f, doc)
+    }
+
+    #[test]
+    fn doc_lines_preserves_line_order() {
+        let (_keep, mut doc) = doc_of("alpha\r\nbravo\r\ncharlie\r\n");
+        let lines = doc_lines(&mut doc).unwrap();
+        assert_eq!(lines.len(), 3, "three \r\n-terminated lines");
+        assert_eq!(lines[0], (1, "alpha".to_string()));
+        assert_eq!(lines[1], (2, "bravo".to_string()));
+        assert_eq!(lines[2], (3, "charlie".to_string()));
+    }
+
+    #[test]
+    fn parse_frames_decodes_candump_and_counts_skips() {
+        let content = " (1.5) can0 100#0000960012340000\nnot-a-frame\ncan0 100#DEADBEEF\n";
+        let (_k, mut doc) = doc_of(content);
+        let lines = doc_lines(&mut doc).unwrap();
+        let mut src = CandumpSource::new(lines.into_iter());
+        let mut got: Vec<FrameJson> = Vec::new();
+        let (decoded, skipped) = parse_frames(&mut src, None, &mut |b| got.extend(b), &|| false);
+        assert_eq!(decoded, 2, "two frame lines");
+        assert_eq!(skipped, 1, "the garbage line is skipped");
+        assert!(got.iter().all(|f| f.can_id == 0x100));
+        assert_eq!(got[0].timestamp_ms, Some(1500.0), "1.5 s -> 1500 ms");
+        assert_eq!(got[0].line_number, 1, "1-based source line");
+    }
+
+    #[test]
+    fn parse_frames_stops_on_cancel() {
+        let mut content = String::new();
+        for i in 0..20 {
+            content.push_str(&format!("can0 100#{:02X}DEADBEEF\n", i));
+        }
+        let (_k, mut doc) = doc_of(&content);
+        let lines = doc_lines(&mut doc).unwrap();
+        let mut src = CandumpSource::new(lines.into_iter());
+        let seen = std::cell::Cell::new(0u32);
+        let mut got: Vec<FrameJson> = Vec::new();
+        parse_frames(
+            &mut src,
+            None,
+            &mut |b| got.extend(b),
+            &|| {
+                let c = seen.get();
+                seen.set(c + 1);
+                c >= 3
+            },
+        );
+        assert!(got.len() < 20, "cancel stops early (got {})", got.len());
+        assert!(!got.is_empty(), "at least one frame emitted before cancel");
+    }
+
+    #[test]
+    fn frame_json_reconstructs_data_hex_for_full_payload() {
+        let mut data = [0u8; 64];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let f = Frame {
+            line_number: 1,
+            timestamp: None,
+            channel: 0,
+            can_id: 0x7AA,
+            dlc: 64,
+            data,
+            flags: Default::default(),
+        };
+        let j = frame_json(&f, None);
+        assert_eq!(j.dlc, 64);
+        assert_eq!(j.data_hex.len(), 128, "64 bytes -> 128 hex chars, no panic");
+        assert!(j.data_hex.starts_with("000102"));
     }
 }
