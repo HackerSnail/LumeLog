@@ -1,8 +1,9 @@
 //! App wiring: layout, open/save/encoding/search flows over the Task 8 IPC.
-//! Edit mode is ≤200MB (spec §4.3/A1); oversized files are refused (Task 10
-//! adds the read-only virtual list). GUI acceptance (`tauri dev`, GBK no-mojibake
-//! roundtrip, drag-drop, recent-20) is the Task 11 pass; the logic below is
-//! headless-checked by `tsc --noEmit` (strict) + `vitest`.
+//! `doc_open` returns `mode` (spec §4.3/A1): `"edit"` (≤200MB) mounts CodeMirror,
+//! `"readonly"` (>200MB) mounts the virtual list (Task 10). GUI acceptance
+//! (`tauri dev`, GBK no-mojibake roundtrip, drag-drop, recent-20, 1GB list
+//! scroll) is the Task 11 pass; the logic below is headless-checked by
+//! `tsc --noEmit` (strict) + `vitest`.
 
 import { open, ask } from "@tauri-apps/plugin-dialog";
 import {
@@ -11,28 +12,34 @@ import {
   docSave,
   docSetEncoding,
   loadAllText,
+  loadWindow,
   searchRun,
   IpcError,
   type DocInfo,
+  type IndexProgress,
   type MatchJson,
 } from "./ipc";
 import { openEditable, type EditorHandle } from "./editor";
+import { ListView } from "./listview";
 import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
 import type { ModeChoice } from "./language";
-
-/** spec §4.3 / A1: ≤200MB edits in CodeMirror, larger is read-only (Task 10). */
-const EDIT_THRESHOLD = 200 * 1024 * 1024;
 
 interface DocState {
   path: string;
   encoding: string;
   eol: string;
   totalLines: number;
+  mode: "edit" | "readonly";
 }
 
 const docStates = new Map<number, DocState>();
+/** Rich, kind-specific handles keyed by doc id (the tab strip holds the views). */
+const editors = new Map<number, EditorHandle>();
+const lists = new Map<number, ListView>();
+/** Lines indexed so far per doc; drives the list "待索引" placeholder (Task 11). */
+const indexed = new Map<number, number>();
 let busy = false;
 
 const tabsEl = document.createElement("div");
@@ -55,15 +62,16 @@ const status = new Statusbar(statusEl, {
   onEncoding: (label) => void changeEncoding(label),
   onEol: (eol) => {
     const a = tabs.active();
-    if (a) {
-      a.handle.setEol(eol.toUpperCase());
+    const handle = a && editors.get(a.info.docId);
+    if (a && handle) {
+      handle.setEol(eol.toUpperCase());
       docStates.get(a.info.docId)!.eol = eol.toUpperCase();
       tabs.refreshDirty(a.info.docId);
     }
   },
   onMode: (mode) => {
     const a = tabs.active();
-    if (a) applyMode(a.info.docId, a.handle, mode);
+    if (a) applyMode(a.info.docId, mode);
   },
 });
 
@@ -105,15 +113,10 @@ async function openPath(path: string): Promise<void> {
   if (busy) return;
   setBusy(true);
   try {
-    const info = await docOpen(path, () => {});
-    if (info.size > EDIT_THRESHOLD) {
-      // Release the shell-side doc we just opened to index it (I5), then tell
-      // the user the read-only view is not available yet (Task 10).
-      void docClose(info.docId);
-      toastMsg("该文件超过 200MB，只读大文件视图将在后续版本提供（当前仅支持编辑模式）");
-      return;
-    }
-    await mountDoc(info, path);
+    const info = await docOpen(path, onIndexProgress);
+    // The shell owns the ≤200MB split (spec §4.3/A1) via `DocInfo.mode`.
+    if (info.mode === "readonly") mountList(info, path);
+    else await mountDoc(info, path);
   } catch (err) {
     reportError(err);
   } finally {
@@ -121,8 +124,17 @@ async function openPath(path: string): Promise<void> {
   }
 }
 
+/** Index progress tick. Sync indexing (v1) emits one `done`; Task 11 streams it. */
+function onIndexProgress(p: IndexProgress): void {
+  if (!p.done) return;
+  const ds = docStates.get(p.docId);
+  if (ds) indexed.set(p.docId, ds.totalLines);
+  lists.get(p.docId)?.refresh();
+}
+
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
   const total = info.totalLines ?? info.lineCountEstimate;
+  indexed.set(info.docId, total);
   const handle = await openEditable({
     parent: tabsEl,
     info,
@@ -137,9 +149,33 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
     encoding: info.encoding,
     eol: info.eol || "LF",
     totalLines: total,
+    mode: "edit",
   });
+  editors.set(info.docId, handle);
   tabs.add({ docId: info.docId, path }, handle);
   trackCursor(handle);
+  syncStatus(info.docId);
+}
+
+/** Mount the read-only virtual list (spec §4.3). No full load — windows on demand. */
+function mountList(info: DocInfo, path: string): void {
+  const total = info.totalLines ?? info.lineCountEstimate;
+  indexed.set(info.docId, total);
+  docStates.set(info.docId, {
+    path,
+    encoding: info.encoding,
+    eol: info.eol || "LF",
+    totalLines: total,
+    mode: "readonly",
+  });
+  const list = new ListView({
+    docId: info.docId,
+    totalLines: () => docStates.get(info.docId)?.totalLines ?? 0,
+    indexedLines: () => indexed.get(info.docId) ?? docStates.get(info.docId)?.totalLines ?? 0,
+    loadWindow: (start, count) => loadWindow(info.docId, start, count),
+  });
+  lists.set(info.docId, list);
+  tabs.add({ docId: info.docId, path }, list);
   syncStatus(info.docId);
 }
 
@@ -160,19 +196,24 @@ function updatePos(handle: EditorHandle): void {
 async function saveActive(): Promise<void> {
   const a = tabs.active();
   if (!a || busy) return;
+  const handle = editors.get(a.info.docId);
+  if (!handle) {
+    toastMsg("只读视图不支持编辑或保存");
+    return;
+  }
   const ds = docStates.get(a.info.docId);
   if (!ds) return;
   setBusy(true);
   try {
     const report = await docSave({
       docId: a.info.docId,
-      text: a.handle.getText(),
+      text: handle.getText(),
       path: ds.path,
       encoding: ds.encoding,
       eol: ds.eol,
       force: false,
     });
-    afterSave(a.info.docId, a.handle, ds, report.replaceCount, report.conflict, false);
+    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false);
   } catch (err) {
     if (
       err instanceof IpcError &&
@@ -192,13 +233,13 @@ async function saveActive(): Promise<void> {
         try {
           const report = await docSave({
             docId: a.info.docId,
-            text: a.handle.getText(),
+            text: handle.getText(),
             path: ds.path,
             encoding: ds.encoding,
             eol: ds.eol,
             force: true,
           });
-          afterSave(a.info.docId, a.handle, ds, report.replaceCount, report.conflict, true);
+          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true);
         } catch (err2) {
           reportError(err2);
         } finally {
@@ -244,9 +285,12 @@ function afterSave(
 async function changeEncoding(label: string): Promise<void> {
   const a = tabs.active();
   if (!a || busy) return;
-  const ds = docStates.get(a.info.docId);
+  const docId = a.info.docId;
+  const ds = docStates.get(docId);
   if (!ds || ds.encoding === label) return;
-  if (a.handle.isDirty()) {
+  const handle = editors.get(docId); // undefined for a read-only doc
+  const list = lists.get(docId);
+  if (handle && handle.isDirty()) {
     const keep = await ask("切换编码会丢弃未保存的改动，是否继续？", {
       title: "未保存改动",
       kind: "warning",
@@ -260,13 +304,18 @@ async function changeEncoding(label: string): Promise<void> {
   }
   setBusy(true);
   try {
-    const updated = await docSetEncoding(a.info.docId, label, ds.totalLines, () => {});
-    const { text } = await loadAllText(a.info.docId, ds.totalLines);
-    a.handle.replaceText(text);
+    // Re-decode shell-side (clears the chunk cache); the returned encoding is truth.
+    const updated = await docSetEncoding(docId, label, ds.totalLines, () => {});
+    if (handle) {
+      const { text } = await loadAllText(docId, ds.totalLines);
+      handle.replaceText(text);
+    } else if (list) {
+      list.invalidate(); // drop stale-decoded windows; refetch on next paint
+    }
     ds.encoding = updated.encoding;
     ds.eol = updated.eol || ds.eol;
     status.setEncoding(updated.encoding);
-    tabs.refreshDirty(a.info.docId);
+    if (handle) tabs.refreshDirty(docId);
   } catch (err) {
     reportError(err);
     status.setEncoding(ds.encoding);
@@ -275,17 +324,18 @@ async function changeEncoding(label: string): Promise<void> {
   }
 }
 
-function applyMode(docId: number, handle: EditorHandle, mode: ModeChoice): void {
+function applyMode(docId: number, mode: ModeChoice): void {
   const ds = docStates.get(docId);
-  if (!ds) return;
+  const handle = editors.get(docId); // read-only docs have no syntax mode
+  if (!ds || !handle) return;
   const ext = mode === "auto" ? extOf(ds.path) : mode === "plain" ? "" : mode;
   handle.setMode(ext); // reconfigure language only — keeps undo + scroll (I2)
 }
 
 async function handleClose(docId: number): Promise<void> {
-  const handle = tabs.get(docId);
-  if (!handle) return;
-  if (handle.isDirty()) {
+  const view = tabs.get(docId);
+  if (!view) return;
+  if (view.isDirty()) {
     const go = await ask("文档有未保存改动，确定关闭？", {
       title: "关闭文档",
       kind: "warning",
@@ -296,6 +346,9 @@ async function handleClose(docId: number): Promise<void> {
   }
   tabs.remove(docId);
   docStates.delete(docId);
+  editors.delete(docId);
+  lists.delete(docId);
+  indexed.delete(docId);
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
 }
 
@@ -304,11 +357,11 @@ function syncStatus(docId: number): void {
   if (!ds) return;
   status.setEncoding(ds.encoding);
   status.setEol(ds.eol);
-  const handle = tabs.get(docId);
-  if (handle) {
-    status.setDirty(handle.isDirty());
-    updatePos(handle);
-  }
+  const view = tabs.get(docId);
+  if (view) status.setDirty(view.isDirty());
+  const handle = editors.get(docId); // line/col only for editable docs
+  if (handle) updatePos(handle);
+  else status.setReadonly(ds.totalLines);
 }
 
 // ---- Search (spec §6.2 read-only hit list; Ctrl+Shift+F). Task 9 scope is
@@ -445,14 +498,16 @@ function hideSearchPanel(): void {
 function jumpToLine(zeroBasedLine: number): void {
   const a = tabs.active();
   if (!a) return;
-  const st = a.handle.view.state;
-  const line = Math.min(Math.max(1, zeroBasedLine + 1), st.doc.lines);
-  const pos = st.doc.line(line).from;
-  a.handle.view.dispatch({
-    selection: { anchor: pos },
-    scrollIntoView: true,
-  });
-  a.handle.view.focus();
+  const handle = editors.get(a.info.docId);
+  if (handle) {
+    const st = handle.view.state;
+    const line = Math.min(Math.max(1, zeroBasedLine + 1), st.doc.lines);
+    const pos = st.doc.line(line).from;
+    handle.view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    handle.view.focus();
+    return;
+  }
+  lists.get(a.info.docId)?.scrollToLine(zeroBasedLine); // read-only list
 }
 
 function reportError(err: unknown): void {

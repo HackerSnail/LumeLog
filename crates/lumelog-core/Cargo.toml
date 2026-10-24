@@ -22,3 +22,7 @@ harness = false
 [[bench]]
 name = "search"
 harness = false
+
+[[bench]]
+name = "chunk_at"
+harness = false

@@ -30,6 +30,8 @@ import { modeForExtension } from "./language";
 export interface EditorHandle {
   readonly docId: number;
   readonly view: EditorView;
+  /** Same element as `view.dom` — lets `TabStrip` treat editors/lists uniformly. */
+  readonly root: HTMLElement;
   getText(): string;
   isDirty(): boolean;
   markSaved(): void;
@@ -86,6 +88,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   return {
     docId: opts.info.docId,
     view,
+    root: view.dom,
     getText: () => view.state.doc.toString(),
     isDirty: () => dirty,
     markSaved: () => {

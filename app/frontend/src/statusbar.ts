@@ -91,6 +91,12 @@ export class Statusbar {
     this.posEl.textContent = `行 ${line}/${lines} · 列 ${col}`;
   }
 
+  /** Read-only view: no cursor, so show the line tally instead of a position. */
+  setReadonly(lines: number): void {
+    this.setDirty(false);
+    this.posEl.textContent = `只读 · 共 ${lines} 行`;
+  }
+
   clear(): void {
     this.setDirty(false);
     this.posEl.textContent = "";

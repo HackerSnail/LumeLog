@@ -1,8 +1,17 @@
 //! Document tabs (spec §8: tabbed editing, dirty dot, recent files). Owns the
-//! tab strip DOM and the id→handle map; delegates rendering of each document to
-//! the `EditorHandle` from `editor.ts`. The app layer drives open/close/switch.
+//! tab strip DOM and the id→view map; each document renders through a `TabView`
+//! (either the CodeMirror `EditorHandle` or the read-only `ListView`). The app
+//! layer drives open/close/switch and holds the rich, kind-specific handles.
 
-import type { EditorHandle } from "./editor";
+/** The minimal surface the tab strip needs from any document view. */
+export interface TabView {
+  readonly docId: number;
+  /** Root element the strip shows/hides as the active tab changes. */
+  readonly root: HTMLElement;
+  isDirty(): boolean;
+  focus(): void;
+  destroy(): void;
+}
 
 export interface TabInfo {
   docId: number;
@@ -17,7 +26,7 @@ export interface TabsCallbacks {
 
 interface TabEntry {
   info: TabInfo;
-  handle: EditorHandle;
+  view: TabView;
   el: HTMLElement;
   dot: HTMLElement;
 }
@@ -39,8 +48,8 @@ export class TabStrip {
     host.prepend(this.strip);
   }
 
-  /** Register a document; makes it active and shows its editor. */
-  add(info: TabInfo, handle: EditorHandle): void {
+  /** Register a document; makes it active and shows its view. */
+  add(info: TabInfo, view: TabView): void {
     const el = document.createElement("div");
     el.className = "tab";
     el.title = info.path;
@@ -55,13 +64,13 @@ export class TabStrip {
       if ((e as MouseEvent).button === 1) this.requestClose(info.docId);
     });
 
-    const entry: TabEntry = { info, handle, el, dot };
+    const entry: TabEntry = { info, view, el, dot };
     this.entries.set(info.docId, entry);
     this.order.push(info.docId);
     this.strip.append(el);
-    // The editor view lives in the host, hidden until activated.
-    handle.view.dom.style.display = "none";
-    this.host.append(handle.view.dom);
+    // The view lives in the host, hidden until activated.
+    view.root.style.display = "none";
+    this.host.append(view.root);
     this.activate(info.docId);
   }
 
@@ -71,10 +80,10 @@ export class TabStrip {
     for (const [id, entry] of this.entries) {
       const on = id === docId;
       entry.el.classList.toggle("active", on);
-      entry.handle.view.dom.style.display = on ? "" : "none";
+      entry.view.root.style.display = on ? "" : "none";
     }
     this.activeId = docId;
-    target.handle.focus();
+    target.view.focus();
     this.cb.onActivate?.(docId);
   }
 
@@ -82,18 +91,18 @@ export class TabStrip {
     return this.activeId != null ? this.entries.get(this.activeId) ?? null : null;
   }
 
-  /** Reflect the editor's dirty flag onto the tab dot. */
+  /** Reflect the view's dirty flag onto the tab dot. */
   refreshDirty(docId: number): void {
     const e = this.entries.get(docId);
     if (!e) return;
-    const dirty = e.handle.isDirty();
+    const dirty = e.view.isDirty();
     e.dot.textContent = dirty ? "●" : ""; // no CSS dependency (I1)
     e.dot.classList.toggle("visible", dirty);
     this.cb.onDirtyChanged?.(docId, dirty);
   }
 
-  get(docId: number): EditorHandle | undefined {
-    return this.entries.get(docId)?.handle;
+  get(docId: number): TabView | undefined {
+    return this.entries.get(docId)?.view;
   }
 
   /** Ask the app to close (app decides on save-if-dirty). */
@@ -105,7 +114,7 @@ export class TabStrip {
   remove(docId: number): void {
     const e = this.entries.get(docId);
     if (!e) return;
-    e.handle.destroy();
+    e.view.destroy();
     e.el.remove();
     this.entries.delete(docId);
     const oi = this.order.indexOf(docId);

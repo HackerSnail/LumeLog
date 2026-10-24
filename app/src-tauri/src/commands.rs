@@ -20,6 +20,10 @@ use crate::state::AppDocs;
 /// the `DocFile::open` size gate and the byte-identical `file_size > u32::MAX`
 /// check inside `LineIndexBuilder::finish` (`CoreError::TooLarge`).
 const SIZE_LIMIT: u64 = u32::MAX as u64;
+/// Edit/read-only split (spec §4.3/A1): files up to 200 MiB mount in CodeMirror;
+/// larger open in the read-only virtual list (Task 10). The shell owns this
+/// threshold and returns it as `DocInfo.mode` so the front end never re-derives it.
+const EDIT_THRESHOLD: u64 = 200 * 1024 * 1024;
 /// Matches flushed to the front end per `on_batch` message.
 const SEARCH_BATCH: usize = 200;
 
@@ -59,6 +63,7 @@ pub fn doc_open(
         mtime_millis,
         encoding,
         eol,
+        mode: mode_str(size),
         line_count_estimate: lines,
         total_lines: Some(lines),
     };
@@ -288,6 +293,7 @@ pub fn doc_set_encoding(
             .as_millis() as u64,
         encoding: doc.encoding().as_str().to_string(),
         eol: eol_str(doc.eol_style()),
+        mode: mode_str(doc.size()),
         line_count_estimate: doc.line_count() as u64,
         total_lines: Some(doc.line_count() as u64),
     })
@@ -313,6 +319,14 @@ fn eol_str(e: EolStyle) -> String {
         EolStyle::Lf => "lf".to_string(),
         EolStyle::Crlf => "crlf".to_string(),
         EolStyle::Mixed => "mixed".to_string(),
+    }
+}
+
+fn mode_str(size: u64) -> String {
+    if size <= EDIT_THRESHOLD {
+        "edit".to_string()
+    } else {
+        "readonly".to_string()
     }
 }
 

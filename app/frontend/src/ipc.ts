@@ -13,6 +13,8 @@ export interface DocInfo {
   encoding: string;
   /** Dominant EOL the core detected on open — save back with this (spec §4.4). */
   eol: string;
+  /** Which view to mount: `"edit"` (≤200MB) or `"readonly"` (virtual list). */
+  mode: string;
   lineCountEstimate: number;
   totalLines: number | null;
 }
@@ -284,4 +286,30 @@ export function docSetEncoding(
 /** Release the shell-side document (closes handle + frees index/cache, I5). */
 export function docClose(docId: number): Promise<void> {
   return call<void>("doc_close", { docId });
+}
+
+/**
+ * Fetch one contiguous window `[start, start+count)` of decoded lines for the
+ * read-only virtual list (spec §4.3). Unlike `loadAllText` this is bounded to
+ * the requested window — the whole file is never resident. `first` is the
+ * absolute line index of `lines[0]` (the shell echoes `startLine`).
+ */
+export async function loadWindow(
+  docId: number,
+  start: number,
+  count: number,
+): Promise<{ first: number; lines: string[]; invalidCount: number }> {
+  const ch = new Channel<ChunkPayload>();
+  let payload: ChunkPayload | null = null;
+  ch.onmessage = (c) => {
+    payload = c;
+  };
+  await docChunk(docId, start, count, ch);
+  if (!payload) return { first: start, lines: [], invalidCount: 0 };
+  const p = payload as ChunkPayload;
+  // The core joins logical lines with `\n`; a trailing newline would add a phantom
+  // empty line, so drop only a single trailing one before splitting.
+  const body = p.text.endsWith("\n") ? p.text.slice(0, -1) : p.text;
+  const lines = count === 0 ? [] : body.split("\n");
+  return { first: p.startLine, lines, invalidCount: p.invalidCount };
 }

@@ -20,6 +20,10 @@ pub struct DocInfo {
     /// front end MUST save back with this value (unless the user overrides it)
     /// so a CRLF bench log is not silently rewritten to LF.
     pub eol: String,
+    /// Which view the front end should mount: `"edit"` (CodeMirror, ≤200MB)
+    /// or `"readonly"` (virtual list, >200MB). Single source for the §4.3/A1
+    /// threshold so the shell and front end cannot drift apart.
+    pub mode: String,
     pub line_count_estimate: u64,
     pub total_lines: Option<u64>,
 }

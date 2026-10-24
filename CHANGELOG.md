@@ -2,6 +2,33 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 10：前端只读虚拟列表（ListView）+ shell mode 分流 + P4 bench
+
+**Files:**
+- Modify: `app/src-tauri/src/dto.rs`（`DocInfo` 新增 `mode: String`）
+- Modify: `app/src-tauri/src/commands.rs`（`EDIT_THRESHOLD = 200MB` + `mode_str()` helper；`doc_open`/`doc_set_encoding` 返回填 `mode`）
+- Modify: `app/frontend/src/ipc.ts`（`DocInfo.mode`；新增 `loadWindow(docId,start,count)`——单次 Channel + `doc_chunk`，处理尾 `\n` phantom 行、`count===0` 空窗特判）
+- Create: `app/frontend/src/listview.ts`（`ListView implements TabView` + 纯函数 `visibleWindow`）
+- Create: `app/frontend/src/listview.test.ts`（5 个 `visibleWindow` 单测）
+- Modify: `app/frontend/src/tabs.ts`（泛化：`TabEntry.handle:EditorHandle` → `view: TabView`，新增 `TabView` 接口 `{docId, root, isDirty(), focus(), destroy()}`）
+- Modify: `app/frontend/src/editor.ts`（`EditorHandle` 增加 `root: HTMLElement` = `view.dom`，与 `TabView` 契约对齐）
+- Modify: `app/frontend/src/statusbar.ts`（新增 `setReadonly(lines)` → `只读 · 共 N 行`）
+- Modify: `app/frontend/src/main.ts`（按 `info.mode` 分流 mountList/mountDoc；`editors`/`lists`/`indexed` 三 map；saveActive/changeEncoding/applyMode/handleClose/syncStatus/jumpToLine 全部双视图分支）
+- Create: `crates/lumelog-core/benches/chunk_at.rs` + Cargo.toml `[[bench]]`（P4 bench）
+
+**Why:** spec §4.3/A1——>200MB 文档不进 CodeMirror，走固定行高 20px 的虚拟列表，按需 `doc_chunk` 取窗口（±200 行 overscan、rAF 节流、seq 防并发、64MB 侧 LRU 由 core 承担）。mode 由 shell 单点决定（`mode_str(size)`），前端不再各自持阈值，避免壳/前端漂移。
+
+**Ruling:** 流式索引（开线程 + 每 8MB 进度 tick）依 Task 8 Ruling 归 Task 11 GUI 联调；Task 10 保持同步索引，但 IPC Channel 面（`on_index_progress`）与前端 `indexedLines` + "（待索引…）" 占位路径已就绪，Task 11 只需 shell 侧改线程即可接通。
+
+**验证:**
+- `npx vitest run`：10 passed（ipc.test 5 + listview.test 5）
+- `npm run build`（tsc --noEmit strict + vite）：30 modules，干净通过
+- `cargo clippy -p lumelog-app --all-targets -- -D warnings`：APP_OK
+- `cargo test -p lumelog-core`：57+9+8+1+1 passed 全绿（bench 新增未波及）
+- **P4 实测**（`cargo bench -p lumelog-core --bench chunk_at`，Windows/SSD）：1GB 文件 1000 次随机 600 行取块，**p50=0.153ms · p95=0.230ms · p99=0.259ms**（门槛 p95 ≤16ms，余量约 70×）；criterion 30k iterations 111µs/iter
+
+**headless-deferred（归 Task 11 checklist）:** `tauri dev` 打开 1GB 日志滚动流畅、GBK 不乱码、Ctrl+G goToLine 实际落位、索引进度条 UI。
+
 ## 2026-10-24 — Task 9：前端编辑模式（CodeMirror 6 + Tab + 状态栏）
 
 - 文件：`app/frontend/src/{ipc.ts,encoding-menu.ts,language.ts,editor.ts,tabs.ts,statusbar.ts,main.ts}` + `ipc.test.ts`；`package.json`（+@codemirror/*、@tauri-apps/plugin-dialog、vitest；+test 脚本）；`package-lock.json` 纳入版本库。
