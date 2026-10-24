@@ -37,6 +37,15 @@
 **Why:** spec §7.3.1 candump 形式；Review Focus 3（FD/RTR/error 行不污染流、不 panic）。`next_frame` 拉式设默认行为：遇错行内部推进并计数，直到出帧或 EOF。
 **验证:** `cargo test -p lumelog-can` 16 pass（+8 candump）+ `cargo clippy --all-targets -- -D warnings` 净。修正：测试里扩展帧 hex 字面量位数写错（`0x1FF_FFFF`→`0x1FFF_FFFF`，解析器无错）；`next_frame` 由 `while let` 改 `for ... by_ref()` 满足 clippy。
 
+### 5. Vector ASC 源（先于 Task 3 执行：无外部工具依赖）
+**Files:**
+- Create: `crates/lumelog-can/src/source/asc.rs`（`AscSource<I: Iterator<Item=Line>>`：`<base> <chan> <ID>x? <Rx|Tx> <d|r> <dlc> <b0>...`；token0 parse f64 作 timestamp、id 尾 `x`→去 x 按 hex 解析、`d`→逐 token hex 字节（dlc=实际字节数，>64 跳过）、`r`→remote（dlc 取声明值）；`boe`/`bcs`/`error`/header（`date`/`base`）/非帧行跳过计数，空行不计）
+- Modify: `crates/lumelog-can/src/source/mod.rs`（`pub mod asc;` + `pub use AscSource`）
+- Create: `crates/lumelog-can/tests/data/asc_basic.asc`（date头/空行/普通帧/扩展帧x/remote/boe/base/CAN前缀，decoded=3 skipped=4）+ `crates/lumelog-can/tests/asc.rs`（6 例）
+
+**Why:** spec §7.3.2 Vector ASC 形式；Review Focus 3（ASC 变体帧/非帧行不污染流、不 panic）。**已知限制**：ASC 方言众多，本实现只保证 spec 描述形态 + 夹具；未覆盖变体（如 `CAN` 前缀行、`boe`/`bcs` 状态行、绝对/相对时间基准换算）作跳过处理，date 头不作时间基准解析。短行安全访问用 `toks.get(..)` 杜绝越界 panic。
+**验证:** `cargo test -p lumelog-can` 22 pass（+6 asc）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。

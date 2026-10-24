@@ -2,6 +2,7 @@
 //! `((line_number, text))` into `Frame`s, skipping and counting malformed lines
 //! without ever panicking or stalling the stream.
 
+pub mod asc;
 pub mod candump;
 
 use crate::frame::{Frame, SourceStats};
@@ -32,4 +33,5 @@ pub(crate) fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+pub use asc::AscSource;
 pub use candump::CandumpSource;
