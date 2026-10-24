@@ -6,6 +6,15 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### Task 4. 前端 `ipc.ts` CAN 桥接 + 新错误码
+**Files:**
+- Modify: `app/frontend/src/ipc.ts`（`SignalValueJson`/`FrameJson`/`DbcMsgSummary`/`DbcErrorJson`/`DbcInfo`/`CanStatsJson` interface（camelCase 对齐 `dto.rs`）+ `IpcErrorCode` 联合加 `dbc_syntax`/`bad_regex`/`regex_compile`/`source_format` + `IPC_ERROR_ZH` 四条中文 + `dbcImport`/`canParse`（双 Channel 抄 `searchRun`）/`canCancel`/`canDecodeSnippet` 包装）
+- Modify: `app/frontend/src/ipc.test.ts`（`describe("CAN ipc bridge")` 两例：错误码含中文且 detail 代入、四包装均为函数）
+- Modify: `Cargo.lock`（补记 Task 1/3 已提交的 `lumelog-can` 依赖 + `tempfile` dev-dep 的锁）
+
+**Why:** spec §9 要求前端与 Rust DTO 字段逐一对齐、错误码→稳定中文文案；`canParse` 沿用 `search_run` 的批量流式双通道形态，`dbcId`/`regex` 缺省以 `null` 传递匹配 Rust `Option` 参数。
+**验证:** `npm --prefix app/frontend test` 29 pass（ipc.test.ts 由 5→7，新 CAN 两例由红转绿）+ `npm --prefix app/frontend run build`（`tsc --noEmit` 通过，38 modules transformed）。
+
 ### Task 3. `can_parse` 流式命令 + doc_lines + can_cancel + can_decode_snippet
 **Files:**
 - Modify: `app/src-tauri/Cargo.toml`（dev-dep `tempfile = "3"`）

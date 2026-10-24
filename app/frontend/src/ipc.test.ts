@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { IPC_ERROR_CODES, ipcErrorZh } from "./ipc";
+import {
+  IPC_ERROR_CODES,
+  ipcErrorZh,
+  dbcImport,
+  canParse,
+  canCancel,
+  canDecodeSnippet,
+} from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
 describe("ipc error → Chinese text (spec §9)", () => {
@@ -59,5 +66,22 @@ describe("encoding menu labels (Global Constraints, verbatim)", () => {
       "Shift-JIS",
       "ISO-8859-1",
     ]);
+  });
+});
+
+describe("CAN ipc bridge (spec §9)", () => {
+  it("can_error_codes_have_zh_text", () => {
+    for (const code of ["dbc_syntax", "bad_regex", "regex_compile", "source_format"]) {
+      expect(IPC_ERROR_CODES).toContain(code);
+      expect(/[\u4e00-\u9fff]/.test(ipcErrorZh(code))).toBe(true);
+    }
+    // detail substituted where the template carries %s
+    expect(ipcErrorZh("dbc_syntax", "第 14 行")).toContain("第 14 行");
+  });
+
+  it("can_wrappers_are_functions", () => {
+    for (const fn of [dbcImport, canParse, canCancel, canDecodeSnippet]) {
+      expect(typeof fn).toBe("function");
+    }
   });
 });
