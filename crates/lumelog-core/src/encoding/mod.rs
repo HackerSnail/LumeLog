@@ -424,4 +424,47 @@ mod tests {
         assert_eq!(dec.text, "ab线");
         assert_eq!(dec.invalid_count, 0);
     }
+
+    // Deterministic lock-in for the two Critical streaming fixes: BOM split
+    // across sub-`bom_len` chunks (Critical-3) and flushed tail text returned
+    // by `finish` (Critical-1). proptest covers these only probabilistically.
+    #[test]
+    fn bom_split_across_tiny_chunks_and_finish_flush() {
+        // UTF-8 BOM + "hi" + a literal U+FFFD.
+        let raw = encode_all(EncodingLabel::Utf8Bom, "hi\u{FFFD}").bytes;
+        let mut d = IncrementalDecoder::new(EncodingLabel::Utf8Bom).unwrap();
+        let mut t = String::new();
+        // Feed the 3 BOM bytes one at a time (each chunk < bom_len), then rest.
+        for b in raw[..3].iter() {
+            t.push_str(&d.feed(std::slice::from_ref(b)).text);
+        }
+        t.push_str(&d.feed(&raw[3..]).text);
+        t.push_str(&d.finish().text);
+        let whole = decode_all(EncodingLabel::Utf8Bom, &raw);
+        assert_eq!(t, whole.text);
+        assert_eq!(whole.invalid_count, 1, "literal U+FFFD counted once");
+    }
+
+    #[test]
+    fn finish_returns_flushed_tail_text() {
+        // A GBK stream truncated mid-character: the trailing lead byte must
+        // surface as U+FFFD via `finish`, not be silently dropped.
+        let mut raw = encode_all(EncodingLabel::Gbk, "数据线").bytes;
+        raw.pop(); // drop one trail byte -> dangling lead byte held internally
+        let mut d = IncrementalDecoder::new(EncodingLabel::Gbk).unwrap();
+        let mut t = String::new();
+        let mut invalid = 0usize;
+        // Feed the whole (truncated) stream: the decoder holds the dangling
+        // lead byte internally; `finish` flushes it into a U+FFFD.
+        let seg = d.feed(&raw);
+        t.push_str(&seg.text);
+        invalid += seg.invalid_count;
+        let tail = d.finish();
+        t.push_str(&tail.text);
+        invalid += tail.invalid_count;
+        let whole = decode_all(EncodingLabel::Gbk, &raw);
+        assert_eq!(t, whole.text, "flushed tail text must not be dropped");
+        assert_eq!(invalid, whole.invalid_count, "flushed replacement must be counted");
+        assert!(whole.invalid_count >= 1, "truncated char should yield a U+FFFD");
+    }
 }

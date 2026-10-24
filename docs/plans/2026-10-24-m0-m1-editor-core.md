@@ -79,7 +79,7 @@ spec 隐含但单任务测试不会天然覆盖、最容易伤到使用者的输
   - `pub enum EncodingLabel { Utf8, Utf8Bom, Utf16Le, Utf16Be, Gbk, Gb18030, Big5, ShiftJis, Iso88591 }`（`as_str()` 返回 Global Constraints 固定显示名；`from_label("GBK")` 解析）
   - `pub fn detect(head: &[u8]) -> EncodingLabel`（顺序：BOM → 前 64KB 严格 UTF-8 → chardetng 置信度 ≥0.7 → 兜底 Gb18030；spec §5.2）
   - `pub fn decode_all(label: EncodingLabel, bytes: &[u8]) -> Decoded { text: String, invalid_count: usize }`
-  - `pub struct IncrementalDecoder;`：`new(label) -> Result<Self>`、`feed(&mut self, bytes: &[u8]) -> DecodeSegment { text: String, invalid_count: usize }`、`finish(&mut self) -> usize`（尾字节 pending 由 encoding_rs 内部处理）
+  - `pub struct IncrementalDecoder;`：`new(label) -> Result<Self>`、`feed(&mut self, bytes: &[u8]) -> DecodeSegment { text: String, invalid_count: usize }`、`finish(mut self) -> DecodeSegment`（消费 self：encoding_rs 的 decoder flush 后禁止复用；返回尾字节 flush 出的 text+invalid_count）。约束：一个实例只解码一条从字节 0 起、BOM 感知的完整流；区域/中段解码不得复用同一实例从文件中部喂入（Task 4 分块取行须按需 `new`）。
   - `pub fn encode_all(label, text: &str) -> Encoded { bytes: Vec<u8>, replace_count: usize }`（UTF-8 BOM 写出带 BOM；UTF-16 带 BOM）
 - 约束：`Gbk`/`Gb18030` 直接用 `encoding_rs::GBK/GB18030`；GB2312 不在枚举（入口按 GBK 映射，spec §5.1）。
 

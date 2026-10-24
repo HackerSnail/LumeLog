@@ -97,9 +97,9 @@ proptest! {
         let mut text = String::new();
         let mut invalid = 0usize;
 
-        // Split points include 0 and len; dedup keeps them distinct, but the
-        // modulo can also collapse onto a neighbour, so zero-length chunks
-        // (empty `feed`) are exercised too.
+        // Split points include 0 and len, and are intentionally NOT deduped:
+        // the modulo can collapse onto a neighbour (or duplicate another cut),
+        // producing zero-length chunks that exercise an empty `feed`.
         let mut pts: Vec<usize> = cuts.iter().map(|&c| c % (bytes.len() + 1)).collect();
         pts.push(0);
         pts.push(bytes.len());
