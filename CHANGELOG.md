@@ -48,6 +48,13 @@
 **Why:** 对齐 NoteLume 无边框、工具条兼作标题栏的一体化顶栏。窗口按钮仅在真实 Tauri 宿主出现（浏览器 `vite dev` 无宿主时 `getCurrentWindow()` 抛错 → 回落 toast，按钮也隐藏），拖拽只落在中间弹性区，两侧按钮不受 `data-tauri-drag-region` 干扰仍可点击。
 **验证:** `cargo check -p lumelog-app` 净 + `npx vitest run` 27 pass + `tsc --noEmit` 净 + `vite build` OK。拖拽/双击最大化/三按钮的窗口交互属 GUI 手动冒烟（`npm run tauri dev`），headless 不可测。
 
+### E. 收尾与全量验证
+**Files:**
+- Modify: `docs/claude.md`（功能清单拆分并勾选：「自定义主题」→ 已完成（三主题 + 持久化 + 无边框标题栏 + 命令面板）；「快捷键配置同步」单列为待办）
+
+**Why:** UI 重构 `feat/m-ui-notelume` 四任务（主题基座 / 应用外壳 / 命令面板 / 工具条即标题栏）全部交付，回写功能清单与实况一致。
+**验证:** `cargo test --workspace` 全绿（lumelog-core 58 单测 + chunk/cli/docfile/encoding 集成测试）+ `cargo clippy --workspace -- -D warnings` 净 + 前端 `vite build` OK + `npx vitest run` 27 pass。窗口拖拽/最大化/关闭为 headless 不可测的 GUI 项，留 `tauri dev` 手动冒烟。
+
 ## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
 
 **Files:**
