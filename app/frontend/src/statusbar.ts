@@ -1,7 +1,7 @@
 //! Status bar (spec §8): encoding dropdown, EOL + language selects, dirty
-//! indicator, line/col. The encoding switch re-opens the document under the new
-//! label (see `main.ts` `reopenWithEncoding`); this widget only reports the
-//! choice — it never mutates the editor itself.
+//! indicator, line/col. The encoding switch re-decodes the document in place
+//! (see `main.ts` `changeEncoding` → `doc_set_encoding`); this widget only
+//! reports the choice — it never mutates the editor itself.
 
 import { ENCODINGS, EOL_OPTIONS } from "./encoding-menu";
 import { AVAILABLE_MODES, type ModeChoice } from "./language";

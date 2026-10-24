@@ -29,6 +29,16 @@
 - **search 缺口补齐**：Produces 要求的前端搜索本轮落地——`openSearchFlow`/`runSearch`（`searchRun mode:"literal"`）/`renderSearchPanel`（命中行 + snippet + 点击 jumpToLine + 取消/关闭）+ `Ctrl+Shift+F`。
 - 验证（fix round 1）：`npx vitest run` → 5 passed；`npm run build`（tsc strict）→ 29 模块 0 error；`cargo clippy -p lumelog-app --all-targets -- -D warnings` → 干净；`cargo test -p lumelog-core` → 57 lib + 9 cli(+1 ignored) + 8 docfile + 2 proptest 全 passed。GUI 手测/GBK 往返/实际高亮渲染仍 headless 不可验 → 依 plan 缓至 Task 11。
 
+### Task 9 fix round 1 复审 → 新增 search 流的 fix round 2（仅修 search）
+
+round-1 scoped 复审裁定：C1/C2/I1-I5/全部 Minor **均 ADDRESSED**，无回归；唯一 CHANGES REQUESTED 集中在本轮**新增**的前端 search 流：
+- **Important（新）**：“取消”按钮不可用——`search_run` 是同步命令，整段扫完才 `Ok(req_id)`，`lastReqId` 在 `await` 前恒为 null → 点取消为空操作（与 Task 8 F2 同源）。**Ruling**：plan Task 9 Produces 明定搜索“仅展示命中列表与 snippet（Plan 3 完善联动）”，取消属异步 search（Task 10，与 Task 8 F2 一致）——本轮不ship 一个坏死控件：移除“取消”按钮（保留“关闭”），`lastReqId`/`searchCancel` 前端引用一并删除（ipc.ts 仍导出 `searchCancel` 镜像命令面）。
+- **Minor M-new1（新）**：命中无上限累加 + 每次整面板重建 O(n²)。修：不保留 hits 数组（`searchTotal` 仅计数），增量 append 行，DOM 硬上限 `SEARCH_RENDER_CAP=1000`（总数以 `onDone.matches` 为准）。
+- **Minor M-new2（新）**：`window.prompt` 同 I4 不可靠。修：面板内联 `<input>` + 回车/“搜索”按钮提交，不再用原生 prompt。
+- **Minor M-new3（新，核实为非问题）**：空文件切编码是否 `chunk_at(0,1)` 越界——core“empty_file_is_one_line”定空文件 line_count=≥ 1，`0 < 1` 合法→不报 `LineOutOfRange`。不改。
+- **Ledger 级清理**：`statusbar.ts` 顶注“reopenWithEncoding/re-opens”陈旧→改“re-decodes in place / changeEncoding → doc_set_encoding”；`runSearch` 死参数 `handle` 删除（jumpToLine 取 active tab）。
+- 验证（fix round 2）：`npx vitest run` → 5 passed；`npm run build`（tsc strict）→ 29 模块 0 error（无未用导入/变量）。本轮仅动前端 search + 注释，Rust 壳未变。
+
 
 ## 2026-10-24 — Task 8（阶段 B）：Tauri v2 壳 + IPC 命令层
 

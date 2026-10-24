@@ -12,7 +12,6 @@ import {
   docSetEncoding,
   loadAllText,
   searchRun,
-  searchCancel,
   IpcError,
   type DocInfo,
   type MatchJson,
@@ -35,7 +34,6 @@ interface DocState {
 
 const docStates = new Map<number, DocState>();
 let busy = false;
-let lastReqId: number | null = null;
 
 const tabsEl = document.createElement("div");
 tabsEl.id = "tabs";
@@ -309,7 +307,16 @@ function syncStatus(docId: number): void {
   }
 }
 
-// ---- Search (spec §6.2 read-only hit list; Ctrl+Shift+F) ----------------------
+// ---- Search (spec §6.2 read-only hit list; Ctrl+Shift+F). Task 9 scope is
+// `search_run` + hit list + snippet + click-to-locate (plan: "仅展示命中列表与
+// snippet"). A live cancel needs the async search (Task 10) — `search_run` is a
+// synchronous command that runs to completion, so no dead cancel control is
+// shown here. See CHANGELOG Ruling, consistent with Task 8 F2.
+
+const SEARCH_RENDER_CAP = 1000; // rows actually kept in the DOM
+let searchRendered = 0; // rows appended so far
+let searchTotal = 0; // hits seen so far (a counter, never a retained array)
+let searchBusy = false;
 
 function openSearchFlow(): void {
   const a = tabs.active();
@@ -317,74 +324,93 @@ function openSearchFlow(): void {
     toastMsg("请先打开一个文档");
     return;
   }
-  const pattern = prompt("搜索内容（按当前编码的字面量匹配）：");
-  if (!pattern) return;
-  void runSearch(a.info.docId, a.handle, pattern);
+  renderSearchShell(a.info.docId);
 }
 
-async function runSearch(docId: number, handle: EditorHandle, pattern: string): Promise<void> {
-  const ds = docStates.get(docId);
-  if (!ds) return;
-  const hits: MatchJson[] = [];
-  renderSearchPanel(hits, null);
-  try {
-    lastReqId = await searchRun({
-      docId,
-      pattern,
-      mode: "literal",
-      caseSensitive: true,
-      onBatch: (m) => {
-        hits.push(...m);
-        renderSearchPanel(hits, null);
-      },
-      onDone: (s) => renderSearchPanel(hits, s),
-    });
-  } catch (err) {
-    reportError(err);
-    hideSearchPanel();
-  }
-  void handle;
-}
-
-function renderSearchPanel(
-  hits: MatchJson[],
-  done: { matches: number; scannedBytes: number; cancelled: boolean } | null,
-): void {
+function renderSearchShell(docId: number): void {
   const panel = document.getElementById("search-panel");
   if (!panel) return;
   panel.style.display = "";
   panel.textContent = "";
-  const head = document.createElement("div");
-  head.className = "search-head";
-  head.textContent = done
-    ? `命中 ${done.matches} 处${done.cancelled ? "（已取消）" : ""}　扫描 ${done.scannedBytes} 字节`
-    : `搜索中… 已发现 ${hits.length} 处`;
-  const cancelBtn = document.createElement("button");
-  cancelBtn.textContent = "取消";
-  cancelBtn.addEventListener("click", () => {
-    if (lastReqId != null) void searchCancel(lastReqId).catch(() => {});
-  });
+
+  const bar = document.createElement("div");
+  bar.className = "search-head";
+  // Inline input, not `window.prompt` (unreliable on WKWebView / webkit2gtk —
+  // the same reason I4 dropped `window.confirm`).
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "搜索内容（按当前编码的字面量匹配）";
+  const go = document.createElement("button");
+  go.textContent = "搜索";
+  const statusLine = document.createElement("span");
+  statusLine.className = "search-status";
   const closeBtn = document.createElement("button");
   closeBtn.textContent = "关闭";
   closeBtn.addEventListener("click", hideSearchPanel);
-  head.append(cancelBtn, closeBtn);
-  panel.append(head);
-
   const list = document.createElement("div");
   list.className = "search-list";
-  for (const h of hits.slice(0, 1000)) {
+
+  const submit = () => {
+    const pattern = input.value;
+    if (pattern) void runSearch(docId, pattern, statusLine, list);
+  };
+  go.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") submit();
+  });
+
+  bar.append(input, go, statusLine, closeBtn);
+  panel.append(bar, list);
+  input.focus();
+}
+
+async function runSearch(
+  docId: number,
+  pattern: string,
+  statusLine: HTMLElement,
+  list: HTMLElement,
+): Promise<void> {
+  if (searchBusy || !docStates.get(docId)) return;
+  searchBusy = true;
+  searchRendered = 0;
+  searchTotal = 0;
+  list.textContent = "";
+  statusLine.textContent = "搜索中…";
+  try {
+    await searchRun({
+      docId,
+      pattern,
+      mode: "literal",
+      caseSensitive: true,
+      onBatch: (m) => appendHits(list, m, statusLine),
+      onDone: (s) => {
+        statusLine.textContent = `命中 ${s.matches} 处，扫描 ${s.scannedBytes} 字节`;
+      },
+    });
+  } catch (err) {
+    reportError(err);
+    statusLine.textContent = "搜索失败";
+  } finally {
+    searchBusy = false;
+  }
+}
+
+/** Append only new rows, bounded to `SEARCH_RENDER_CAP`; never retain hits. */
+function appendHits(list: HTMLElement, batch: MatchJson[], statusLine: HTMLElement): void {
+  searchTotal += batch.length;
+  for (const h of batch) {
+    if (searchRendered >= SEARCH_RENDER_CAP) break;
     const row = document.createElement("div");
     row.className = "search-row";
     row.textContent = `第 ${h.line + 1} 行：${h.snippet}`;
     row.addEventListener("click", () => jumpToLine(h.line));
     list.append(row);
+    searchRendered += 1;
   }
-  if (hits.length > 1000) {
-    const more = document.createElement("div");
-    more.textContent = `……（共 ${hits.length}+ 处，仅显示前 1000）`;
-    list.append(more);
-  }
-  panel.append(list);
+  statusLine.textContent =
+    searchTotal > SEARCH_RENDER_CAP
+      ? `搜索中… 已发现 ${searchTotal} 处（仅显示前 ${SEARCH_RENDER_CAP}）`
+      : `搜索中… 已发现 ${searchTotal} 处`;
 }
 
 function hideSearchPanel(): void {
