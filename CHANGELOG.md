@@ -2,6 +2,20 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
+
+**依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。
+
+### A. 主题基座
+**Files:**
+- Create: `app/frontend/src/theme.ts`（`resolveTheme`/`nextPref` 纯函数 + `loadPref/savePref/paint/initTheme` 副作用层；三主题 light/dark/vampire + auto 跟随系统；`localStorage` 持久化；`matchMedia` change 重绘）
+- Create: `app/frontend/src/theme.test.ts`（`resolveTheme` 显式预设直通 / auto 随系统；`nextPref` 循环序 light→dark→vampire→auto→light）
+- Modify: `app/frontend/src/styles.css`（`:root[data-theme]` 三主题 token 层，浅/暗/Dracula 调色板取自 NoteLume；`--font-ui`（Inter/鸿蒙/思源黑，不用宋体）/`--font-mono`（JetBrains Mono/Fira Code）；主题化细滚动条；`box-sizing`；`color-scheme`；现有硬编码配色全迁变量；用 token 给 CodeMirror chrome（gutters/content/cursor/active-line/selection）着色）
+- Modify: `app/frontend/src/main.ts`（模块早期 `initTheme()` 绘制；工具条加「主题」循环按钮）
+
+**Why:** M1 交付的是功能骨架，`claude.md` 「自定义主题」仍为待办；先建立可切换的三主题 token 体系作为外壳重构的地基。
+**验证:** `npx vitest run` 14 pass（theme 4）+ `tsc --noEmit` 净 + `vite build` OK（styles.css 5.01KB）。
+
 ## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
 
 **Files:**

@@ -26,7 +26,12 @@ import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
 import type { ModeChoice } from "./language";
+import { initTheme } from "./theme";
 import "./styles.css";
+
+// Paint the stored theme as early as module eval allows (index.html also runs a
+// pre-paint inline script to dodge a light flash on a dark preference).
+const theme = initTheme();
 
 interface DocState {
   path: string;
@@ -91,7 +96,16 @@ function layout(): void {
   const searchBtn = document.createElement("button");
   searchBtn.textContent = "搜索";
   searchBtn.addEventListener("click", () => openSearchFlow());
-  bar.append(openBtn, searchBtn);
+  const themeBtn = document.createElement("button");
+  themeBtn.textContent = "主题";
+  themeBtn.title = "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）";
+  themeBtn.addEventListener("click", () => theme.cycle());
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  const appName = document.createElement("span");
+  appName.className = "app-name";
+  appName.textContent = "LumeLog";
+  bar.append(openBtn, searchBtn, themeBtn, spacer, appName);
 
   const toast = document.createElement("div");
   toast.id = "toast";
