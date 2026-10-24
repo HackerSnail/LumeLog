@@ -132,12 +132,48 @@ body {
 .appbar button {
   padding: 3px 10px;
 }
-.appbar .spacer {
-  flex: 1 1 auto;
-}
 .appbar .app-name {
   font-weight: 600;
   color: var(--text);
+  white-space: nowrap;
+}
+/* With `decorations:false` the appbar is the window titlebar: a flex-1 filler
+ * carries `data-tauri-drag-region` (drag + double-click maximize), so only the
+ * empty middle moves the window and every button stays clickable. */
+.titlebar-drag {
+  flex: 1 1 auto;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  min-width: 8px;
+}
+/* Custom window controls. Hidden in a plain browser (no Tauri host); revealed
+ * only once `detectChrome()` tags <html> with `.has-custom-titlebar`. */
+.win-btns {
+  display: none;
+}
+html.has-custom-titlebar .win-btns {
+  display: flex;
+}
+.win-btn {
+  width: 42px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: default;
+}
+.win-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.win-btn.close:hover {
+  background: var(--danger);
+  color: #fff;
 }
 
 /* Workspace: sidebar | resizer | center | resizer | inspector, all in one row.

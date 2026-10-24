@@ -38,6 +38,16 @@
 **Why:** 对齐 NoteLume 的命令面板；把已实现的打开/保存/另存/跳行/搜索/主题/面板收放聚合为可模糊检索的统一入口。评分/过滤为纯函数可 headless 测（与 listview/ipc 同构）。未重复绑 Ctrl+Shift+S（已为另存），侧栏/信息切换走工具条按钮 + 面板。
 **验证:** `npx vitest run` 27 pass（palette 8）+ `tsc --noEmit` 净 + `vite build` OK（css 7.58KB）。
 
+### D. 工具条即标题栏（无边框窗口）
+**Files:**
+- Modify: `app/src-tauri/tauri.conf.json`（主窗口 `decorations: false`，工具条上沿即窗口顶边，对齐 NoteLume 无边框观感）
+- Modify: `app/src-tauri/capabilities/default.json`（新增 `core:window:allow-start-dragging/minimize/toggle-maximize/maximize/unmaximize/close/is-maximized` 权限，放行前端自绘窗口控制）
+- Modify: `app/frontend/src/main.ts`（`layout()` 工具条改为「应用名 + 动作按钮 | `data-tauri-drag-region` 弹性拖拽区 | 窗口按钮」；`mkWinBtn` 最小化/最大化/关闭；`winAction` 经 `getCurrentWindow()` 驱动且 try/catch 回落 toast；`detectChrome()` 仅在 Tauri 宿主加 `has-custom-titlebar` 并按 UA 标 `data-tauri-platform`）
+- Modify: `app/frontend/src/styles.css`（`.titlebar-drag` flex-1 拖拽区；`.win-btns` 默认隐藏、`html.has-custom-titlebar` 才显；`.win-btn` 扁平 42×30 + hover `--bg-hover`、`.close:hover` `--danger`；移除失效 `.appbar .spacer`）
+
+**Why:** 对齐 NoteLume 无边框、工具条兼作标题栏的一体化顶栏。窗口按钮仅在真实 Tauri 宿主出现（浏览器 `vite dev` 无宿主时 `getCurrentWindow()` 抛错 → 回落 toast，按钮也隐藏），拖拽只落在中间弹性区，两侧按钮不受 `data-tauri-drag-region` 干扰仍可点击。
+**验证:** `cargo check -p lumelog-app` 净 + `npx vitest run` 27 pass + `tsc --noEmit` 净 + `vite build` OK。拖拽/双击最大化/三按钮的窗口交互属 GUI 手动冒烟（`npm run tauri dev`），headless 不可测。
+
 ## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
 
 **Files:**

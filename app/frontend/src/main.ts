@@ -6,6 +6,7 @@
 //! `tsc --noEmit` (strict) + `vitest`.
 
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   docOpen,
   docClose,
@@ -111,22 +112,35 @@ function layout(): void {
   if (!root) return;
   root.textContent = "";
 
-  // Toolbar — becomes the draggable custom titlebar in the window-chrome step.
   const bar = document.createElement("div");
   bar.className = "appbar";
+  // Toolbar — with `decorations:false` this doubles as the window titlebar:
+  // app name + actions on the left, a draggable filler, window buttons on the
+  // right (buttons are only revealed when running under Tauri — see detectChrome).
+  const appName = document.createElement("span");
+  appName.className = "app-name";
+  appName.textContent = "LumeLog";
   bar.append(
+    appName,
     mkBtn("打开文件", "", () => void openFile()),
     mkBtn("搜索", "在当前文档中搜索 (Ctrl+Shift+F)", () => openSearchFlow()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
     mkBtn("主题", "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）", () => theme.cycle()),
   );
-  const spacer = document.createElement("span");
-  spacer.className = "spacer";
-  const appName = document.createElement("span");
-  appName.className = "app-name";
-  appName.textContent = "LumeLog";
-  bar.append(spacer, appName);
+
+  const drag = document.createElement("div");
+  drag.className = "titlebar-drag";
+  drag.setAttribute("data-tauri-drag-region", "");
+
+  const winBtns = document.createElement("div");
+  winBtns.className = "win-btns";
+  winBtns.append(
+    mkWinBtn("﹣", "最小化", () => winAction("min")),
+    mkWinBtn("▢", "最大化 / 还原", () => winAction("max")),
+    mkWinBtn("✕", "关闭", () => winAction("close"), "close"),
+  );
+  bar.append(drag, winBtns);
 
   // Left sidebar: the set of open documents (live from the tab strip).
   const aside = document.createElement("aside");
@@ -202,6 +216,50 @@ function mkBtn(label: string, title: string, on: () => void): HTMLButtonElement 
   if (title) b.title = title;
   b.addEventListener("click", on);
   return b;
+}
+
+function mkWinBtn(
+  glyph: string,
+  title: string,
+  on: () => void,
+  extra = "",
+): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.className = "win-btn" + (extra ? " " + extra : "");
+  b.textContent = glyph;
+  b.title = title;
+  b.addEventListener("click", on);
+  return b;
+}
+
+/** Drive the frameless window; guarded so a plain-browser `vite dev` (no Tauri
+ *  host, `getCurrentWindow()` throws) degrades to a toast instead of a crash. */
+function winAction(kind: "min" | "max" | "close"): void {
+  try {
+    const w = getCurrentWindow();
+    void (kind === "min" ? w.minimize() : kind === "max" ? w.toggleMaximize() : w.close());
+  } catch {
+    toastMsg("窗口控制不可用（非 Tauri 环境）");
+  }
+}
+
+/** Reveal the custom window buttons only under a real Tauri host, and tag the
+ *  platform so CSS can tune the titlebar chrome. */
+function detectChrome(): void {
+  const el = document.documentElement;
+  const inTauri =
+    typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ===
+    "object";
+  if (inTauri) el.classList.add("has-custom-titlebar");
+  const ua = navigator.userAgent;
+  const plat = ua.includes("Windows")
+    ? "windows"
+    : ua.includes("Mac")
+      ? "mac"
+      : ua.includes("Linux")
+        ? "linux"
+        : "";
+  if (plat) el.dataset.tauriPlatform = plat;
 }
 
 function toggleSidebar(): void {
@@ -954,6 +1012,7 @@ function registerShortcuts(): void {
 }
 
 layout();
+detectChrome();
 registerShortcuts();
 // First-interaction probe (spec P1/P2): the app_ping round-trip is the wired
 // timing endpoint for the manual GUI cold-start measurement. A headless CI
