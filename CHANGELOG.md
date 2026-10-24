@@ -6,6 +6,17 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### Task 6. CanPanel 组件（table-core 列模型 + 行窗口虚拟滚动 + revealLine 联动）
+**Files:**
+- Create: `app/frontend/src/canpanel.ts`（`FrameStore` 累积批量/`all`/`clear`/`length` + `CanPanel` 手写 DOM 虚拟表：行号/时间/通道/ID/消息/DLC/信号/原始数据 8 列，表头取 `getFlatHeaders()`，体只画 `visibleWindow` 窗口 + 扩展子行，行点击→`onRowActivate(1-based lineNumber)`，ID hex/dec + 时间绝对/相对 + ms/µs 切换）
+- Create: `app/frontend/src/canpanel.test.ts`（`FrameStore` 2 例，DOM-free）
+- Modify: `app/frontend/src/listview.ts`（`revealLine(index0)`：`scrollToLine` + 一次闪烁高亮，`paint` 内施加、定时器清除、`destroy` 清理）
+- Modify: `app/frontend/src/editor.ts`（`EditorHandle.revealLine(line1)`：`doc.line` 钉位 + `dispatch` selection + `EditorView.scrollIntoView`）
+- Modify: `app/frontend/package.json` + `package-lock.json`（`@tanstack/table-core ^8`）
+
+**Why:** spec §7.4 报文表格。用户定使用 TanStack—但 table-core 无框架适配器时 `createTable` 需受控 `state`，故首次捕获特性默认 `initialState`、后续回传作 `state`（空 state 会致特性首次 `getState()` 崩）；无 `flexRender`，表头文本直接取 `columnDef.header`（字符串）。行窗口沿用 `listview.visibleWindow`。闪烁高亮放在 `paint` 内因目标行可能还在异步 fetch。`canpanel.css`/`.list-flash` 样式随 Task 7 挂载一并补（未挂载时不影响逻辑）。
+**验证:** `npm --prefix app/frontend test` 38 pass（新 `canpanel.test.ts` 2 例）+ `npm --prefix app/frontend run build`（tsc 通过，38 modules；canpanel 待 Task 7 接入才入 bundle）。
+
 ### Task 5. CanPanel 视图过滤引擎（纯函数）
 **Files:**
 - Create: `app/frontend/src/canfilter.ts`（`CanFilter` 接口 + `applyCanFilter(frames, f)` 纯谓词）
