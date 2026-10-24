@@ -2,6 +2,17 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 5: 保存（原子写/EOL/冲突/不可映射）
+
+- 文件：新增 `src/doc/save.rs`（EolStyle/detect_eol、OverwritePolicy、SaveOptions/SaveReport、save_text、atomic_write）；`doc/file.rs`（DocFile 加 `eol_style` 字段，open 时从首部解码窗口 `detect_eol` 记录；加 `eol_style()` getter 与 `pub(crate) note_saved`）；`doc/mod.rs` 挂 `pub mod save` + re-export。
+- 为什么：实现 spec §4.4 保存四件事——行尾风格（打开检测/保存写回、Mixed 写为 CRLF）、原子写（同目录 `.{stem}.lumelogtmp` → fsync → rename；Windows 目标被占 rename 失败降级 `CoreError::Locked`）、冲突检测（SafetyConfirm 比对 disk_meta，脏则不落盘返 `Conflict`，Force 越权写入并回报 conflict）、不可映射（编码 replace_count>0 且非 Force 时先返 `Unmappable(N)` 且磁盘不变，保证“确认后执行”）；Review Focus 3（中文 GBK+CRLF 往返逐行一致）。
+- 实现决策：
+  - 保存落盘字节 = text 先归一 LF（`\r\n`/单独 `\r` 都→`\n`）再按 `opts.eol` 展开（Crlf/Mixed → `\n`→`\r\n`）；BOM 由 `encode_all` 按 label 自动加（UTF-8 BOM/UTF-16）。
+  - **Ruling**：plan 里 detect_eol 描述“CRLF计数≥LF独立计数→Crlf”与“两类都有→Mixed”矛盾→取无歧义的后者：两类均现→Mixed，仅一种→该风格，无换行→LF（写入默认）。
+  - **Ruling**：冲突仅在“覆写原始路径”时有意义（opts.path==doc.path 或 None）；另存新路径不比冲突（磁盘无基线可比）。写入成功后 `note_saved` 刷新 doc 的 size/mtime/eol，使紧接的再保存不会误报冲突。
+  - rename 失败归 `Locked` 的判据：`kind()==PermissionDenied` 或 Windows raw_os_error ∈ {5 访问拒绝, 32 共享冲突}；失败时 best-effort 删临时文件。
+- 验证：`cargo test -p lumelog-core` → 32 lib passed（含 save 6 个：`detect_eol_cases`/`save_roundtrip_gbk_crlf`/`conflict_blocks_save_without_force`/`unmappable_reports_count_before_write`/`atomic_write_leaves_no_tmp_on_success`/`save_as_to_new_path_is_not_a_conflict`）+ chunk_proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。
+
 ## 2026-10-24 — Task 4: DocFile 取块解码 + char_map
 
 - 文件：新增 `src/doc/chunk.rs`（Chunk/CharMap/LogicalLine + build_chunk，含 GB18030 误切合并重试）、`src/doc/file.rs`（DocFile：open 探测编码+建索引 / set_encoding / chunk_at / 手写 VecDeque 64MB LRU / UTF-16 走 build_aligned 偶数对齐索引）、`doc/mod.rs` re-export；`tests/chunk_proptest.rs`（byte_to_line_cu 对齐 oracle）、`tests/docfile.rs`（临时文件集成）。

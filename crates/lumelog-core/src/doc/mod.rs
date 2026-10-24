@@ -4,7 +4,9 @@
 pub mod chunk;
 pub mod file;
 pub mod line_index;
+pub mod save;
 
 pub use chunk::{build_chunk, Chunk, CharMap, LogicalLine};
 pub use file::DocFile;
 pub use line_index::{build, build_aligned, LineIndex, LineIndexBuilder};
+pub use save::{detect_eol, save_text, EolStyle, OverwritePolicy, SaveOptions, SaveReport};

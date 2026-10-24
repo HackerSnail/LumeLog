@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use crate::doc::chunk::{build_chunk, chunk_size, CharMap, Chunk};
 use crate::doc::line_index::{self, LineIndex, LineIndexBuilder};
+use crate::doc::save::{detect_eol, EolStyle};
 use crate::encoding::{self, EncodingLabel};
 use crate::error::CoreError;
 
@@ -24,6 +25,7 @@ pub struct DocFile {
     path: PathBuf,
     index: LineIndex,
     label: EncodingLabel,
+    eol_style: EolStyle,
     mtime: SystemTime,
     size: u64,
     /// Decoded-chunk LRU: front = least-recently-used (evicted), back = most.
@@ -46,6 +48,9 @@ impl DocFile {
         // Detect from the leading window (spec §5.2: first up-to-64KB).
         let head = read_at(&mut file, 0, (size as usize).min(64 * 1024))?;
         let label = encoding::detect(&head);
+        // Record the dominant line-ending style from the decoded leading window
+        // (spec §4.4: on open we detect CRLF/LF and store it as document metadata).
+        let eol_style = detect_eol(&encoding::decode_all(label, &head).text);
 
         let index = build_index(&mut file, size, label)?;
 
@@ -54,6 +59,7 @@ impl DocFile {
             path: path.to_path_buf(),
             index,
             label,
+            eol_style,
             mtime,
             size,
             cache: VecDeque::new(),
@@ -66,6 +72,10 @@ impl DocFile {
     }
     pub fn encoding(&self) -> EncodingLabel {
         self.label
+    }
+    /// Dominant line-ending style detected on open (spec §4.4).
+    pub fn eol_style(&self) -> EolStyle {
+        self.eol_style
     }
     pub fn line_count(&self) -> usize {
         self.index.line_count()
@@ -85,6 +95,16 @@ impl DocFile {
     /// (spec §5.2); only the decoded text of chunks changes, so drop the cache.
     pub fn set_encoding(&mut self, label: EncodingLabel) {
         self.label = label;
+        self.cache.clear();
+        self.cache_bytes = 0;
+    }
+
+    /// Record the on-disk state after a successful save so subsequent conflict
+    /// checks compare against what we just wrote, and cache the applied EOL style.
+    pub(crate) fn note_saved(&mut self, size: u64, mtime: SystemTime, eol: EolStyle) {
+        self.size = size;
+        self.mtime = mtime;
+        self.eol_style = eol;
         self.cache.clear();
         self.cache_bytes = 0;
     }
