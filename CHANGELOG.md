@@ -2,6 +2,12 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
+
+**背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。
+**Files:** Modify `app/frontend/src/canpanel.ts`（补全 `paintNow()` 定义 + `render()` 的 rAF 改调 `paintNow()`，与已在的 `onScroll` 调用合并为单帧重绘）。走分支 `fix/canpanel-paintnow` → merge main（不直提 main）。
+**验证：** `cargo test --workspace` 全绿（lumelog-app 12 + lumelog-can 全部 golden/candump/asc/regex/cli/proptest 套件 + lumelog-core 58 + chunk/cli/docfile/encoding 集成，1 ignored=手动 1GiB）；`cargo clippy --workspace --all-targets -- -D warnings` 净；`npm --prefix app/frontend test` 39 pass + `run build`（tsc 通过、41 modules）。教训：保存间歇失败时必须以 `git diff`/`tsc` 为准复核，不信任工具视图。
+
 ## 2026-10-25 — Plan 3 M2 CanPanel + IPC（feat/m2-can-panel）
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。

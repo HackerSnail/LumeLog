@@ -215,18 +215,28 @@ export class CanPanel {
 
   render(): void {
     if (this.destroyed || this.renderQueued) return;
-    // Coalesce: a burst of `onBatch` pushes (and scroll ticks) collapse into one
-    // repaint per animation frame, so the table rebuilds ≤ once per frame.
+    // Coalesce: a burst of `onBatch` pushes collapses into one repaint per
+    // animation frame, so the table rebuilds at most once per frame.
     this.renderQueued = true;
     requestAnimationFrame(() => {
       this.renderQueued = false;
-      if (this.destroyed) return;
-      try {
-        this.renderInner();
-      } catch (e) {
-        this.opts.onError(`报文表格渲染出错：${String(e)}`);
-      }
+      this.paintNow();
     });
+  }
+
+  /**
+   * Paint immediately. Both the batch-coalesce path and the scroll path funnel
+   * here so a repaint stays a single frame - routing scroll back through
+   * `render()` would add a second `requestAnimationFrame` and lag the view one
+   * frame behind the scrollbar.
+   */
+  private paintNow(): void {
+    if (this.destroyed) return;
+    try {
+      this.renderInner();
+    } catch (e) {
+      this.opts.onError(`报文表格渲染出错：${String(e)}`);
+    }
   }
 
   private renderInner(): void {
