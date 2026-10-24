@@ -1,0 +1,19 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: TESTER
+
+BO_ 100 IntelMsg: 8 TESTER
+ SG_ I_U8 : 0|8@1+ (1,0) [0|255] "" Receiver
+ SG_ I_S16 : 8|16@1- (0.5,-10) [-20000|20000] "" Receiver
+ SG_ I_U20 : 24|20@1+ (1,0) [0|1048575] "" Receiver
+ SG_ I_U4 : 44|4@1+ (0.1,0.3) [0|1.8] "" Receiver
+
+BO_ 200 MotoroMsg: 8 TESTER
+ SG_ M_U8 : 7|8@0+ (1,0) [0|255] "" Receiver
+ SG_ M_S16 : 15|16@0- (0.1,-5) [-5000|5000] "" Receiver
+ SG_ M_U20 : 39|20@0+ (1,0) [0|1048575] "" Receiver
+ SG_ M_U4 : 51|4@0+ (2,1) [0|31] "" Receiver

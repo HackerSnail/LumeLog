@@ -55,6 +55,17 @@
 **Why:** spec §7.3.3 通用正则源；Review Focus 5（缺 `id`/`data` 构建期即报错；行不匹配跳过计数；data hex 长度驱动 dlc）。修正：regex 1.13 无 `capture_index`→改 `capture_names().flatten()`；`unwrap_err()` 需 `T: Debug`→给 `RegexSource` derive Debug。
 **验证:** `cargo test -p lumelog-can` 29 pass（+7 regex）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
 
+### 3. 信号位序解码 Intel/Motorola（在 4/5/6 之后执行：需 cantools）
+**Files:**
+- Create: `crates/lumelog-can/src/decode.rs`（`extract_raw`（Intel LSB-first `start_bit+k`；Motorola DBC 斜线位序：start_bit 作 MSB，字节内向下走、跨到下一高字节 MSB）、`raw_to_signed`（位移符号扩展）、`to_physical`（raw*factor+offset）、`decode_signals`（含 value_table→enum_text））
+- Create: `crates/lumelog-can/tests/data/bitorder.dbc`（4 Intel + 4 Motorola 信号，跨字节 len20、有符号负值、factor≠1/offset≠0）
+- Create: `crates/lumelog-can/tests/data/golden_bitorder.json`（**cantools 39.4.5 生成的 8 条权威 golden**）+ `crates/lumelog-can/tests/gen_golden.py`（dev 脚本，不进 CI）
+- Create: `crates/lumelog-can/tests/bitorder_golden.rs`（手工解析 golden JSON、逐条对拍 raw 精确 + physical 1e-9 容差；无 serde）、`crates/lumelog-can/tests/decode_proptest.rs`（4 个 proptest：Intel 对独立参考式/宽度不溢出/补码往返/物理线性）
+- Modify: `crates/lumelog-can/src/lib.rs`（`pub mod decode;`）
+
+**Why:** spec §7.2/§13.1；Review Focus 1（Motorola `@0` 锯齿位序）+ 2（有符号补码 + factor/offset 浮点）。**位序算法经 cantools 39.4.5 golden 逐位对拍通过**（Intel/Motorola × 有/无符号 × 跨字节 len20 × 负值均匹配）。golden 为权威，实现向其靠拢（本次一次即中，未改夹具）。
+**验证:** `cargo test -p lumelog-can` 36 pass（+3 bitorder_golden +4 proptest）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。cantools 仅供开发期生成夹具，仓库已提交 golden、后续无需 Python。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。

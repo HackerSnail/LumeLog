@@ -6,6 +6,7 @@
 //! Task 4. Only modules that exist are declared here.
 
 pub mod dbc;
+pub mod decode;
 pub mod error;
 pub mod frame;
 pub mod source;
