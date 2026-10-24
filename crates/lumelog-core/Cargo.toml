@@ -1,0 +1,20 @@
+[package]
+name = "lumelog-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+memchr = { workspace = true }
+encoding_rs = { workspace = true }
+chardetng = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+
+[[bench]]
+name = "core_bench"
+harness = false
