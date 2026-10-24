@@ -1,0 +1,10 @@
+# Test fixtures under tests/data hold exact codec bytes (e.g. GBK sample_gbk.log,
+# where a bare 0x0A separates lines). With core.autocrlf=true on Windows git would
+# otherwise rewrite those 0x0A to 0x0D0A on checkout, changing file size and
+# breaking the tests' byte-for-byte idempotency check. Mark them binary.
+crates/lumelog-core/tests/data/** binary
+
+# Rust/TypeScript source and docs: normalize to LF in the repo.
+*.rs text eol=lf
+*.ts text eol=lf
+*.md text

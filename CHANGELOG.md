@@ -2,6 +2,17 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 7: lumelog CLI 冒烟（M0 验收）
+
+- 文件：新增 `src/bin/lumelog.rs`（`open|search|save` 三子命令 + 手工 `std::env::args` 解析 + 手搓 JSON 输出）、`tests/cli_smoke.rs`（7 个断言测试 + 1 个 `#[ignore]` 1GiB 计时冒烟）；数据文件 `tests/data/sample_gbk.log`（GBK 20 行台架日志，由 `ensure_sample` 幂等生成并纳入版本库）。
+- 为什么：spec §3「重逻辑放纯 crate、薄 CLI 可复用并冒烟」——把 Task 2–6 的公开接口（DocFile/search_stream/save_text/encoding）串成端到端可执行路径，钉死 M0 验收：`open` 打印 `{size,lines,encoding,eol}` 摘要 JSON、`search` 逐命中 NDJSON + 结尾 stats、`save` 从 stdin 读新文本按磁盘编码重编码落盘；退出码 `0` ok / `1` 运行时错误 / `2` 用法错误（无参或未知子命令）。
+- 实现决策：
+  - **不引 clap**（plan Step1 明示避免多一个依赖）：`parse` 单遍扫描——flag 取下一个非 `-` token 作值，否则视为布尔 flag；遇裸位置参数即判用法错误退 2。core 主依赖无 serde，故 `open`/`search`/`save` 的 JSON 全部手写格式串 + `json_escape`（转义 `"` `\` 控制字符）。
+  - 复用 crate 接口而非重写逻辑：`open_doc` 统一 `--file`→`DocFile::open(SIZE_LIMIT=u64::MAX)`（4GB/u32 上限仍由行索引内部 `TooLarge` 把关）+ 可选 `--encoding` 覆盖；`search` 用 `doc.encoding()` 作查询编码、`--regex`/`--ignore-case`/`--max` 映射到 `SearchQuery`/取消；`save` 先 `read_to_string(stdin)` 再 `disk_meta()`（早于 `save_text` 的 `&mut` 借用）取冲突基线，`--eol LF|CRLF` 覆盖否则沿用探测风格，`OverwritePolicy::SafetyConfirm`。
+  - `search` 超 `--max` 时停止打印但继续扫描计数，`stats.truncated` 回报截断。
+- 验证：`cargo test -p lumelog-core --test cli_smoke` → 7 passed（`open_prints_summary_json`/`open_line_count_flag_prints_only_count`/`search_counts_literal_gbk_hits`(20 命中)/`save_roundtrips_gbk_from_stdin`(GBK 重编码逐字节一致)/`no_args_exits_with_code_2`/`unknown_subcommand_exits_2`/`missing_file_is_error_code_1`）；全量 `cargo test -p lumelog-core` → 51 lib + 7 cli + 8 docfile + chunk/encoding proptest 全 passed；`cargo clippy -p lumelog-core --all-targets -D warnings` 无告警。
+- **P3 参考（`open_1gb_wall_time` --ignored）**：`lumelog open` 打开 971,234,620 字节（16,777,217 行）合成日志，含进程内整体行索引构建，wall **≈ 590 ms**（release）。CLI 路径首屏即返回摘要 JSON，索引一次性 build；UI 级流式首屏验收在 Task 11。
+
 ## 2026-10-24 — Task 6: 搜索（分块正则 + 重叠去重 + 取消）
 
 - 文件：新增 `src/search.rs`（Mode/SearchQuery/Match/SearchStats + `search_stream`/内部 `search_with_window`/`build_regex`/`make_snippet` + 8 单测）；`doc/file.rs` 加 `pub(crate)` `read_window`/`line_at_byte`/`line_byte_range`（供扫描器按原始字节窗口读 + 字节→行换算）；`lib.rs` 挂 `pub mod search`，并把 `tests_common` 从 `#[cfg(test)]` 改 `pub mod`（criterion bench 目标把本 crate 当外部依赖编译，`cfg(test)` 关闭，需 public 才能用 `gen_log`）；新增 `benches/search.rs` + `Cargo.toml` `[[bench]] name="search"`。
