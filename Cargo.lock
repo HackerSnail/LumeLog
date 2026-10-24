@@ -2025,6 +2025,11 @@ dependencies = [
 [[package]]
 name = "lumelog-can"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+ "regex",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "lumelog-core"

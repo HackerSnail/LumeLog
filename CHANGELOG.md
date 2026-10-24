@@ -2,6 +2,87 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — M2 CAN 引擎（feat/m2-can-engine）
+
+**依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7；计划 `docs/plans/2026-10-25-m2-can-engine.md`（只做纯 Rust 引擎，IPC/CanPanel 属 Plan 3）。
+
+### 1. lumelog-can 数据模型 + 错误 + workspace 收编
+**Files:**
+- Modify: `crates/lumelog-can/Cargo.toml`（deps `regex`/`thiserror`（workspace），dev-dep `proptest`，与 lumelog-core 同构）
+- Create: `crates/lumelog-can/src/error.rs`（`CanError` 五变体 + `ipc_code()` 钉 spec §9 code 契约）
+- Create: `crates/lumelog-can/src/dbc.rs`（`ByteOrder`/`Mux`/`Signal`/`Message`/`Database` 数据模型，解析器 Task 2）
+- Create: `crates/lumelog-can/src/frame.rs`（`Frame`/`FrameFlags`/`SignalValue`/`DecodedFrame`/`SourceStats`）
+- Create: `crates/lumelog-can/src/lib.rs`（先挂 `error`/`dbc`/`frame`；`decode`/`source` 由 Task 3/4 各自挂入）
+
+**Why:** 先定住后续任务依赖的稳定签名（接口先行），本任务不含算法。
+**验证:** `cargo test -p lumelog-can` 2 pass（crate_links + ipc_codes_are_stable）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。修正：`Frame` 含 `f64` 时间戳→只 derive `PartialEq` 不 derive `Eq`。偏离计划一条：proptest 直接入 crate dev-deps（对齐 core）而非 workspace deps。
+
+### 2. DBC 子集解析器
+**Files:**
+- Create: `crates/lumelog-can/src/dbc/parse.rs`（严格 `parse` 首个坏构造即中断；宽容 `parse_lenient` 记录行号+上下文+kind 并继续。正则驱动行式解析 `BO_`/`SG_`（含 mux `M`/`m<n`、Intel/Motorola、有符号、factor/offset/min/max/receivers）/`VAL_`（延迟回填 value_table）/`VERSION`/`BU_`；`NS_`/`BS_`/`CM_`/`BA_*`/`VAL_TABLE_` 识别并跳过；未知非空行忽略）
+- Modify: `crates/lumelog-can/src/dbc.rs`（`pub mod parse;` + re-export）
+- Create: `crates/lumelog-can/tests/data/sample.dbc`（含一条故意坏 `SG_`（行 14））
+- Create: `crates/lumelog-can/tests/dbc_golden.rs`（6 例：结构/大小端有符号精确值/注释属性跳过/枚举/mux 标记/宽容跳坏行且严格在该行报 DbcSyntax）
+
+**Why:** spec §7.1 的 DBC 子集；严格/宽容两路对应“跳过坏行继续”；`BO_` dlc 与节点间无逗号。Review Focus 4 钉住。
+**验证:** `cargo test -p lumelog-can` 8 pass（2 单测 + 6 dbc_golden）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净（引入 `type ValEntry` 消 type_complexity）。
+
+### 4. FrameSource trait + candump ASCII 源（先于 Task 3 执行：无外部工具依赖）
+**Files:**
+- Create: `crates/lumelog-can/src/source/mod.rs`（`FrameSource` trait（`next_frame`/`stats`）+ `Line=(u64,String)` + 共享 `hex_to_bytes`）
+- Create: `crates/lumelog-can/src/source/candump.rs`（`CandumpSource<I: Iterator<Item=Line>>`：`(ts) iface id#data`、无ts→None、iface 尾数字→channel、`#R`→remote、`##<flags 2hex><data>`→FD+brs/esi+长数据、扩展 id；非hex/garbage/error 行跳过计数，空行不计）
+- Modify: `crates/lumelog-can/src/lib.rs`（`pub mod source;`）
+- Create: `crates/lumelog-can/tests/data/candump_basic.log` + `crates/lumelog-can/tests/candump.rs`（8 例）
+
+**Why:** spec §7.3.1 candump 形式；Review Focus 3（FD/RTR/error 行不污染流、不 panic）。`next_frame` 拉式设默认行为：遇错行内部推进并计数，直到出帧或 EOF。
+**验证:** `cargo test -p lumelog-can` 16 pass（+8 candump）+ `cargo clippy --all-targets -- -D warnings` 净。修正：测试里扩展帧 hex 字面量位数写错（`0x1FF_FFFF`→`0x1FFF_FFFF`，解析器无错）；`next_frame` 由 `while let` 改 `for ... by_ref()` 满足 clippy。
+
+### 5. Vector ASC 源（先于 Task 3 执行：无外部工具依赖）
+**Files:**
+- Create: `crates/lumelog-can/src/source/asc.rs`（`AscSource<I: Iterator<Item=Line>>`：`<base> <chan> <ID>x? <Rx|Tx> <d|r> <dlc> <b0>...`；token0 parse f64 作 timestamp、id 尾 `x`→去 x 按 hex 解析、`d`→逐 token hex 字节（dlc=实际字节数，>64 跳过）、`r`→remote（dlc 取声明值）；`boe`/`bcs`/`error`/header（`date`/`base`）/非帧行跳过计数，空行不计）
+- Modify: `crates/lumelog-can/src/source/mod.rs`（`pub mod asc;` + `pub use AscSource`）
+- Create: `crates/lumelog-can/tests/data/asc_basic.asc`（date头/空行/普通帧/扩展帧x/remote/boe/base/CAN前缀，decoded=3 skipped=4）+ `crates/lumelog-can/tests/asc.rs`（6 例）
+
+**Why:** spec §7.3.2 Vector ASC 形式；Review Focus 3（ASC 变体帧/非帧行不污染流、不 panic）。**已知限制**：ASC 方言众多，本实现只保证 spec 描述形态 + 夹具；未覆盖变体（如 `CAN` 前缀行、`boe`/`bcs` 状态行、绝对/相对时间基准换算）作跳过处理，date 头不作时间基准解析。短行安全访问用 `toks.get(..)` 杜绝越界 panic。
+**验证:** `cargo test -p lumelog-can` 22 pass（+6 asc）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
+
+### 6. 通用正则源（先于 Task 3 执行：无外部工具依赖）
+**Files:**
+- Create: `crates/lumelog-can/src/source/regex_source.rs`（`RegexSource<I: Iterator<Item=Line>>`；`new(lines, pattern) -> Result<Self, CanError>`：`Regex::new` 失败→`RegexCompile`，`capture_names()` 缺 `id`/`data` 命名组→`BadRegex`（`ts` 可选）。`parse_line` 为自由函数（避开 `self.lines.by_ref()` 与 `&self` 借用冲突）；id 容忍 `0x/0X` 前缀、data 剔除空格/`:`/`,`/`-` 后走 `hex_to_bytes`、dlc=字节数（>64 跳过）、ts→f64）
+- Modify: `crates/lumelog-can/src/source/mod.rs`（`pub mod regex_source;` + `pub use RegexSource`）
+- Create: `crates/lumelog-can/tests/regex_source.rs`（7 例：含/缺命名组/编译错/自研格式解码/不匹配行跳过/dlc 由 hex 长度驱动/奇数或非 hex 跳过）
+
+**Why:** spec §7.3.3 通用正则源；Review Focus 5（缺 `id`/`data` 构建期即报错；行不匹配跳过计数；data hex 长度驱动 dlc）。修正：regex 1.13 无 `capture_index`→改 `capture_names().flatten()`；`unwrap_err()` 需 `T: Debug`→给 `RegexSource` derive Debug。
+**验证:** `cargo test -p lumelog-can` 29 pass（+7 regex）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
+
+### 3. 信号位序解码 Intel/Motorola（在 4/5/6 之后执行：需 cantools）
+**Files:**
+- Create: `crates/lumelog-can/src/decode.rs`（`extract_raw`（Intel LSB-first `start_bit+k`；Motorola DBC 斜线位序：start_bit 作 MSB，字节内向下走、跨到下一高字节 MSB）、`raw_to_signed`（位移符号扩展）、`to_physical`（raw*factor+offset）、`decode_signals`（含 value_table→enum_text））
+- Create: `crates/lumelog-can/tests/data/bitorder.dbc`（4 Intel + 4 Motorola 信号，跨字节 len20、有符号负值、factor≠1/offset≠0）
+- Create: `crates/lumelog-can/tests/data/golden_bitorder.json`（**cantools 39.4.5 生成的 8 条权威 golden**）+ `crates/lumelog-can/tests/gen_golden.py`（dev 脚本，不进 CI）
+- Create: `crates/lumelog-can/tests/bitorder_golden.rs`（手工解析 golden JSON、逐条对拍 raw 精确 + physical 1e-9 容差；无 serde）、`crates/lumelog-can/tests/decode_proptest.rs`（4 个 proptest：Intel 对独立参考式/宽度不溢出/补码往返/物理线性）
+- Modify: `crates/lumelog-can/src/lib.rs`（`pub mod decode;`）
+
+**Why:** spec §7.2/§13.1；Review Focus 1（Motorola `@0` 锯齿位序）+ 2（有符号补码 + factor/offset 浮点）。**位序算法经 cantools 39.4.5 golden 逐位对拍通过**（Intel/Motorola × 有/无符号 × 跨字节 len20 × 负值均匹配）。golden 为权威，实现向其靠拢（本次一次即中，未改夹具）。
+**验证:** `cargo test -p lumelog-can` 36 pass（+3 bitorder_golden +4 proptest）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。cantools 仅供开发期生成夹具，仓库已提交 golden、后续无需 Python。
+
+### 7. lumelog-can 解码 CLI（M2 引擎验收）
+**Files:**
+- Create: `crates/lumelog-can/src/bin/lumelog-can.rs`（手工 `std::env::args` 解析、无 clap/serde；子命令 `dbc --file [--lenient]` 输出 `{messages,signals,errors}`、`decode --log --format candump|asc|regex [--regex] [--dbc] [--limit N=20] [--out jsonl|csv]`，`--dbc` 按 can_id 匹配消息并附 `decode_signals` 物理值；默认输出前 limit 帧 + `{decoded,skipped}`；退出码用法错=2、文件/解析错=1）
+- Create: `crates/lumelog-can/src/tests_common.rs`（`pub mod tests_common`：`gen_candump(n, seed) -> Vec<GenFrame>` 确定性 LCG 合成 11-bit 标准帧，供 10万帧验收+基准）
+- Modify: `crates/lumelog-can/Cargo.toml`（`[[bin]]`）、`crates/lumelog-can/src/lib.rs`（`pub mod tests_common;`）
+- Create: `crates/lumelog-can/tests/data/cli_intel.log`（`can0 64#DEADBEEF12345678`→id100 IntelMsg）+ `crates/lumelog-can/tests/cli_can.rs`（7 例：用 `CARGO_BIN_EXE_lumelog-can` 跑真实二进制；dbc 计数/decode 计数带采样/带 dbc 信号物理值与 golden 一致/无参退2/坏 format退2/缺文件退1/decodes_100k_frames_faithfully）
+
+**Why:** spec §7.5 导出 + §12 M2 验收引擎侧。**10 万帧合成 candump 忠实解码**：decoded==100_000、skipped==0、逐帧 id/dlc/data 与生成端一致；吞吐 debug 档 209.8ms (~2.1 µs/帧，release 会更快；UI 流畅 P4 属 Plan 3)。带 dbc 解码物理值与 Task 3 cantools golden 一致（I_S16 raw -16723→physical -8371.5）。
+**验证:** `cargo test -p lumelog-can` 45 pass（+2 tests_common +7 cli_can）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。修正：测试字符串转义多反斜杠致不闭合；clippy manual_map→改 `.map`。
+
+**M2 引擎汇总：** Plan 2 七个任务（数据模型/DBC 解析/位序解码/candump/ASC/正则/CLI）全部完成；引擎侧验收达标（10万帧正确 + golden 对拍）。IPC 命令层与 CanPanel 属 Plan 3。
+
+### 终审修复（CodeReview 全分支审查 → 两条 Important，“绝不 panic”硬约束）
+**Files:** `src/dbc/parse.rs`（`build_signal` 拒绝 length==0 或 >64）、`src/decode.rs`（`extract_raw` 入参防御 `length.min(64)` 钳位）、`src/source/asc.rs`（remote 声明 dlc>64 → 跳过）。
+**Why:** 终审发现畸形 DBC `SG_ ...|65@`（移位 ≥64 debug panic）与 ASC remote `Tx r 200`（下游 `data[..dlc]` 越界 panic）两处 panic 路径，违反 Global Constraint“绝不 panic”。三处各加一道守卫（parse 拒范围 + decode 钳位为双保险 + asc 限幅），新3 个回归测试钉住（`signal_length_out_of_range_is_rejected`/`overlong_signal_does_not_panic`/`remote_dlc_over_64_is_skipped`）。
+**验证:** `cargo test -p lumelog-can` 48 pass（+3 回归）+ `cargo clippy --all-targets -- -D warnings` 净。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。
