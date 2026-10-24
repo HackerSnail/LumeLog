@@ -12,7 +12,7 @@ use crate::doc::chunk::{build_chunk, chunk_size, CharMap, Chunk};
 use crate::doc::line_index::{self, LineIndex, LineIndexBuilder};
 use crate::doc::save::{detect_eol, EolStyle};
 use crate::encoding::{self, EncodingLabel};
-use crate::error::CoreError;
+use crate::error::{CoreError, OpenReject};
 
 /// Upper bound on the decoded-chunk cache, per spec §4.2.
 const CACHE_LIMIT_BYTES: usize = 64 * 1024 * 1024;
@@ -202,31 +202,72 @@ impl DocFile {
     }
 }
 
-/// Build the line index. UTF-16 uses the aligned 16-bit scan (Review Focus 5)
-/// over the whole buffer; byte encodings stream in 8MB windows via memchr.
-fn build_index(file: &mut File, size: u64, label: EncodingLabel) -> Result<LineIndex, CoreError> {
+/// Build the line index, streaming byte encodings in `chunk_size` windows and
+/// reporting cumulative indexed bytes to `on_progress` after each window. The
+/// app drives this from a background index thread and forwards progress to the
+/// UI (spec §9 `on_index_progress`). UTF-16 uses the aligned 16-bit scan over
+/// the whole buffer (Review Focus 5), reporting once at completion. Passing
+/// `READ_CHUNK` reproduces the historical synchronous path byte-for-byte.
+pub fn build_index_with_progress(
+    file: &mut File,
+    size: u64,
+    label: EncodingLabel,
+    chunk_size: u64,
+    on_progress: &mut dyn FnMut(u64),
+) -> Result<LineIndex, CoreError> {
     match label {
         EncodingLabel::Utf16Le | EncodingLabel::Utf16Be => {
             let data = read_at(file, 0, size as usize)?;
             let little_endian = label == EncodingLabel::Utf16Le;
-            line_index::build_aligned(&data, 0x000A, little_endian)
+            let idx = line_index::build_aligned(&data, 0x000A, little_endian)?;
+            on_progress(size);
+            Ok(idx)
         }
         _ => {
+            let chunk = chunk_size.max(1) as usize;
             let mut b = LineIndexBuilder::new(size);
-            let mut buf = vec![0u8; READ_CHUNK as usize];
+            let mut buf = vec![0u8; chunk];
             let mut off = 0u64;
             while off < size {
-                let want = READ_CHUNK.min(size - off) as usize;
+                let want = chunk.min((size - off) as usize);
                 let n = read_into(file, off, &mut buf[..want])?;
                 if n == 0 {
                     break;
                 }
                 b.push_chunk(&buf[..n]);
                 off += n as u64;
+                on_progress(off);
             }
             b.finish()
         }
     }
+}
+
+/// Synchronous index build used by `DocFile::open` — the no-progress delegate
+/// over the shared streaming core, so open and background indexing are one
+/// code path (DRY, pinned by `build_index_with_progress` parity tests).
+fn build_index(file: &mut File, size: u64, label: EncodingLabel) -> Result<LineIndex, CoreError> {
+    build_index_with_progress(file, size, label, READ_CHUNK, &mut |_| {})
+}
+
+/// Pre-open validation for the IPC `doc_open` (spec §9): existence, directory,
+/// permission and size limit, each returning its own `OpenReject` reason so the
+/// app can surface a precise error code rather than a generic io failure. Pure
+/// — it only stats the path and opens no handle. `size_limit` is the caller's
+/// cap; genuine read failures still surface later through `DocFile::open`.
+pub fn validate_open_path(path: &Path, size_limit: u64) -> Result<(), OpenReject> {
+    let meta = path.metadata().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => OpenReject::NotFound,
+        std::io::ErrorKind::PermissionDenied => OpenReject::PermissionDenied,
+        _ => OpenReject::NotFound,
+    })?;
+    if meta.is_dir() {
+        return Err(OpenReject::IsDirectory);
+    }
+    if meta.len() > size_limit {
+        return Err(OpenReject::TooLarge(meta.len(), size_limit));
+    }
+    Ok(())
 }
 
 /// Read exactly `len` bytes (or to EOF) starting at `pos` without disturbing
@@ -251,4 +292,116 @@ fn read_into(file: &mut File, pos: u64, buf: &mut [u8]) -> Result<usize, CoreErr
         }
     }
     Ok(filled)
+}
+
+#[cfg(test)]
+mod ipc_logic_tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "lumelog-open-{}-{}-{}",
+            tag,
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn validate_open_path_ok_under_limit() {
+        let dir = tmpdir("ok");
+        let f = dir.join("a.log");
+        fs::write(&f, b"line1\nline2\n").unwrap();
+        assert_eq!(validate_open_path(&f, 1024), Ok(()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_open_path_not_found() {
+        let dir = tmpdir("nf");
+        let missing = dir.join("nope.log");
+        assert_eq!(validate_open_path(&missing, 1024), Err(OpenReject::NotFound));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_open_path_is_directory() {
+        let dir = tmpdir("dir");
+        assert_eq!(validate_open_path(&dir, 1024), Err(OpenReject::IsDirectory));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_open_path_too_large_reports_sizes() {
+        let dir = tmpdir("big");
+        let f = dir.join("a.log");
+        fs::write(&f, b"0123456789").unwrap(); // 10 bytes
+        assert_eq!(validate_open_path(&f, 4), Err(OpenReject::TooLarge(10, 4)));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_index_with_progress_matches_whole_and_reports_monotonically() {
+        let dir = tmpdir("prog");
+        let f = dir.join("log");
+        let mut text = String::new();
+        for i in 0..1000 {
+            text.push_str(&format!("line {i} payload-{:0>4}\n", i % 7));
+        }
+        fs::write(&f, text.as_bytes()).unwrap();
+        let size = text.len() as u64;
+        let mut file = fs::File::open(&f).unwrap();
+
+        let mut progress: Vec<u64> = Vec::new();
+        let idx = build_index_with_progress(
+            &mut file,
+            size,
+            EncodingLabel::Utf8,
+            128, // tiny chunk => many progress steps
+            &mut |b| progress.push(b),
+        )
+        .unwrap();
+
+        // Parity with the whole-buffer builder (same offsets / line count).
+        let whole = line_index::build(text.as_bytes()).unwrap();
+        assert_eq!(idx.offsets(), whole.offsets());
+        assert_eq!(idx.line_count(), whole.line_count());
+
+        // Strictly increasing, terminates exactly at EOF size, more than one step.
+        assert!(
+            progress.windows(2).all(|w| w[0] < w[1]),
+            "progress not monotonic: {progress:?}"
+        );
+        assert_eq!(*progress.last().unwrap(), size);
+        assert!(progress.len() > 1, "expected multiple steps: {progress:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_index_with_progress_single_report_for_tiny_file() {
+        let dir = tmpdir("one");
+        let f = dir.join("log");
+        fs::write(&f, b"only one line\n").unwrap();
+        let size = fs::metadata(&f).unwrap().len();
+        let mut file = fs::File::open(&f).unwrap();
+        let mut progress: Vec<u64> = Vec::new();
+        build_index_with_progress(
+            &mut file,
+            size,
+            EncodingLabel::Utf8,
+            READ_CHUNK,
+            &mut |b| progress.push(b),
+        )
+        .unwrap();
+        assert_eq!(progress, vec![size]); // one chunk => exactly one report at EOF
+        fs::remove_dir_all(&dir).ok();
+    }
 }

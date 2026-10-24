@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 8（阶段 A）：IPC 前置校验 + 带进度索引下沉 core
+
+- 文件：`src/error.rs` 新增 `OpenReject`（NotFound/IsDirectory/PermissionDenied/TooLarge，`PartialEq`）；`src/doc/file.rs` 把私有 `build_index` 拆成公共 `build_index_with_progress(file, size, label, chunk_size, on_progress)`（逐块回调累计字节）+ `build_index` 委派（DRY，单一代码路径），新增纯函数 `validate_open_path(path, size_limit) -> Result<(), OpenReject>`；`doc/mod.rs` re-export 两函数；`file.rs` 末尾 `#[cfg(test)] mod ipc_logic_tests`（6 测）。
+- 为什么：plan Task 8 Step 2/3 明示“用纯逻辑拆分保可测”——索引线程与 `doc_open` 前置校验的重逻辑放 core（Task 2 已有 `LineIndexBuilder`，包一层），Tauri 命令层只做转发；本阶段为无头可验证部分（不依赖 Tauri），Step 4 的 GUI 冒烟依 plan 缓至 Task 11。
+- 实现决策：
+  - `on_progress` 用 `&mut dyn FnMut(u64)`（object-safe，供后台线程携带 Channel 闭包）；UTF-16 整缓冲扫描仅在完成时回报一次（与既有全量读路径一致），字节编码每块回报，故 `chunk=8MB` 下逐 8MB 推进（spec §9 `on_index_progress`）。
+  - `validate_open_path` 只 stat 路径不开句柄，纯函数；“其他 io 错误”归 NotFound（真正读失败仍由后续 `DocFile::open` 精确上报），`TooLarge` 携带 (实际大小, 上限) 供 IPC 文案。
+  - `OpenReject` 与 `CoreError` 分立：IPC 层据此映射专码 `not_found|is_directory|permission_denied|too_large`，而非泛 `io`。
+- 验证：`cargo test -p lumelog-core --lib` → 57 passed（+6：`validate_open_path_ok_under_limit`/`_not_found`/`_is_directory`/`_too_large_reports_sizes`、`build_index_with_progress_matches_whole_and_reports_monotonically`（对拍 `line_index::build` 逐字节同 offsets + 严格递增且终止于 EOF）、`build_index_with_progress_single_report_for_tiny_file`）；`cargo clippy -p lumelog-core --all-targets -D warnings` 无告警。
+
 ## 2026-10-24 — Task 7: lumelog CLI 冒烟（M0 验收）
 
 - 文件：新增 `src/bin/lumelog.rs`（`open|search|save` 三子命令 + 手工 `std::env::args` 解析 + 手搓 JSON 输出）、`tests/cli_smoke.rs`（7 个断言测试 + 1 个 `#[ignore]` 1GiB 计时冒烟）；数据文件 `tests/data/sample_gbk.log`（GBK 20 行台架日志，由 `ensure_sample` 幂等生成并纳入版本库）。

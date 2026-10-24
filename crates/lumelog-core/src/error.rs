@@ -32,3 +32,24 @@ pub enum CoreError {
     #[error("target file is locked by another process")]
     Locked,
 }
+
+/// Result of the *pre-open* checks the app runs before handing a path to
+/// `DocFile::open` (spec §9). Kept separate from `CoreError` so the IPC layer
+/// can map each case to a distinct, stable error code (`not_found`,
+/// `is_directory`, `permission_denied`, `too_large`) rather than a generic io
+/// failure. `PartialEq` so the pure validator can be unit-tested by equality.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OpenReject {
+    #[error("path does not exist")]
+    NotFound,
+
+    #[error("path is a directory")]
+    IsDirectory,
+
+    #[error("permission denied")]
+    PermissionDenied,
+
+    /// `0` = file size, `1` = configured limit.
+    #[error("file too large ({0} bytes > {1} byte limit)")]
+    TooLarge(u64, u64),
+}
