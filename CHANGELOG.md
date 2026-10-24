@@ -6,6 +6,14 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### Task 5. CanPanel 视图过滤引擎（纯函数）
+**Files:**
+- Create: `app/frontend/src/canfilter.ts`（`CanFilter` 接口 + `applyCanFilter(frames, f)` 纯谓词）
+- Create: `app/frontend/src/canfilter.test.ts`（7 例）
+
+**Why:** spec §7.4 / 用户批复的过滤范围（ID 区间/消息名/信号条件/时间窗口）。纯函数不改入参数组与帧对象（视图级过滤不动行索引）；ID 闭区间且 `idFrom>idTo` 直接不匹配（非法区间不抛错）；时间窗口下 `timestampMs` 缺失的帧被排除；信号 `==` 用 `Object.is` 钉死浮点语义。各轴 AND。
+**验证:** `npm --prefix app/frontend test` 36 pass（新 `canfilter.test.ts` 7 例：no_filter/id 区间含单边界与反转/msg_name/signal 条件/time_window/组合 AND/不变更）+ `npm --prefix app/frontend run build`（tsc 通过，39 modules）。
+
 ### Task 4. 前端 `ipc.ts` CAN 桥接 + 新错误码
 **Files:**
 - Modify: `app/frontend/src/ipc.ts`（`SignalValueJson`/`FrameJson`/`DbcMsgSummary`/`DbcErrorJson`/`DbcInfo`/`CanStatsJson` interface（camelCase 对齐 `dto.rs`）+ `IpcErrorCode` 联合加 `dbc_syntax`/`bad_regex`/`regex_compile`/`source_format` + `IPC_ERROR_ZH` 四条中文 + `dbcImport`/`canParse`（双 Channel 抄 `searchRun`）/`canCancel`/`canDecodeSnippet` 包装）
