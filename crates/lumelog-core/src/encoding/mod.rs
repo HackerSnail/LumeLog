@@ -343,15 +343,28 @@ pub fn encode_all(label: EncodingLabel, text: &str) -> Encoded {
         }
         other => {
             let enc = other.encoding();
-            // Encode code point by code point. `encoding_rs`'s bulk lossy
-            // `encode` writes unmappable characters as an HTML decimal numeric
-            // reference (`&#128169;`) — 9 bytes that silently rewrite the line,
-            // change its length and break round-tripping. Spec §4.4 instead asks
-            // for a single replacement marker. GB18030 can encode all of Unicode
-            // (so it never lands here with a real unmappable); the codecs that do
-            // (GBK/BIG5/Shift-JIS/ISO-8859-1) have no U+FFFD code point of their
-            // own, so the only lossy marker that stays exactly one byte and
-            // re-decodes cleanly is `?`.
+            // Fast path: a single bulk encode. When every code point is
+            // representable (the overwhelmingly common case) the result is byte-
+            // identical to the per-code-point walk below but allocates once, not
+            // once per non-ASCII char — which matters because the target workload
+            // is multi-megabyte Chinese logs.
+            let (cow, _actual, had_errors) = enc.encode(text);
+            if !had_errors {
+                return Encoded {
+                    bytes: cow.into_owned(),
+                    replace_count: 0,
+                };
+            }
+            // Only when something is unrepresentable do we re-walk code point by
+            // code point. `encoding_rs`'s bulk lossy `encode` writes unmappable
+            // characters as an HTML decimal numeric reference (`&#128169;`) — 9
+            // bytes that silently rewrite the line, change its length and break
+            // round-tripping. Spec §4.4 instead asks for a single replacement
+            // marker; the codecs that actually hit this (GBK/BIG5/Shift-JIS/
+            // ISO-8859-1) have no U+FFFD code point, so the only marker that
+            // stays exactly one byte and re-decodes cleanly is `?`. (GB18030
+            // covers all Unicode and only reaches here for U+E5E5, which has no
+            // round-trip byte.)
             let mut bytes = Vec::with_capacity(text.len());
             let mut replace_count = 0usize;
             let mut scratch = [0u8; 4];

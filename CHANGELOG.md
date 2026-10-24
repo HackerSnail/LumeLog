@@ -25,7 +25,16 @@
 - **I4** 原子写副作用：软链被替换为普通文件/未 fsync 父目录 → 写通过 `canonicalize` 落真实路径 + `#[cfg(unix)]` rename 后 fsync 父目录；属性保留缓至后续。
 - **M1** `Mixed` 写盘后 `eol_style` 仍记 Mixed → 现由 `reload_after_save` 从实际字节重新 `detect_eol`（自然 settle 为 Crlf）；**M3** `detect_eol` 不识别裸 `\r` 已在文档注释说明。
 - 测试补齐：Mixed/裸 CR 展开、UTF-8 BOM 保存往返+重探、post-save chunk_at 新鲜、rename 失败 tmp 清理、Force 写占位符非数字实体、Save-As 不改 doc 基线。GBK emoji 不可映射现断言写为单字符 `?` 且不含 `&#`（`encode_all` 行为修正同步反映到 encoding 单测）。
-- 验证：`cargo test -p lumelog-core` → 37 lib passed（save 11 个）+ proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。
+- 验证：`cargo test -p lumelog-core` → 37 lib passed（save 11 个）+ proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。二次 scoped re-review（区间 b12f91b..866a2e0）裁定 Approved（附 1 项 SHOULD FIX）。
+
+### Task 5 二次评审 polish（性能与测试硬化）
+
+二次 scoped re-review Approved，逐条确认首轮 3C+4I+M 均修复、无功能回归；用 encoding_rs 0.8.42 源码证明可表示字符的逐码位字节输出与批量编码逐字节等价（编码器无跨字符状态，仅 Iso2022Jp 有 pending）。以下为 Approved 后处理的可修项：
+- **W-1**（SHOULD FIX，性能回归）：C3b 的逐码位 `encode_all` 会给每个非 ASCII 字符带来一次堆分配（5MB GBK ≈ 170 万次，慢 20–40×），对中文日志核心负载是实质回归。修：先跑一次批量 `enc.encode(text)`，`had_errors==false`（绝大多数）直接返回批量结果（一次分配）；仅当确有不可映射时才回退逐码位写 `?`。可表示字符的输出与原批量逐字节一致。
+- **N-1**（tmp 碰撞）：`temp_path` 原为固定名 `.{stem}.lumelogtmp`，同目录同词干文件（`a.txt`/`a.md`）或并发多 Tab 保存会抢同一临时文件互相截走。改为 `.{stem}.{pid}.{seq}.lumelogtmp`（`static SEQ: AtomicUsize`）。
+- **S-3**（诚实性）：`SaveReport.replace_count` 与 `save_text` 内注释从“写 U+FFFD”订正为“写单个 `?` 占位符”（与 C3b 实际行为一致）；`encode_all` 的 GB18030 注释补 U+E5E5 例外。补记：初版的 `note_saved` 已被 `reload_after_save` 取代（见 C1/I1）。
+- **S-1/S-2**（测试硬化）：`write_tmp` 改为每次建独立子目录避免并行测试互扰；新增 `stray_tmps(dir)` 扫描 `*.lumelogtmp`（因 N-1 随机 tmp 名，旧 `!temp_path(&p).exists()` 断言变恒真，改用扫描才真正钉住“无残留”）；`write_failure_removes_tmp` 重命名为 `rename_failure_removes_tmp`（诚实标注其覆盖 rename-Err 分支）；新增 `write_stage_failure_returns_error_and_creates_nothing`（create/write 分支）与 `save_as_to_nonexistent_path_creates_it_without_conflict`（canonicalize 失败回退 + Save-As 不污染基线）。
+- 验证：`cargo test -p lumelog-core` → 39 lib passed（save 13 个）+ proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。
 
 ## 2026-10-24 — Task 4: DocFile 取块解码 + char_map
 

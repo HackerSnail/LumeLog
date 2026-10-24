@@ -13,6 +13,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use crate::doc::file::DocFile;
@@ -58,7 +59,8 @@ pub struct SaveOptions {
 /// Outcome of a completed write.
 #[derive(Debug)]
 pub struct SaveReport {
-    /// Characters replaced with U+FFFD in the target encoding.
+    /// Characters that could not be represented in the target encoding, each
+    /// written as a single `?` placeholder (`encode_all`; spec §4.4 confirm flow).
     pub replace_count: usize,
     /// True when a conflict was detected but `Force` overrode it.
     pub conflict: bool,
@@ -167,8 +169,8 @@ pub fn save_text(
     let enc = encode_all(opts.encoding, &with_eol);
 
     if enc.replace_count > 0 && opts.overwrite_policy != OverwritePolicy::Force {
-        // Unmappable characters would be written as U+FFFD — confirm first, and
-        // crucially leave the disk untouched (spec §4.4).
+        // Unmappable characters would be written as a `?` placeholder — confirm
+        // first, and crucially leave the disk untouched (spec §4.4).
         return Err(CoreError::Unmappable(enc.replace_count));
     }
 
@@ -248,7 +250,12 @@ fn temp_path(target: &Path) -> PathBuf {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "doc".to_string());
-    target.with_file_name(format!(".{stem}.lumelogtmp"))
+    // Uniquify with pid + a per-process counter: two files in the same directory
+    // that share a stem (`a.txt` and `a.md`), or two tabs saving concurrently,
+    // must not fight over one `.{stem}.lumelogtmp` and clobber each other.
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(".{stem}.{}.{}.lumelogtmp", std::process::id(), seq))
 }
 
 /// A rename failure meaning "the destination is held by another process", so the
@@ -274,15 +281,34 @@ fn is_locked(e: &std::io::Error) -> bool {
 mod tests {
     use super::*;
     use crate::encoding::decode_all;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn write_tmp(bytes: &[u8]) -> PathBuf {
+        // Each call gets its own directory so parallel tests never observe each
+        // other's intermediate `.lumelogtmp` files when scanning for strays.
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut p = std::env::temp_dir();
-        p.push(format!("lumelog_save_{}_{id}.log", std::process::id()));
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("lumelog_save_{}_{id}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("doc.log");
         fs::write(&p, bytes).unwrap();
         p
+    }
+
+    fn parent(path: &Path) -> &Path {
+        path.parent().expect("test files live in a directory")
+    }
+
+    /// Names of leftover `*.lumelogtmp` files in `dir` (atomic-write litter).
+    fn stray_tmps(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.ends_with(".lumelogtmp"))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn opts(path: Option<PathBuf>, encoding: EncodingLabel, eol: EolStyle) -> SaveOptions {
@@ -358,7 +384,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, CoreError::Unmappable(1)), "got {err:?}");
         assert_eq!(fs::read(&p).unwrap(), before, "disk untouched on unmappable");
-        assert!(!temp_path(&p).exists(), "no temp file created before the gate");
+        assert!(stray_tmps(parent(&p)).is_empty(), "no temp file created before the gate");
         fs::remove_file(&p).ok();
     }
 
@@ -385,7 +411,7 @@ mod tests {
         let mut doc = DocFile::open(&p, 1 << 20).unwrap();
         let meta = doc.disk_meta();
         save_text(&mut doc, "hello\n", &opts(None, EncodingLabel::Utf8, EolStyle::Lf), meta).unwrap();
-        assert!(!temp_path(&p).exists(), "temp file was renamed away");
+        assert!(stray_tmps(parent(&p)).is_empty(), "temp file was renamed away");
         // C1: after an in-place save the doc's handle + index must be rebound, so
         // `chunk_at` returns the freshly written content, not the pre-save bytes.
         assert_eq!(doc.chunk_at(0, 1).unwrap().text, "hello\n", "post-save read is fresh");
@@ -441,22 +467,31 @@ mod tests {
     }
 
     #[test]
-    fn write_failure_removes_tmp() {
-        // I2: a rename failure (here, target is a directory) must clean up the
-        // temp file and not leave litter beside the target.
+    fn rename_failure_removes_tmp() {
+        // I2 (rename branch): a rename that fails after the temp file was written
+        // (here the target is a directory) must clean the temp file up.
         let p = write_tmp(b"seed\n");
         let mut doc = DocFile::open(&p, 1 << 20).unwrap();
         let meta = doc.disk_meta();
-        let dir = {
-            let mut d = std::env::temp_dir();
-            d.push(format!("lumelog_save_dir_{}", std::process::id()));
-            fs::create_dir_all(&d).unwrap();
-            d
-        };
+        let dir = parent(&p).join("target_dir");
+        fs::create_dir_all(&dir).unwrap();
         let res = save_text(&mut doc, "x\n", &opts(Some(dir.clone()), EncodingLabel::Utf8, EolStyle::Lf), meta);
         assert!(res.is_err(), "renaming a file over a directory must fail");
-        assert!(!temp_path(&dir).exists(), "temp cleaned after failure");
-        fs::remove_dir_all(&dir).ok();
+        assert!(stray_tmps(&dir).is_empty(), "temp cleaned after rename failure");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn write_stage_failure_returns_error_and_creates_nothing() {
+        // I2 (write branch): if the temp file cannot even be created (its parent
+        // is missing), save errors out before the rename and produces no target.
+        let p = write_tmp(b"seed\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let meta = doc.disk_meta();
+        let missing = parent(&p).join("no_such_dir").join("out.log");
+        let res = save_text(&mut doc, "x\n", &opts(Some(missing.clone()), EncodingLabel::Utf8, EolStyle::Lf), meta);
+        assert!(res.is_err(), "writing into a missing directory must fail");
+        assert!(!missing.exists(), "no target file created");
         fs::remove_file(&p).ok();
     }
 
@@ -475,6 +510,25 @@ mod tests {
         // I1: a Save-As must leave `doc` bound to its ORIGINAL file — its
         // recorded meta must not be repointed at the destination.
         assert_eq!(doc.disk_meta(), stale, "Save-As must not repoint the doc baseline");
+        fs::remove_file(&p).ok();
+        fs::remove_file(&out).ok();
+    }
+
+    #[test]
+    fn save_as_to_nonexistent_path_creates_it_without_conflict() {
+        // C2 / canonicalize fallback: the destination does not exist yet, so
+        // canonicalize fails; we must still create it and never mistake the
+        // original's dirtied baseline for a conflict on the fresh destination.
+        let p = write_tmp(b"original\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let stale = doc.disk_meta();
+        fs::write(&p, b"external change\n").unwrap(); // dirty the original (irrelevant here)
+        let out = parent(&p).join("brand_new.log"); // deliberately NOT pre-created
+        assert!(!out.exists());
+        let rep = save_text(&mut doc, "copy\n", &opts(Some(out.clone()), EncodingLabel::Utf8, EolStyle::Lf), stale).unwrap();
+        assert!(!rep.conflict, "a fresh destination is never a conflict");
+        assert_eq!(fs::read(&out).unwrap(), b"copy\n");
+        assert_eq!(doc.disk_meta(), stale, "Save-As leaves the doc bound to the original");
         fs::remove_file(&p).ok();
         fs::remove_file(&out).ok();
     }
