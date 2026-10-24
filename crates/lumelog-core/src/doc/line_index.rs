@@ -207,10 +207,12 @@ mod tests {
     }
 
     #[test]
-    fn gb18030_four_byte_lf_missplit_is_indexable() {
-        // A GB18030 4-byte sequence whose final byte is 0x0A. The raw scanner
-        // sees a 0x0A and splits; that's acceptable — the layer only promises
-        // indexability (no panic), display merge-retry is handled in DocFile.
+    fn scanner_splits_on_every_lf_regardless_of_bytes() {
+        // The raw scanner is content-agnostic: it splits on every 0x0A. Note
+        // this is NOT a valid GB18030 4-byte sequence — GB18030 trail bytes are
+        // 0x30-0x39, so 0x0A can never be one; for every supported codec 0x0A
+        // is only ever a real newline. The bytes are arbitrary and just pin the
+        // split / no-panic behavior; display merge-retry lives in DocFile.
         let data = [0x81u8, 0x30, 0x88, 0x0A, b'x', b'\n'];
         let idx = build(&data).unwrap();
         // 0x0A at index 3 splits (line1 starts at 4), final 0x0A at index 5

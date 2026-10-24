@@ -18,9 +18,16 @@
 - I-1 `read_at` 短读被 `truncate` 静默吞掉→`build_chunk` 切片越界 panic（日志轮转/外部截断为主场景）→ `chunk_at` 校验 `bytes.len()==want`，不符返回 `CoreError::Io(UnexpectedEof)`；`to_rel` 加 `min` 二次防御。
 - I-2 `decode_all` 对任意以 BOM 开头的切片都剥 BOM，与 `bom_skip` 仅 `ls==0` 不一致 → 非首块中部 `EF BB BF` 被误剥、文本丢一字符且 char_map 错位 → 新增 `encoding::decode_region`（从不剥 BOM），build_chunk 按 `ls==0` 选 decode_all/否则 decode_region。
 - M-1 GB18030 合并重试循环对当前 9 种编码**不可达**（`0x0A` 从不是尾字节）→ 改为注释标注“对未来编码的防御”，测试新增断言 `logical_line_count==line_count`（证明未合并）。
-- M-3 部分块（`start_line>0`）零覆盖→ chunk_proptest 新增 (D) 随机 start/count 子块与整块逐字节一致（正钉住 I-2）。
+- M-3 部分块（`start_line>0`）零覆盖→ chunk_proptest 新增 (D) 随机 start/count 子块与整块逐字节一致（钉 abs_start/start_line 记账一致性；I-2 由 (A) 内部 BOM 语料 + docfile 集成测试独立钉住）。
 - 保留：M-2 UTF-16 整文件建索引的内存峰值（缓至流式 build_aligned 优化，ledger 记录）。
-- 验证：`cargo test -p lumelog-core` → 36 全 passed（26 lib + 8 docfile + 2 proptest）；`cargo clippy --all-targets -D warnings` 无告警。
+- 验证：`cargo test -p lumelog-core` → 36 全 passed（26 lib + 8 docfile + 2 proptest）；`cargo clippy --all-targets -D warnings` 无告警。首轮 CodeReview（区间 ef3fb81..5267a8f）裁定 Changes requested，二次 scoped re-review（5267a8f..aa01a27）裁定 Approved。
+
+### Task 4 二次评审 polish（表述与防御）
+
+- W-1（诚实性）：(D) 是子块与整块自比，实际钉不住 I-2 → chunk_proptest 语料补一条“首部 BOM + 行首内部 `EF BB BF`”，使 (A)（chunk 文本==整缓冲 decode_all）成为真正 oracle；订正 (D) 注释不再声称钉 I-2。
+- S-1：docfile `interior_bom_is_preserved_as_content` 加 char_map 断言（byte 5→(1,0)、byte 8→(1,1)、line_count==3），把内部 BOM 的行内 cu16 对齐也钉住。
+- S-2：`build_chunk` 的 `to_rel` 加 `debug_assert!`（abs∈[abs_start, abs_start+len]），`.min` 降级为纯 release 兜底，避免违约被静默掩盖。
+- S-3：`line_index.rs` 陈旧测试注释订正——`0x0A` 从不是 GB18030 尾字节（4 字节序列尾域为 0x30-0x39），测试重命名为 `scanner_splits_on_every_lf_regardless_of_bytes` 以反映其真实意图（内容无关的裸扫描）。
 
 ## 2026-10-24 — Task 3 修订：CodeReview 发现的缺陷修复
 

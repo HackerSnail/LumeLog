@@ -35,6 +35,15 @@ fn corpus() -> Vec<(EncodingLabel, Vec<u8>)> {
         v.push((EncodingLabel::Gb18030, encode_all(EncodingLabel::Gb18030, t).bytes));
         v.push((EncodingLabel::Utf16Le, encode_all(EncodingLabel::Utf16Le, t).bytes));
     }
+    // Interior BOM as content: leading BOM at offset 0, another `EF BB BF` at a
+    // line start mid-file. Assertion (A) then independently pins I-2 — a
+    // regression to whole-buffer `decode_all` per line would drop the interior
+    // U+FEFF and make the chunk text differ from the whole decode.
+    {
+        let mut b = vec![0xEF, 0xBB, 0xBF];
+        b.extend_from_slice("x\n\u{FEFF}y\nz\n".as_bytes());
+        v.push((EncodingLabel::Utf8Bom, b));
+    }
     v
 }
 
@@ -87,7 +96,9 @@ proptest! {
         }
 
         // (D) partial blocks (abs_start > 0) must agree with the whole-file map
-        // at every offset they cover — this is the path the I-2 BOM fix lives on.
+        // at every offset they cover. This pins the abs_start / start_line book-
+        // keeping against asymmetric regressions; I-2 is guarded separately by
+        // (A) on the interior-BOM corpus and the docfile integration test.
         let lc = idx.line_count();
         let start = ((lc as f32) * frac) as usize;
         if start < lc {

@@ -50,12 +50,14 @@ fn interior_bom_is_preserved_as_content() {
     let p = write_tmp(&bytes);
     let mut doc = DocFile::open(&p, 1 << 20).unwrap();
     assert_eq!(doc.encoding(), EncodingLabel::Utf8Bom);
+    assert_eq!(doc.line_count(), 3, "2 newlines + trailing empty line");
     assert_eq!(doc.chunk_at(0, 1).unwrap().text, "a\n", "leading BOM stripped");
-    assert_eq!(
-        doc.chunk_at(1, 1).unwrap().text,
-        "\u{FEFF}b\n",
-        "interior BOM kept as content"
-    );
+    let line1 = doc.chunk_at(1, 1).unwrap();
+    assert_eq!(line1.text, "\u{FEFF}b\n", "interior BOM kept as content");
+    // char_map stays aligned: byte 5 is the interior BOM's first byte (cu 0),
+    // byte 8 is 'b' after the 3-byte U+FEFF (cu 1).
+    assert_eq!(line1.char_map.byte_to_line_cu(5), (1, 0));
+    assert_eq!(line1.char_map.byte_to_line_cu(8), (1, 1));
     fs::remove_file(&p).ok();
 }
 

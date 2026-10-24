@@ -183,7 +183,19 @@ pub fn build_chunk(
     count: usize,
 ) -> Chunk {
     let end_line = (start_line + count).min(index.line_count());
-    let to_rel = |abs: u64| (abs - abs_start).min(bytes.len() as u64) as usize;
+    // Contract: `bytes` must cover every indexed line in `[start_line, end_line)`,
+    // i.e. `abs` lands in `[abs_start, abs_start + bytes.len()]`. `chunk_at` upholds
+    // this by rejecting short reads before calling; the `debug_assert` catches any
+    // future caller that violates it, and `.min` stays only as a release safety net
+    // so a violation degrades to a clamped slice instead of aborting a user's edit.
+    let to_rel = |abs: u64| {
+        debug_assert!(
+            abs >= abs_start && abs <= abs_start + bytes.len() as u64,
+            "byte {abs} outside buffer [{abs_start}, {})",
+            abs_start + bytes.len() as u64
+        );
+        (abs - abs_start).min(bytes.len() as u64) as usize
+    };
 
     let mut lines: Vec<LogicalLine> = Vec::new();
     let mut text = String::new();
