@@ -343,20 +343,28 @@ pub fn encode_all(label: EncodingLabel, text: &str) -> Encoded {
         }
         other => {
             let enc = other.encoding();
-            let (cow, _actual, had_errors) = enc.encode(text);
-            let replace_count = if had_errors {
-                let mut buf = [0u8; 4];
-                text
-                    .chars()
-                    .filter(|&c| enc.encode(c.encode_utf8(&mut buf)).2)
-                    .count()
-            } else {
-                0
-            };
-            Encoded {
-                bytes: cow.into_owned(),
-                replace_count,
+            // Encode code point by code point. `encoding_rs`'s bulk lossy
+            // `encode` writes unmappable characters as an HTML decimal numeric
+            // reference (`&#128169;`) — 9 bytes that silently rewrite the line,
+            // change its length and break round-tripping. Spec §4.4 instead asks
+            // for a single replacement marker. GB18030 can encode all of Unicode
+            // (so it never lands here with a real unmappable); the codecs that do
+            // (GBK/BIG5/Shift-JIS/ISO-8859-1) have no U+FFFD code point of their
+            // own, so the only lossy marker that stays exactly one byte and
+            // re-decodes cleanly is `?`.
+            let mut bytes = Vec::with_capacity(text.len());
+            let mut replace_count = 0usize;
+            let mut scratch = [0u8; 4];
+            for c in text.chars() {
+                let (out, _n, had_err) = enc.encode(c.encode_utf8(&mut scratch));
+                if had_err {
+                    replace_count += 1;
+                    bytes.push(b'?');
+                } else {
+                    bytes.extend_from_slice(&out);
+                }
             }
+            Encoded { bytes, replace_count }
         }
     }
 }
@@ -426,6 +434,13 @@ mod tests {
     fn gbk_emoji_is_unmappable() {
         let enc = encode_all(EncodingLabel::Gbk, "ok💩");
         assert_eq!(enc.replace_count, 1, "emoji cannot be represented in GBK");
+        // Spec §4.4 promises a replacement char, not encoding_rs' HTML numeric
+        // reference (`&#128169;`). GBK has no U+FFFD code point, so the marker is
+        // `?`; crucially the output must not contain a numeric ref and must
+        // re-decode to a single placeholder char (line length preserved).
+        let dec = decode_all(EncodingLabel::Gbk, &enc.bytes);
+        assert_eq!(dec.text, "ok?", "unmappable collapses to a single placeholder");
+        assert!(!enc.bytes.windows(2).any(|w| w == b"&#"), "no numeric ref");
     }
 
     #[test]

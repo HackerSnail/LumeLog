@@ -13,6 +13,20 @@
   - rename 失败归 `Locked` 的判据：`kind()==PermissionDenied` 或 Windows raw_os_error ∈ {5 访问拒绝, 32 共享冲突}；失败时 best-effort 删临时文件。
 - 验证：`cargo test -p lumelog-core` → 32 lib passed（含 save 6 个：`detect_eol_cases`/`save_roundtrip_gbk_crlf`/`conflict_blocks_save_without_force`/`unmappable_reports_count_before_write`/`atomic_write_leaves_no_tmp_on_success`/`save_as_to_new_path_is_not_a_conflict`）+ chunk_proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。
 
+### Task 5 修订（首轮 CodeReview 发现 3C+4I，均修复）
+
+首轮 CodeReview（区间 f8cde0a..b12f91b）裁定 Changes requested：
+- **C1** 就地保存后 DocFile 半更新：`atomic_write` 的 rename 替换了目录项，但旧 `File` 句柄仍指向被丢弃的旧 inode、旧行索引偏移失效 → `chunk_at`/搜索会读到**保存前的旧内容**。修：新增 `DocFile::reload_after_save(encoding)`，就地保存成功后重开句柄 + 从新字节重建行索引 + 按新编码重探 EOL（Save-As 不触发）。补测 `save_inplace_reindexes_after_transcode` + `atomic_write` 新增“保存后 chunk_at 读到新内容”断言。
+- **C2** 冲突门用裸路径字符串相等判 `overwriting_original`，大小写/链接/异写法同名文件会绕过冲突检查 → 静默覆盖。修：`same_file()` 先 `canonicalize` 再比，失败回退词法。写目标也 `canonicalize`（同时解 I4 软链）。
+- **C3** 不可映射写出的实际字节：`encoding_rs` 批量 lossy `encode` 对不可映射字符输出 HTML 数字实体 `&#128169;`（9 字节），而非 spec §4.4 承诺的替换符，且会改写行内容/长度、破坏往返。修：`encode_all` 逐码位编码，不可映射时写单个占位符（GBK/BIG5/Shift-JIS/ISO-8859-1 无 U+FFFD 码位→`?`；GB18030 可表全部 Unicode→不触发），不再出现数字实体。C3a（单一 `overwrite_policy` 同时豁免两门）= **Ruling**：plan 钉单字段，UI(Task8/9) 需分别确认后才传 Force，已在枚举文档说明。
+- **I1** Save-As 也调 `note_saved` 污染原文件冲突基线 → 改为仅 `overwriting_original` 时 reload；`save_as_to_new_path` 补 `doc.disk_meta()==stale` 断言钉住。
+- **I2** 写阶段（create/write/fsync）失败不清理临时文件（与函数文档矛盾）→ 拆 `write_stage`，任一步失败 best-effort 删 tmp；新增 `write_failure_removes_tmp`（目标传目录使 rename 失败）。
+- **I3** `is_locked` 将非 Windows `PermissionDenied` 误判为占用 → 用 `#[cfg(windows)]` 门控（5/32），unix 下权限问题归 `Io`。
+- **I4** 原子写副作用：软链被替换为普通文件/未 fsync 父目录 → 写通过 `canonicalize` 落真实路径 + `#[cfg(unix)]` rename 后 fsync 父目录；属性保留缓至后续。
+- **M1** `Mixed` 写盘后 `eol_style` 仍记 Mixed → 现由 `reload_after_save` 从实际字节重新 `detect_eol`（自然 settle 为 Crlf）；**M3** `detect_eol` 不识别裸 `\r` 已在文档注释说明。
+- 测试补齐：Mixed/裸 CR 展开、UTF-8 BOM 保存往返+重探、post-save chunk_at 新鲜、rename 失败 tmp 清理、Force 写占位符非数字实体、Save-As 不改 doc 基线。GBK emoji 不可映射现断言写为单字符 `?` 且不含 `&#`（`encode_all` 行为修正同步反映到 encoding 单测）。
+- 验证：`cargo test -p lumelog-core` → 37 lib passed（save 11 个）+ proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。
+
 ## 2026-10-24 — Task 4: DocFile 取块解码 + char_map
 
 - 文件：新增 `src/doc/chunk.rs`（Chunk/CharMap/LogicalLine + build_chunk，含 GB18030 误切合并重试）、`src/doc/file.rs`（DocFile：open 探测编码+建索引 / set_encoding / chunk_at / 手写 VecDeque 64MB LRU / UTF-16 走 build_aligned 偶数对齐索引）、`doc/mod.rs` re-export；`tests/chunk_proptest.rs`（byte_to_line_cu 对齐 oracle）、`tests/docfile.rs`（临时文件集成）。

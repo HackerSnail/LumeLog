@@ -99,14 +99,29 @@ impl DocFile {
         self.cache_bytes = 0;
     }
 
-    /// Record the on-disk state after a successful save so subsequent conflict
-    /// checks compare against what we just wrote, and cache the applied EOL style.
-    pub(crate) fn note_saved(&mut self, size: u64, mtime: SystemTime, eol: EolStyle) {
+    /// Rebind the handle after we replaced the file on disk (an in-place save
+    /// `rename`s over `path`, so the old `File` still points at the discarded
+    /// inode and the old index has stale byte offsets). Reopen, re-detect the
+    /// EOL style from the freshly written head, and rebuild the index against
+    /// the bytes we just wrote — otherwise `chunk_at` would serve pre-save data.
+    pub(crate) fn reload_after_save(&mut self, encoding: EncodingLabel) -> Result<(), CoreError> {
+        let mut file = File::open(&self.path)?;
+        let meta = file.metadata()?;
+        let size = meta.len();
+        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        let head = read_at(&mut file, 0, (size as usize).min(64 * 1024))?;
+        let eol_style = detect_eol(&encoding::decode_all(encoding, &head).text);
+        let index = build_index(&mut file, size, encoding)?;
+
+        self.file = file;
         self.size = size;
         self.mtime = mtime;
-        self.eol_style = eol;
+        self.label = encoding;
+        self.eol_style = eol_style;
+        self.index = index;
         self.cache.clear();
         self.cache_bytes = 0;
+        Ok(())
     }
 
     /// Decode lines `[line_start, line_start + line_count)` into a [`Chunk`],
