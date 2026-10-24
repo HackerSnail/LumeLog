@@ -2,6 +2,18 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 3 M2 CanPanel + IPC（feat/m2-can-panel）
+
+**依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
+
+### Task 1. 接入 lumelog-can + CAN DTO + from_can
+**Files:**
+- Modify: `app/src-tauri/Cargo.toml`（加 `lumelog-can` 路径依赖）
+- Modify: `app/src-tauri/src/dto.rs`（`SignalValueJson`/`FrameJson`/`DbcMsgSummary`/`DbcErrorJson`/`DbcInfo`/`CanStatsJson` camelCase serde + `frame_json`/`signal_value_json` + `IpcError::from_can` + 5 单测）
+
+**Why:** 接口先行，定住 Task 2/3 命令依赖的稳定 DTO 与错误映射（spec §9 code 契约）。按真实 crate API 修正了计划臆造项：`Line=(u64,String)` 行号由调用方提供、计数走 `stats()->SourceStats`、`Frame` 无 `is_extended`（`FrameJson` 不带）、`SignalValue.unit` 为 `String`；`timestamp` 秒→`timestampMs` 毫秒。
+**验证:** `cargo test -p lumelog-app can_tests` 5 pass（字段映射/sample.dbc 信号解码含 CoolantTemp raw=90→"Normal"/error 帧空数据/from_can 码稳定/camelCase 序列化）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净（CAN 条目未接入命令前加带注释 `#[allow(dead_code)]`）。
+
 ## 2026-10-25 — Plan 3 起草（M2 CanPanel + IPC）
 
 **Files:**
