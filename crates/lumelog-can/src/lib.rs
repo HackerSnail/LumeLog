@@ -10,6 +10,7 @@ pub mod decode;
 pub mod error;
 pub mod frame;
 pub mod source;
+pub mod tests_common;
 
 #[cfg(test)]
 mod tests {

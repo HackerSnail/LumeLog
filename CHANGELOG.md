@@ -66,6 +66,18 @@
 **Why:** spec §7.2/§13.1；Review Focus 1（Motorola `@0` 锯齿位序）+ 2（有符号补码 + factor/offset 浮点）。**位序算法经 cantools 39.4.5 golden 逐位对拍通过**（Intel/Motorola × 有/无符号 × 跨字节 len20 × 负值均匹配）。golden 为权威，实现向其靠拢（本次一次即中，未改夹具）。
 **验证:** `cargo test -p lumelog-can` 36 pass（+3 bitorder_golden +4 proptest）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。cantools 仅供开发期生成夹具，仓库已提交 golden、后续无需 Python。
 
+### 7. lumelog-can 解码 CLI（M2 引擎验收）
+**Files:**
+- Create: `crates/lumelog-can/src/bin/lumelog-can.rs`（手工 `std::env::args` 解析、无 clap/serde；子命令 `dbc --file [--lenient]` 输出 `{messages,signals,errors}`、`decode --log --format candump|asc|regex [--regex] [--dbc] [--limit N=20] [--out jsonl|csv]`，`--dbc` 按 can_id 匹配消息并附 `decode_signals` 物理值；默认输出前 limit 帧 + `{decoded,skipped}`；退出码用法错=2、文件/解析错=1）
+- Create: `crates/lumelog-can/src/tests_common.rs`（`pub mod tests_common`：`gen_candump(n, seed) -> Vec<GenFrame>` 确定性 LCG 合成 11-bit 标准帧，供 10万帧验收+基准）
+- Modify: `crates/lumelog-can/Cargo.toml`（`[[bin]]`）、`crates/lumelog-can/src/lib.rs`（`pub mod tests_common;`）
+- Create: `crates/lumelog-can/tests/data/cli_intel.log`（`can0 64#DEADBEEF12345678`→id100 IntelMsg）+ `crates/lumelog-can/tests/cli_can.rs`（7 例：用 `CARGO_BIN_EXE_lumelog-can` 跑真实二进制；dbc 计数/decode 计数带采样/带 dbc 信号物理值与 golden 一致/无参退2/坏 format退2/缺文件退1/decodes_100k_frames_faithfully）
+
+**Why:** spec §7.5 导出 + §12 M2 验收引擎侧。**10 万帧合成 candump 忠实解码**：decoded==100_000、skipped==0、逐帧 id/dlc/data 与生成端一致；吞吐 debug 档 209.8ms (~2.1 µs/帧，release 会更快；UI 流畅 P4 属 Plan 3)。带 dbc 解码物理值与 Task 3 cantools golden 一致（I_S16 raw -16723→physical -8371.5）。
+**验证:** `cargo test -p lumelog-can` 45 pass（+2 tests_common +7 cli_can）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。修正：测试字符串转义多反斜杠致不闭合；clippy manual_map→改 `.map`。
+
+**M2 引擎汇总：** Plan 2 七个任务（数据模型/DBC 解析/位序解码/candump/ASC/正则/CLI）全部完成；引擎侧验收达标（10万帧正确 + golden 对拍）。IPC 命令层与 CanPanel 属 Plan 3。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。
