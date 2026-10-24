@@ -184,6 +184,19 @@ pub fn decode_all(label: EncodingLabel, bytes: &[u8]) -> Decoded {
     }
 }
 
+/// Decode a byte slice taken from the *middle* of a stream: never strips a BOM
+/// (a `EF BB BF` / `FF FE` sequence inside a chunk is content, e.g. a stray
+/// U+FEFF, not a file mark). Used by the chunk reader for any line whose byte
+/// span does not start at file offset 0.
+pub fn decode_region(label: EncodingLabel, bytes: &[u8]) -> Decoded {
+    let (cow, _had_errors) = label.encoding().decode_without_bom_handling(bytes);
+    let invalid_count = cow.matches('\u{FFFD}').count();
+    Decoded {
+        text: cow.into_owned(),
+        invalid_count,
+    }
+}
+
 /// One segment produced by `IncrementalDecoder::feed`.
 pub struct DecodeSegment {
     pub text: String,

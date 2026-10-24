@@ -9,7 +9,7 @@
 //! genuinely different code path from the per-character walk in `CharMap`.
 
 use lumelog_core::doc::{build, build_aligned, build_chunk, LineIndex};
-use lumelog_core::encoding::{decode_all, encode_all, EncodingLabel};
+use lumelog_core::encoding::{decode_all, decode_region, encode_all, EncodingLabel};
 use proptest::prelude::*;
 
 /// Build the index the way `DocFile::open` does: aligned 16-bit scan for
@@ -44,7 +44,11 @@ fn reference(label: EncodingLabel, bytes: &[u8], idx: &LineIndex, byte: u64) -> 
     let line = idx.line_at_byte(byte);
     let (ls, _) = idx.line_range(line).unwrap();
     let prefix = &bytes[ls as usize..byte as usize];
-    let dec = decode_all(label, prefix);
+    let dec = if ls == 0 {
+        decode_all(label, prefix)
+    } else {
+        decode_region(label, prefix)
+    };
     (line, dec.text.encode_utf16().count() as u32)
 }
 
@@ -52,7 +56,11 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
     #[test]
-    fn charmap_all_alignments((label, bytes) in prop::sample::select(corpus())) {
+    fn charmap_all_alignments(
+        (label, bytes) in prop::sample::select(corpus()),
+        frac in 0.0f32..1.0,
+        width in 1usize..8,
+    ) {
         let idx = index_for(label, &bytes);
         let whole = decode_all(label, &bytes);
         let c = build_chunk(&bytes, 0, &idx, label, 0, idx.line_count());
@@ -75,6 +83,28 @@ proptest! {
                     let exp = reference(label, &bytes, &idx, b as u64);
                     prop_assert_eq!(got, exp, "cu mismatch at byte {}", b);
                 }
+            }
+        }
+
+        // (D) partial blocks (abs_start > 0) must agree with the whole-file map
+        // at every offset they cover — this is the path the I-2 BOM fix lives on.
+        let lc = idx.line_count();
+        let start = ((lc as f32) * frac) as usize;
+        if start < lc {
+            let count = width.min(lc - start);
+            let (sub_ls, _) = idx.line_range(start).unwrap();
+            let (_, sub_le) = idx.line_range(start + count - 1).unwrap();
+            let sub_bytes = &bytes[sub_ls as usize..sub_le as usize];
+            let sub = build_chunk(sub_bytes, sub_ls, &idx, label, start, count);
+            for b in sub_ls..sub_le {
+                prop_assert_eq!(
+                    sub.char_map.byte_to_line_cu(b),
+                    c.char_map.byte_to_line_cu(b),
+                    "partial block disagrees at byte {} (start {}, count {})",
+                    b,
+                    start,
+                    count
+                );
             }
         }
     }

@@ -8,7 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::doc::chunk::{build_chunk, chunk_size, Chunk};
+use crate::doc::chunk::{build_chunk, chunk_size, CharMap, Chunk};
 use crate::doc::line_index::{self, LineIndex, LineIndexBuilder};
 use crate::encoding::{self, EncodingLabel};
 use crate::error::CoreError;
@@ -96,6 +96,16 @@ impl DocFile {
             return Err(CoreError::LineOutOfRange);
         }
         let count = line_count.min(self.index.line_count() - line_start);
+        // A zero-line window is legal (empty viewport): hand back an empty
+        // chunk instead of underflowing `line_start + count - 1` below.
+        if count == 0 {
+            return Ok(Chunk {
+                start_line: line_start,
+                text: String::new(),
+                invalid_count: 0,
+                char_map: CharMap::from_lines(line_start as u32, self.label, Vec::new()),
+            });
+        }
         let key = ((line_start as u64) << 32) | (count as u64);
 
         if let Some(pos) = self.cache.iter().position(|(k, _)| *k == key) {
@@ -114,7 +124,16 @@ impl DocFile {
             .index
             .line_range(line_start + count - 1)
             .ok_or(CoreError::LineOutOfRange)?;
-        let bytes = read_at(&mut self.file, ls, (le - ls) as usize)?;
+        let want = (le - ls) as usize;
+        let bytes = read_at(&mut self.file, ls, want)?;
+        if bytes.len() != want {
+            // The file shrank (rotation / external truncation) since indexing:
+            // surface it as an error rather than slicing out of range.
+            return Err(CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file shrank during read",
+            )));
+        }
         let chunk = build_chunk(&bytes, ls, &self.index, self.label, line_start, count);
 
         self.cache_bytes += chunk_size(&chunk);

@@ -32,6 +32,47 @@ fn open_and_chunk_utf8() {
 }
 
 #[test]
+fn chunk_at_zero_lines_returns_empty_not_panic() {
+    // C-1: a zero-height viewport must yield an empty chunk, not underflow.
+    let p = write_tmp(b"a\nb\nc\n");
+    let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+    let c = doc.chunk_at(0, 0).unwrap();
+    assert_eq!(c.text, "");
+    assert_eq!(c.start_line, 0);
+    fs::remove_file(&p).ok();
+}
+
+#[test]
+fn interior_bom_is_preserved_as_content() {
+    // I-2: only the file's leading BOM is stripped; an interior EF BB BF is
+    // content (U+FEFF), and its line's char_map stays aligned.
+    let bytes = [0xEF, 0xBB, 0xBF, b'a', 0x0A, 0xEF, 0xBB, 0xBF, b'b', 0x0A];
+    let p = write_tmp(&bytes);
+    let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+    assert_eq!(doc.encoding(), EncodingLabel::Utf8Bom);
+    assert_eq!(doc.chunk_at(0, 1).unwrap().text, "a\n", "leading BOM stripped");
+    assert_eq!(
+        doc.chunk_at(1, 1).unwrap().text,
+        "\u{FEFF}b\n",
+        "interior BOM kept as content"
+    );
+    fs::remove_file(&p).ok();
+}
+
+#[test]
+fn file_shrink_during_read_is_error_not_panic() {
+    // I-1: external truncation between indexing and chunk read surfaces as an
+    // error rather than slicing past the buffer.
+    let p = write_tmp(b"a\nb\nc\nd\n");
+    let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+    assert_eq!(doc.line_count(), 5);
+    fs::write(&p, b"a\n").unwrap(); // shrink after open
+    let err = doc.chunk_at(0, 5).unwrap_err();
+    assert!(matches!(err, CoreError::Io(_)), "got {err:?}");
+    fs::remove_file(&p).ok();
+}
+
+#[test]
 fn chunk_at_line_start_out_of_range() {
     let p = write_tmp(b"one\ntwo\n");
     let mut doc = DocFile::open(&p, 1 << 20).unwrap();

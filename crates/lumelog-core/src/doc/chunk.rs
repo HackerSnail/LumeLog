@@ -6,7 +6,7 @@
 //! line — the coordinate space CodeMirror uses (spec §4.2, §6.3).
 
 use crate::doc::line_index::LineIndex;
-use crate::encoding::{self, decode_all, encode_all, EncodingLabel};
+use crate::encoding::{self, decode_all, decode_region, encode_all, EncodingLabel};
 
 /// One decoded logical line inside a chunk.
 ///
@@ -72,6 +72,12 @@ impl CharMap {
             });
         }
         CharMap::from_lines(start_line, label, lines)
+    }
+
+    /// Number of logical display lines in this map (== indexed lines unless a
+    /// merge-retry fired).
+    pub fn logical_line_count(&self) -> usize {
+        self.lines.len()
     }
 
     /// Convert an absolute file byte offset into `(absolute line, cu16 in
@@ -177,7 +183,7 @@ pub fn build_chunk(
     count: usize,
 ) -> Chunk {
     let end_line = (start_line + count).min(index.line_count());
-    let to_rel = |abs: u64| (abs - abs_start) as usize;
+    let to_rel = |abs: u64| (abs - abs_start).min(bytes.len() as u64) as usize;
 
     let mut lines: Vec<LogicalLine> = Vec::new();
     let mut text = String::new();
@@ -187,11 +193,21 @@ pub fn build_chunk(
     while li < end_line {
         let (ls, le) = index.line_range(li).unwrap_or((abs_start, abs_start));
         let mut seg = &bytes[to_rel(ls)..to_rel(le)];
-        let mut dec = decode_all(label, seg);
+        // Only the file's first line (span starting at offset 0) may carry a
+        // BOM to strip; every other span is decoded region-wise so an interior
+        // BOM-looking byte sequence stays as content (I-2).
+        let mut dec = if ls == 0 {
+            decode_all(label, seg)
+        } else {
+            decode_region(label, seg)
+        };
         let mut raw_end = le;
 
-        // Merge-retry: only while the failure is a truncated tail (last decoded
-        // char is U+FFFD) and there is a following raw line to pull in.
+        // Defensive merge-retry for a truncated multi-byte tail. NOTE: for the
+        // nine supported codecs `0x0A` is never a continuation byte, so a
+        // non-final raw line always ends in a real `'\n'` and this branch is
+        // currently unreachable; it is kept so a future codec whose LF can
+        // appear as a trail byte is handled without code churn (spec §4.1).
         while dec.invalid_count > 0
             && ends_with_replacement(&dec.text)
             && li + 1 < end_line
@@ -200,7 +216,11 @@ pub fn build_chunk(
             let (_, le2) = index.line_range(li).unwrap_or((le, le));
             raw_end = le2;
             seg = &bytes[to_rel(ls)..to_rel(le2)];
-            dec = decode_all(label, seg);
+            dec = if ls == 0 {
+                decode_all(label, seg)
+            } else {
+                decode_region(label, seg)
+            };
         }
 
         // The file's first logical line may have had its BOM stripped.
@@ -295,11 +315,18 @@ mod tests {
     #[test]
     fn malformed_dangling_lead_byte_does_not_panic() {
         // A lone GBK lead byte before a real newline: invalid, but chunking must
-        // index it and surface U+FFFD without panicking (defensive merge path).
+        // index it and surface U+FFFD without panicking. Because a non-final raw
+        // line always terminates in a real '\n', the merge-retry branch does NOT
+        // fire (logical lines == indexed lines) — this pins that behavior.
         let bytes = [0xCA_u8, 0x0A, b'x', 0x0A];
         let idx = build(&bytes).unwrap();
         let c = build_chunk(&bytes, 0, &idx, EncodingLabel::Gbk, 0, idx.line_count());
         assert!(c.invalid_count >= 1, "dangling lead byte yields a replacement");
+        assert_eq!(
+            c.char_map.logical_line_count(),
+            idx.line_count(),
+            "merge-retry must not fire (0x0A is a real newline)"
+        );
         // byte_to_line_cu must terminate for every position in range.
         for b in 0..bytes.len() as u64 {
             let _ = c.char_map.byte_to_line_cu(b);
