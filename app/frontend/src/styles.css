@@ -111,7 +111,7 @@ body {
   background: transparent;
 }
 
-#root {
+#app {
   height: 100vh;
   display: flex;
   flex-direction: column;
@@ -138,6 +138,121 @@ body {
 .appbar .app-name {
   font-weight: 600;
   color: var(--text);
+}
+
+/* Workspace: sidebar | resizer | center | resizer | inspector, all in one row.
+ * `min-height:0`/`min-width:0` on the flex children is what lets the bounded
+ * viewport math (and CodeMirror/list scrolling) actually engage. */
+.workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+.center {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar,
+.inspector {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-subtle);
+  overflow: hidden;
+}
+.sidebar {
+  width: 260px;
+  border-right: 1px solid var(--border);
+}
+.inspector {
+  width: 280px;
+  border-left: 1px solid var(--border);
+}
+.sidebar.collapsed,
+.inspector.collapsed {
+  display: none;
+}
+.panel-title {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-soft);
+}
+.side-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.side-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text);
+  border-left: 2px solid transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.side-item:hover {
+  background: var(--bg-hover);
+}
+.side-item.active {
+  border-left-color: var(--accent);
+  background: var(--bg-panel);
+}
+.side-item .side-meta {
+  float: right;
+  margin-left: 8px;
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.pane-resizer {
+  flex: 0 0 auto;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.pane-resizer:hover,
+.pane-resizer.dragging {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.insp-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 6px 10px;
+  overflow: auto;
+}
+.insp-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.insp-key {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.insp-val {
+  color: var(--text);
+  text-align: right;
+  word-break: break-all;
+}
+.insp-val.warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+.insp-empty {
+  color: var(--faint);
 }
 
 /* Tab host: the strip is a fixed row, the active view fills the rest.

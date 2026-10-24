@@ -16,6 +16,18 @@
 **Why:** M1 交付的是功能骨架，`claude.md` 「自定义主题」仍为待办；先建立可切换的三主题 token 体系作为外壳重构的地基。
 **验证:** `npx vitest run` 14 pass（theme 4）+ `tsc --noEmit` 净 + `vite build` OK（styles.css 5.01KB）。
 
+### B. 应用外壳（侧栏 + 检查器 + 可拖分栏）
+**Files:**
+- Create: `app/frontend/src/shell.ts`（`clampWidth` 纯函数 + `makeResizable` 分栏拖拽（pointer 捕获/钳位/持久化）+ `loadFlag/storeFlag` 收放态持久化 + MIN/MAX 宽度常量）
+- Create: `app/frontend/src/shell.test.ts`（`clampWidth` 区间/越界/NaN/锁定；`loadFlag` 无存储回落默认）
+- Modify: `app/frontend/index.html`（预绘制内联主题脚本防 FOUC；根容器 `#root`→`#app`；`lang="zh"`）
+- Modify: `app/frontend/src/styles.css`（容器选择器 `#root`→`#app`；新增 `.workspace`/`.sidebar`/`.inspector`/`.center`/`.pane-resizer`/`.panel-title`/`.side-item`/`.insp-*` 布局与主题化样式，维持有界视口确定高度链）
+- Modify: `app/frontend/src/tabs.ts`（`TabStrip.list()` 按标签序枚举已打开文档）
+- Modify: `app/frontend/src/main.ts`（`layout()` 重构为工具条 + workspace（侧栏|拖栏|center(#tabs+搜索面板)|拖栏|检查器）+ 状态栏 + toast；新增 `refreshSidebar/updateInspector/refreshPanels/toggleSidebar/toggleInspector/mkBtn`；激活/关闭/切编码/列表窗口失效时刷新面板；侧栏列已打开文档，检查器展示模式/编码/行尾/总行数/已索引/⚠无法映射/路径）
+
+**Why:** 对齐 NoteLume 的三栏外壳（左导航 + 右检查器）；日志场景侧栏用实时的「已打开文档」列表（前端 `docStates`/tabs 本就权威，不新增后端 IPC；真正的最近文件需 `doc_list` 持久化，归后续）。检查器集中呈现 §5.4 ⚠ 详情。
+**验证:** `npx vitest run` 19 pass（shell 5）+ `tsc --noEmit` 净 + `vite build` OK（css 6.58KB）。
+
 ## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
 
 **Files:**

@@ -27,6 +27,15 @@ import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
 import type { ModeChoice } from "./language";
 import { initTheme } from "./theme";
+import {
+  makeResizable,
+  loadFlag,
+  storeFlag,
+  MIN_SIDEBAR,
+  MAX_SIDEBAR,
+  MIN_INSPECTOR,
+  MAX_INSPECTOR,
+} from "./shell";
 import "./styles.css";
 
 // Paint the stored theme as early as module eval allows (index.html also runs a
@@ -56,11 +65,23 @@ tabsEl.id = "tabs";
 const statusEl = document.createElement("div");
 statusEl.id = "status";
 
+// Shell panels, populated by layout(); the update helpers guard on null so
+// they are safe before layout() runs.
+let sidebarEl: HTMLElement | null = null;
+let sidebarListEl: HTMLElement | null = null;
+let sidebarHandleEl: HTMLElement | null = null;
+let inspectorEl: HTMLElement | null = null;
+let inspectorBodyEl: HTMLElement | null = null;
+let inspectorHandleEl: HTMLElement | null = null;
+let sidebarCollapsed = false;
+let inspectorCollapsed = false;
+
 const tabs = new TabStrip(tabsEl, {
   onActivate: (id) => {
     hideSearchPanel(); // stale hit rows belong to the previous doc — drop the panel
     if (id < 0) status.clear();
     else syncStatus(id);
+    refreshPanels();
   },
   onClose: (id) => void handleClose(id),
   onDirtyChanged: (id, dirty) => {
@@ -85,38 +106,196 @@ const status = new Statusbar(statusEl, {
 });
 
 function layout(): void {
-  const root = document.getElementById("root");
+  const root = document.getElementById("app");
   if (!root) return;
   root.textContent = "";
+
+  // Toolbar — becomes the draggable custom titlebar in the window-chrome step.
   const bar = document.createElement("div");
   bar.className = "appbar";
-  const openBtn = document.createElement("button");
-  openBtn.textContent = "打开文件";
-  openBtn.addEventListener("click", () => void openFile());
-  const searchBtn = document.createElement("button");
-  searchBtn.textContent = "搜索";
-  searchBtn.addEventListener("click", () => openSearchFlow());
-  const themeBtn = document.createElement("button");
-  themeBtn.textContent = "主题";
-  themeBtn.title = "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）";
-  themeBtn.addEventListener("click", () => theme.cycle());
+  bar.append(
+    mkBtn("打开文件", "", () => void openFile()),
+    mkBtn("搜索", "在当前文档中搜索 (Ctrl+Shift+F)", () => openSearchFlow()),
+    mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
+    mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
+    mkBtn("主题", "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）", () => theme.cycle()),
+  );
   const spacer = document.createElement("span");
   spacer.className = "spacer";
   const appName = document.createElement("span");
   appName.className = "app-name";
   appName.textContent = "LumeLog";
-  bar.append(openBtn, searchBtn, themeBtn, spacer, appName);
+  bar.append(spacer, appName);
+
+  // Left sidebar: the set of open documents (live from the tab strip).
+  const aside = document.createElement("aside");
+  aside.className = "sidebar";
+  sidebarEl = aside;
+  const asideTitle = document.createElement("div");
+  asideTitle.className = "panel-title";
+  asideTitle.textContent = "已打开文档";
+  sidebarListEl = document.createElement("div");
+  sidebarListEl.className = "side-list";
+  aside.append(asideTitle, sidebarListEl);
+
+  // Right inspector: metadata for the active document + the ⚠ detail.
+  const insp = document.createElement("aside");
+  insp.className = "inspector";
+  inspectorEl = insp;
+  const inspTitle = document.createElement("div");
+  inspTitle.className = "panel-title";
+  inspTitle.textContent = "文档信息";
+  inspectorBodyEl = document.createElement("div");
+  inspectorBodyEl.className = "insp-body";
+  insp.append(inspTitle, inspectorBodyEl);
+
+  const center = document.createElement("div");
+  center.className = "center";
+  const panel = document.createElement("div");
+  panel.id = "search-panel";
+  panel.className = "search-panel";
+  panel.style.display = "none";
+  center.append(tabsEl, panel);
+
+  sidebarHandleEl = document.createElement("div");
+  sidebarHandleEl.className = "pane-resizer";
+  inspectorHandleEl = document.createElement("div");
+  inspectorHandleEl.className = "pane-resizer";
+  makeResizable(aside, sidebarHandleEl, {
+    min: MIN_SIDEBAR,
+    max: MAX_SIDEBAR,
+    storageKey: "lumelog.ui.sidebar.w",
+    edge: "left",
+    collapsed: () => sidebarCollapsed,
+  });
+  makeResizable(insp, inspectorHandleEl, {
+    min: MIN_INSPECTOR,
+    max: MAX_INSPECTOR,
+    storageKey: "lumelog.ui.inspector.w",
+    edge: "right",
+    collapsed: () => inspectorCollapsed,
+  });
+
+  const workspace = document.createElement("div");
+  workspace.className = "workspace";
+  workspace.append(aside, sidebarHandleEl, center, inspectorHandleEl, insp);
 
   const toast = document.createElement("div");
   toast.id = "toast";
   toast.className = "toast";
 
-  const panel = document.createElement("div");
-  panel.id = "search-panel";
-  panel.className = "search-panel";
-  panel.style.display = "none";
+  sidebarCollapsed = loadFlag("lumelog.ui.sidebar", false);
+  inspectorCollapsed = loadFlag("lumelog.ui.inspector", false);
+  aside.classList.toggle("collapsed", sidebarCollapsed);
+  insp.classList.toggle("collapsed", inspectorCollapsed);
+  sidebarHandleEl.style.display = sidebarCollapsed ? "none" : "";
+  inspectorHandleEl.style.display = inspectorCollapsed ? "none" : "";
 
-  root.append(bar, tabsEl, panel, statusEl, toast);
+  root.append(bar, workspace, statusEl, toast);
+  refreshPanels();
+}
+
+function mkBtn(label: string, title: string, on: () => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.textContent = label;
+  if (title) b.title = title;
+  b.addEventListener("click", on);
+  return b;
+}
+
+function toggleSidebar(): void {
+  sidebarCollapsed = !sidebarCollapsed;
+  sidebarEl?.classList.toggle("collapsed", sidebarCollapsed);
+  if (sidebarHandleEl) sidebarHandleEl.style.display = sidebarCollapsed ? "none" : "";
+  storeFlag("lumelog.ui.sidebar", sidebarCollapsed);
+}
+
+function toggleInspector(): void {
+  inspectorCollapsed = !inspectorCollapsed;
+  inspectorEl?.classList.toggle("collapsed", inspectorCollapsed);
+  if (inspectorHandleEl) inspectorHandleEl.style.display = inspectorCollapsed ? "none" : "";
+  storeFlag("lumelog.ui.inspector", inspectorCollapsed);
+}
+
+function basenameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Rebuild the sidebar's open-document list from the live tab strip. */
+function refreshSidebar(): void {
+  const list = sidebarListEl;
+  if (!list) return;
+  list.textContent = "";
+  const infos = tabs.list();
+  const activeId = tabs.active()?.info.docId ?? null;
+  if (infos.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "insp-empty";
+    empty.style.padding = "8px 10px";
+    empty.textContent = "尚无打开的文档";
+    list.append(empty);
+    return;
+  }
+  for (const info of infos) {
+    const row = document.createElement("div");
+    row.className = "side-item";
+    row.title = info.path;
+    if (info.docId === activeId) row.classList.add("active");
+    const enc = docStates.get(info.docId)?.encoding;
+    if (enc) {
+      const m = document.createElement("span");
+      m.className = "side-meta";
+      m.textContent = enc;
+      row.append(m);
+    }
+    const label = document.createElement("span");
+    label.textContent = basenameOf(info.path);
+    row.append(label);
+    row.addEventListener("click", () => tabs.activate(info.docId));
+    list.append(row);
+  }
+}
+
+/** Fill the inspector with the active document's metadata (spec §5.4 ⚠ detail). */
+function updateInspector(docId: number | null): void {
+  const body = inspectorBodyEl;
+  if (!body) return;
+  body.textContent = "";
+  const ds = docId != null ? docStates.get(docId) : undefined;
+  if (!ds) {
+    const empty = document.createElement("div");
+    empty.className = "insp-empty";
+    empty.textContent = "无打开文档";
+    body.append(empty);
+    return;
+  }
+  const rows: [string, string, boolean?][] = [
+    ["模式", ds.mode === "edit" ? "编辑（可修改）" : "只读（大文件）"],
+    ["编码", ds.encoding],
+    ["行尾", ds.eol],
+    ["总行数", String(ds.totalLines)],
+    ["已索引", String(indexed.get(docId ?? 0) ?? ds.totalLines)],
+    ["无法映射字符", String(ds.invalid), ds.invalid > 0],
+    ["路径", ds.path],
+  ];
+  for (const [key, value, warn] of rows) {
+    const row = document.createElement("div");
+    row.className = "insp-row";
+    const k = document.createElement("span");
+    k.className = "insp-key";
+    k.textContent = key;
+    const v = document.createElement("span");
+    v.className = warn ? "insp-val warn" : "insp-val";
+    v.textContent = value;
+    if (key === "路径") v.title = value;
+    row.append(k, v);
+    body.append(row);
+  }
+}
+
+function refreshPanels(): void {
+  refreshSidebar();
+  updateInspector(tabs.active()?.info.docId ?? null);
 }
 
 async function openFile(): Promise<void> {
@@ -202,7 +381,10 @@ function mountList(info: DocInfo, path: string): void {
       // status-bar ⚠ in sync (only repaint if this doc is the shown one).
       const d = docStates.get(info.docId);
       if (d) d.invalid = n;
-      if (info.docId === tabs.active()?.info.docId) status.setInvalidCount(n);
+      if (info.docId === tabs.active()?.info.docId) {
+        status.setInvalidCount(n);
+        updateInspector(info.docId);
+      }
     },
   });
   lists.set(info.docId, list);
@@ -368,6 +550,7 @@ async function changeEncoding(label: string): Promise<void> {
     ds.encoding = updated.encoding;
     ds.eol = updated.eol || ds.eol;
     status.setEncoding(updated.encoding);
+    updateInspector(docId); // inspector shows the new encoding / ⚠ detail
     if (handle) tabs.refreshDirty(docId);
   } catch (err) {
     reportError(err);
@@ -402,6 +585,7 @@ async function handleClose(docId: number): Promise<void> {
   editors.delete(docId);
   lists.delete(docId);
   indexed.delete(docId);
+  refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
 }
 
@@ -601,7 +785,7 @@ function openJumpPrompt(): void {
     else if (e.key === "Escape") close();
   });
   panel.append(input, go);
-  document.getElementById("root")?.append(panel);
+  document.getElementById("app")?.append(panel);
   input.focus();
   input.select();
 }
