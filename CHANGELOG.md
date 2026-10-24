@@ -6,6 +6,15 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### Task 7. main.ts 集成 CanPanel（报文 dock + 双向联动）
+**Files:**
+- Modify: `app/frontend/src/main.ts`（导入 CAN 命令 + `CanPanel/FrameStore` + `CanFilter`；报文 dock（源选择 candump/asc/正则 + 导入DBC + 解析/识别选中）+ 过滤栏（ID/消息/信号条件/时间窗）；每 docId 一份 `FrameStore`/`CanFilter`，共享一个 `CanPanel` 按活动文档重挂；行点击→`revealSourceLine`（列表 0-based、CodeMirror 1-based）；选中文本→`canDecodeSnippet`；appbar “报文面板”按钮 + 4 条 palette 命令；`handleClose` 清理 CAN 映射）
+- Modify: `app/frontend/src/styles.css`（`#can-dock`/`.canpanel`/`.can-*` 确定高度 flex 链 + `.list-flash`）
+
+**Why:** spec §7.4 CanPanel 接入主界面。行号对齐是 M2 验收核心：`FrameJson.lineNumber`（1-based）→ 列表 `revealLine(lineNumber-1)`（0-based）/编辑器 `revealLine(lineNumber)`。**Ruling（取消）**：`can_parse` 与 `search_run` 同为同步命令，只在整个扫描完成后才返回 req_id、且循环期间持有文档锁，因此前端无法在流式中途拿到 id 去 `can_cancel`——与仓内已有的 search-cancel 推诿（“需异步搜索”）同理，本次不提供会空转的“停止”按钮，改为解析中显示“解析中…”并提示；`can_cancel` 命令/包装保留为真实 API（已测），待 `can_parse` 异步化后接入。
+**验证:** `npm --prefix app/frontend test` 38 pass + `npm --prefix app/frontend run build`（tsc 通过，41 modules，canpanel+table-core 入 bundle）；`cargo test -p lumelog-app` 12 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+**手工验收（需 `tauri dev`，headless CI 无法跑 GUI）：**① 打开 `crates/lumelog-can/tests/data/candump_basic.log` → 报文面板 → 导入 `sample.dbc`（EngineData/ExtFrame/MuxedMsg，1 处坏 SG_ 告警仍宽容导入）→ 源 candump → 解析：表格出帧；② 点行→跳回源码行（闪烁）；③ ID 区间过滤生效；④ 展开行显 Speed 信号 physical/raw；⑤ 错误/远程帧行不崩（dataHex 空显 –）；⑥ 选中一行→“识别选中”弹层显解码帧。⑥需编辑器环境。无 GUI 时以单测+tsc 作为门。
+
 ### Task 6. CanPanel 组件（table-core 列模型 + 行窗口虚拟滚动 + revealLine 联动）
 **Files:**
 - Create: `app/frontend/src/canpanel.ts`（`FrameStore` 累积批量/`all`/`clear`/`length` + `CanPanel` 手写 DOM 虚拟表：行号/时间/通道/ID/消息/DLC/信号/原始数据 8 列，表头取 `getFlatHeaders()`，体只画 `visibleWindow` 窗口 + 扩展子行，行点击→`onRowActivate(1-based lineNumber)`，ID hex/dec + 时间绝对/相对 + ms/µs 切换）

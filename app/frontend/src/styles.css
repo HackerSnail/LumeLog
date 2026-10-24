@@ -560,3 +560,140 @@ html.has-custom-titlebar .win-btns {
 #toast.visible {
   opacity: 1;
 }
+
+/* ---- CanPanel message dock (spec §7.4) ---------------------------------- */
+/* Same definite-height contract the read-only list depends on: `#can-dock` is a
+   bounded flex child of `.center`, `.can-host`/`.canpanel` fill it, and
+   `.can-scroll` (overflow:auto) is the windowed box whose clientHeight drives
+   `visibleWindow`. Never let those collapse or the panel requests all rows. */
+#can-dock {
+  flex: 0 0 auto;
+  max-height: 55%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+.can-dockbar,
+.can-filter {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.can-filter {
+  border-top: 1px solid var(--border-soft);
+}
+.can-dockbar select,
+.can-dockbar input,
+.can-filter input {
+  padding: 2px 6px;
+  color: var(--text);
+}
+.can-regex-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.can-fnum {
+  width: 8ch;
+}
+.can-ftxt {
+  width: 12ch;
+}
+.can-dbc-line {
+  color: var(--muted);
+}
+.can-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.canpanel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.can-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.can-toggle {
+  padding: 2px 6px;
+}
+.can-status {
+  margin-left: auto;
+  color: var(--muted);
+}
+.can-thead {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.can-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.can-hrow {
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  color: var(--text);
+}
+.can-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-soft);
+  white-space: nowrap;
+}
+.can-row:hover {
+  background: var(--bg-hover);
+}
+.can-cell {
+  flex: 1 1 auto;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.can-cell:last-child {
+  flex: 2 1 auto;
+}
+.can-signals {
+  left: 0;
+  right: 0;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border);
+}
+.can-signals table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.can-signals th,
+.can-signals td {
+  padding: 2px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+/* CanPanel → list linkage flash (listview.revealLine). */
+.list-flash {
+  background: var(--bg-hover);
+}
