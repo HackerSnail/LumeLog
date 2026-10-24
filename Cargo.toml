@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/lumelog-core", "crates/lumelog-can"]
+members = ["crates/lumelog-core", "crates/lumelog-can", "app/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

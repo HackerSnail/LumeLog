@@ -2,6 +2,18 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 8（阶段 B）：Tauri v2 壳 + IPC 命令层
+
+- 文件：新增 `app/src-tauri/`（`Cargo.toml` 包名 `lumelog-app`、`build.rs`、`tauri.conf.json`、`capabilities/default.json`、`src/{main.rs,lib.rs,state.rs,dto.rs,commands.rs}`、`icons/icon.ico`）；新增 `app/frontend/` Vite vanilla-ts 骨架（`package.json`/`vite.config.ts`/`index.html`/`src/main.ts`/`tsconfig.json` + `dist/index.html` 占位供 `generate_context!`）；根 `Cargo.toml` members 增 `app/src-tauri`。
+- 为什么：实现 spec §9 / plan Task 8 的 IPC 命令层——把阶段 A 下沉 core 的纯逻辑（`validate_open_path`/`build_index_with_progress`）转发为 Tauri 命令，前端可调用。7 命令：`app_ping`、`doc_open`（`Channel<IndexProgress>` 进度）、`doc_chunk`（`Channel<ChunkPayload>`，char_map 不出 IPC）、`doc_save`（`IpcError` 码映射）、`doc_list`、`search_run`（`Channel<Vec<MatchJson>>`+`Channel<SearchStatsJson>`+取消）、`search_cancel`。
+- 实现决策：
+  - `create-tauri-app` 需交互/浏览器 → 手写等价壳（plan Step1 明示“非交互参数按其 CLI 现状调整”，产物与模板同形）。
+  - `IpcError { code, message, detail? }` 自定义可序列化错误类型作命令 `Err`：`from_core`/`from_open_reject` 映射码 `io|too_large|conflict|unmappable|locked|line_out_of_range|encoding_unsupported|invalid_pattern|not_found|is_directory|permission_denied`（对齐 plan Produces）。
+  - `state.rs`：`AppDocs { docs: Mutex<HashMap<u64, Arc<Mutex<DocFile>>>>, next_doc_id: AtomicU64, cancels: Mutex<HashMap<u64, Arc<AtomicBool>>>, next_req_id }` 挂 `tauri::manage`。
+  - **Ruling**：v1 `doc_open` 同步索引 + `SIZE_LIMIT=u64::MAX`（4GB/u32 上限仍由行索引内部 `TooLarge` 把关）；后台线程逐 8MB 流式推进留 Task 11 GUI 联调（IPC 面 `Channel<IndexProgress>` 已就绪）。`tauri::generate_handler!` 编译期校验全命令签名，故 IPC 接线在 `cargo check` 阶段即被类型检查。
+  - `icon.ico`：tauri-build 的 winres 步骤硬性要求 `icons/icon.ico` → `.superpowers/gen_icon.cjs`（node）合成合法 16×16 32bpp ICO，纳入版本库（构建所需资源）。
+- 验证：`cargo check -p lumelog-app` → Finished（build script 通过后真正 typecheck commands/dto/state/lib，tauri v2.12.5 全树 362 包编译通过，无 error/warning）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 无告警；`cargo test -p lumelog-core` → 57 lib + 9 cli(+1 ignored) + 8 docfile + proptest 全 passed（阶段 B 未波及 core）。Step4 `npm run tauri dev` GUI 冒烟 headless 无 display 不可行 → 依 plan 缓至 Task 11；前端 `npm run build` 属 Task 9 Step1 交付物，本任务不越界。
+
 ## 2026-10-24 — Task 8（阶段 A）：IPC 前置校验 + 带进度索引下沉 core
 
 - 文件：`src/error.rs` 新增 `OpenReject`（NotFound/IsDirectory/PermissionDenied/TooLarge，`PartialEq`）；`src/doc/file.rs` 把私有 `build_index` 拆成公共 `build_index_with_progress(file, size, label, chunk_size, on_progress)`（逐块回调累计字节）+ `build_index` 委派（DRY，单一代码路径），新增纯函数 `validate_open_path(path, size_limit) -> Result<(), OpenReject>`；`doc/mod.rs` re-export 两函数；`file.rs` 末尾 `#[cfg(test)] mod ipc_logic_tests`（6 测）。
