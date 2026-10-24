@@ -14,6 +14,10 @@ on:
         description: "Upload artifacts to Gitee releases (requires GITEE_TOKEN secret)"
         type: boolean
         default: false
+      tag:
+        description: "Version tag to create/attach on Gitee (e.g. v0.1.0); required when publish=true"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -23,7 +27,7 @@ env:
 
 jobs:
   build:
-    name: Build bundle (${{ matrix.platform }})
+    name: Build bundle (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.runs-on }}
     strategy:
       fail-fast: false
@@ -50,6 +54,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.target }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Frontend deps
         working-directory: app/frontend
@@ -95,10 +104,13 @@ jobs:
         env:
           OWNER: ${{ vars.GITEE_OWNER }}
           REPO: ${{ vars.GITEE_REPO }}
-          TAG: ${{ github.ref_name }}
+          # workflow_dispatch runs on a branch, so github.ref_name is the branch
+          # name, not a version tag. The tag to publish must be supplied explicitly.
+          TAG: ${{ github.event.inputs.tag }}
           TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           set -eu
+          test -n "$TAG" || { echo "publish needs a version tag input (e.g. v0.1.0)" >&2; exit 1; }
           test -n "$TOKEN" || { echo "GITEE_TOKEN secret not set; aborting publish" >&2; exit 1; }
           curl -sf -X POST "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases" \
             -d "access_token=${TOKEN}" \

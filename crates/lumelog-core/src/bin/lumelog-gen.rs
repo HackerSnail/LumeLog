@@ -38,7 +38,17 @@ fn main() -> ExitCode {
     };
     match f.write_all(&bytes).and_then(|()| f.flush()) {
         Ok(()) => {
-            println!("{{\"path\":\"{}\",\"bytes\":{}}}", argv[0], bytes.len());
+            // A Windows path carries backslashes; a raw `C:\Users\...` is
+            // invalid JSON (`\U`, `\A` are not legal escapes). Escape the body.
+            let mut path_json = String::with_capacity(argv[0].len() + 8);
+            for c in argv[0].chars() {
+                match c {
+                    '\\' => path_json.push_str("\\\\"),
+                    '"' => path_json.push_str("\\\""),
+                    c => path_json.push(c),
+                }
+            }
+            println!("{{\"path\":\"{path_json}\",\"bytes\":{}}}", bytes.len());
             ExitCode::SUCCESS
         }
         Err(e) => {

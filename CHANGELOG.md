@@ -26,7 +26,17 @@
 - 1GB 定种语料 `gen_log(1024)` = 926 MiB / 16,777,217 行；实测填 checklist §1：P3 654ms / 峰值RSS 63MB（index-floor 64MB）· P4 p95=0.230ms · P5 1513ms（criterion 纯扫描 ~580ms）——**P3/P4/P5/P6 全部达标**
 - ci.yml / release.yml 语法自检（workflow_dispatch 就位；bench 不进 PR）；macOS/Linux 实测由 CI 产物后补测，不阻塞本计划收尾
 
-**M1 状态：** Plan 1 全 11 任务 review clean 并合并；核心引擎（编码/索引/取块解码/保存/搜索）+ CLI + Tauri 壳 + IPC + 前端编辑/只读双视图端到端打通；P4/P5/P6 门槛实测通过，P3 索引 headless 通过（UI 级 P1/P2 归后续 GUI 冒烟）。
+**M1 状态：** Task 1–10 review clean 并已合并；Task 11（本任务）首轮评审已过 fix loop，待 scoped 复审收尾。核心引擎（编码/索引/取块解码/保存/搜索）+ CLI + Tauri 壳 + IPC + 前端编辑/只读双视图端到端打通；P4/P5/P6 门槛实测通过，P3 索引 headless 通过（UI 级 P1/P2 归后续 GUI 冒烟）。
+
+### Task 11 CodeReview round 1（CHANGES REQUESTED → fix）
+
+评审范围：449c9ae..4754741。无 Critical；2 Important + 2 Minor，均修：
+- **#1（Important）** `release.yml`：publish 仅在 `workflow_dispatch` 下运行，而该事件下 `github.ref_name` 是分支名非版本 tag → 会在 Gitee 建出名为分支的 release。修：新增 `tag` 字符串输入，`TAG: github.event.inputs.tag`，脚本内 `test -n "$TAG"` 空值守卫。
+- **#2（Important）** `lumelog-gen.rs`：Windows 路径含 `\` 未转义直拼 JSON（`\U`/`\A` 非法转义）→ 输出非合法 JSON。修：逐字符转义 `\` 与 `"` 后再打印（实测 `C:\Users\...` 现输出 `C:\\Users\\...`）。
+- **#3（Minor）** `release.yml` job 名渲染 `matrix.platform`（对象→JSON 串不可读）→ 改 `matrix.platform.target`。
+- **#4（Minor）** `release.yml` 缺 `actions/setup-node`，与 ci.yml 不一致 → 补 Node 20 step。
+
+验证：`cargo clippy -p lumelog-core --all-targets --release -- -D warnings` CLIPPY_OK；`cargo test -p lumelog-core --release` 57+9+8+1+1 全绿；`lumelog-gen` 实跑输出合法 JSON 已核。
 
 ## 2026-10-24 — Task 10：前端只读虚拟列表（ListView）+ shell mode 分流 + P4 bench
 
