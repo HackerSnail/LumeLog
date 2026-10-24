@@ -8,6 +8,7 @@
 pub mod dbc;
 pub mod error;
 pub mod frame;
+pub mod source;
 
 #[cfg(test)]
 mod tests {

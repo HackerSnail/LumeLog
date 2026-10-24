@@ -27,6 +27,16 @@
 **Why:** spec §7.1 的 DBC 子集；严格/宽容两路对应“跳过坏行继续”；`BO_` dlc 与节点间无逗号。Review Focus 4 钉住。
 **验证:** `cargo test -p lumelog-can` 8 pass（2 单测 + 6 dbc_golden）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净（引入 `type ValEntry` 消 type_complexity）。
 
+### 4. FrameSource trait + candump ASCII 源（先于 Task 3 执行：无外部工具依赖）
+**Files:**
+- Create: `crates/lumelog-can/src/source/mod.rs`（`FrameSource` trait（`next_frame`/`stats`）+ `Line=(u64,String)` + 共享 `hex_to_bytes`）
+- Create: `crates/lumelog-can/src/source/candump.rs`（`CandumpSource<I: Iterator<Item=Line>>`：`(ts) iface id#data`、无ts→None、iface 尾数字→channel、`#R`→remote、`##<flags 2hex><data>`→FD+brs/esi+长数据、扩展 id；非hex/garbage/error 行跳过计数，空行不计）
+- Modify: `crates/lumelog-can/src/lib.rs`（`pub mod source;`）
+- Create: `crates/lumelog-can/tests/data/candump_basic.log` + `crates/lumelog-can/tests/candump.rs`（8 例）
+
+**Why:** spec §7.3.1 candump 形式；Review Focus 3（FD/RTR/error 行不污染流、不 panic）。`next_frame` 拉式设默认行为：遇错行内部推进并计数，直到出帧或 EOF。
+**验证:** `cargo test -p lumelog-can` 16 pass（+8 candump）+ `cargo clippy --all-targets -- -D warnings` 净。修正：测试里扩展帧 hex 字面量位数写错（`0x1FF_FFFF`→`0x1FFF_FFFF`，解析器无错）；`next_frame` 由 `while let` 改 `for ... by_ref()` 满足 clippy。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。

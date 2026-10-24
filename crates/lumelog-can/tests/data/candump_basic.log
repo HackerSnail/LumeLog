@@ -1,0 +1,10 @@
+(1.234567) can0 123#DEADBEEF
+can0 735#11223344
+can2 1F#A1B2C3D4E5F6070809
+can0 123#R
+can0 123##031122334455667788
+can0 1FFFFFFF#42
+this line is not a candump frame
+can0 123#NOThex
+
+(0.000500) vcan1 7AA#0011
