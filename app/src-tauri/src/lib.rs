@@ -22,6 +22,7 @@ pub fn run() {
             commands::doc_list,
             commands::search_run,
             commands::search_cancel,
+            commands::dbc_import,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");

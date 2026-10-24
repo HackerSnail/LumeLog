@@ -6,6 +6,15 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### Task 2. DbcStore + `dbc_import` 命令
+**Files:**
+- Modify: `app/src-tauri/src/state.rs`（`AppDocs` 加 `dbc: Mutex<HashMap<u64, Arc<Database>>>` + `next_dbc_id` + `insert_dbc`/`get_dbc` + `dbc_store_roundtrip` 单测）
+- Modify: `app/src-tauri/src/commands.rs`（`import_dbc_info`（读文件 + `from_utf8_lossy` + `parse_lenient`）、`dbc_summaries`（报文行扩展 id 按 bit31 还原）、`#[tauri::command] dbc_import`）+ 2 单测
+- Modify: `app/src-tauri/src/lib.rs`（注册 `dbc_import`）
+
+**Why:** spec §9 `dbc_import` → `{dbc_id, messages, errors}`。走宽容解析使单行坏构造不致整库导入失败（§7.1）；缓存 `Database` 供 `can_parse` 按 `dbc_id` 取用。
+**验证:** `cargo test -p lumelog-app` 8 pass（新：`dbc_store_roundtrip`、`dbc_import_reads_sample_dbc`（EngineData 保留 2 信号/1 个 `bad SG_` 告警/ExtFrame id=2147484928/MuxedMsg 3 信号）、`dbc_import_missing_file_is_io_error`）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ### Task 1. 接入 lumelog-can + CAN DTO + from_can
 **Files:**
 - Modify: `app/src-tauri/Cargo.toml`（加 `lumelog-can` 路径依赖）

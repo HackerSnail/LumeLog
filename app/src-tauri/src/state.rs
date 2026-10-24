@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use lumelog_can::dbc::Database;
 use lumelog_core::doc::DocFile;
 
 #[derive(Default)]
@@ -15,6 +16,10 @@ pub struct AppDocs {
     next_doc_id: AtomicU64,
     cancels: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     next_req_id: AtomicU64,
+    /// Imported DBC databases, keyed by an id the front end passes back on every
+    /// `can_parse`/`can_decode_snippet` call.
+    dbc: Mutex<HashMap<u64, Arc<Database>>>,
+    next_dbc_id: AtomicU64,
 }
 
 impl AppDocs {
@@ -68,5 +73,33 @@ impl AppDocs {
     /// Drop a finished search's cancel flag.
     pub fn end_search(&self, id: u64) {
         self.cancels.lock().unwrap().remove(&id);
+    }
+
+    /// Register a freshly imported DBC database, returning its id.
+    pub fn insert_dbc(&self, db: Arc<Database>) -> u64 {
+        let id = Self::next_id(&self.next_dbc_id);
+        self.dbc.lock().unwrap().insert(id, db);
+        id
+    }
+
+    #[allow(dead_code)] // consumed by the can_parse / can_decode_snippet commands (Task 3)
+    pub fn get_dbc(&self, id: u64) -> Option<Arc<Database>> {
+        self.dbc.lock().unwrap().get(&id).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dbc_store_roundtrip() {
+        let s = AppDocs::default();
+        let a = s.insert_dbc(Arc::new(Database::default()));
+        let b = s.insert_dbc(Arc::new(Database::default()));
+        assert_ne!(a, b, "each import mints a distinct id");
+        assert!(s.get_dbc(a).is_some());
+        assert!(s.get_dbc(b).is_some());
+        assert!(s.get_dbc(9_999).is_none(), "unknown id misses");
     }
 }

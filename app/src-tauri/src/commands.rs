@@ -5,8 +5,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use lumelog_can::dbc::{parse_lenient, ParseOutcome};
+use lumelog_can::error::CanError;
 use lumelog_core::doc::{save_text, DocFile, EolStyle, OverwritePolicy, SaveOptions};
 use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::search::{search_stream, Mode, SearchQuery};
@@ -327,6 +330,69 @@ pub fn doc_close(state: tauri::State<'_, AppDocs>, doc_id: u64) -> Result<(), Ip
     }
 }
 
+/// Read + lenient-parse a DBC file. Lenient so a single bad construct does not
+/// void the whole import — the good messages are kept and warnings surface (spec
+/// §7.1 "跳过坏行继续"). Never panics on non-UTF-8 bytes (lossy).
+pub fn import_dbc_info(path: &Path) -> Result<ParseOutcome, IpcError> {
+    let bytes = std::fs::read(path).map_err(|e| IpcError::new("io", e.to_string()))?;
+    let src = String::from_utf8_lossy(&bytes);
+    Ok(parse_lenient(&src))
+}
+
+/// Project a parse outcome into the front-end summary: message rows (extended
+/// ids re-armed with bit31 so the panel shows the true DBC id) + warnings.
+fn dbc_summaries(o: &ParseOutcome) -> (Vec<DbcMsgSummary>, Vec<DbcErrorJson>) {
+    let messages = o
+        .database
+        .messages
+        .iter()
+        .map(|m| DbcMsgSummary {
+            id: if m.is_extended {
+                m.id | 0x8000_0000
+            } else {
+                m.id
+            },
+            name: m.name.clone(),
+            dlc: m.dlc,
+            signal_count: m.signals.len() as u32,
+        })
+        .collect();
+    let errors = o
+        .errors
+        .iter()
+        .filter_map(|e| match e {
+            CanError::DbcSyntax {
+                line,
+                context,
+                kind,
+            } => Some(DbcErrorJson {
+                line: *line as u64,
+                context: context.clone(),
+                kind: kind.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    (messages, errors)
+}
+
+/// Import a DBC file (spec §9 `dbc_import`): parse lenient, cache the database,
+/// return the message summary + warnings. A read failure is an `io` error.
+#[tauri::command]
+pub fn dbc_import(
+    state: tauri::State<'_, AppDocs>,
+    path: String,
+) -> Result<DbcInfo, IpcError> {
+    let outcome = import_dbc_info(Path::new(&path))?;
+    let (messages, errors) = dbc_summaries(&outcome);
+    let dbc_id = state.insert_dbc(Arc::new(outcome.database));
+    Ok(DbcInfo {
+        dbc_id,
+        messages,
+        errors,
+    })
+}
+
 fn eol_str(e: EolStyle) -> String {
     match e {
         EolStyle::Lf => "lf".to_string(),
@@ -349,5 +415,48 @@ fn parse_eol(s: &str) -> Option<EolStyle> {
         "crlf" => Some(EolStyle::Crlf),
         "mixed" => Some(EolStyle::Mixed),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod can_import_tests {
+    use super::*;
+
+    fn sample() -> std::path::PathBuf {
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../crates/lumelog-can/tests/data/sample.dbc"
+        ))
+        .to_path_buf()
+    }
+
+    #[test]
+    fn dbc_import_reads_sample_dbc() {
+        let o = import_dbc_info(&sample()).unwrap();
+        let (messages, errors) = dbc_summaries(&o);
+        // exactly one deliberately broken SG_ line surfaces as a lenient warning
+        assert_eq!(errors.len(), 1, "one bad SG_ -> one warning");
+        assert_eq!(errors[0].kind, "bad SG_");
+        assert!(errors[0].context.contains("BrokenSignal"));
+        // EngineData keeps its 2 good signals; the broken one is dropped
+        let eng = messages
+            .iter()
+            .find(|m| m.name == "EngineData")
+            .expect("EngineData present");
+        assert_eq!(eng.signal_count, 2, "broken SG_ dropped, 2 kept");
+        // ExtFrame's masked id is re-armed with bit31 (raw DBC id 2147484928)
+        let ext = messages
+            .iter()
+            .find(|m| m.name == "ExtFrame")
+            .expect("ExtFrame present");
+        assert_eq!(ext.id, 2147484928, "extended id reconstructed");
+        let mux = messages.iter().find(|m| m.name == "MuxedMsg").unwrap();
+        assert_eq!(mux.signal_count, 3);
+    }
+
+    #[test]
+    fn dbc_import_missing_file_is_io_error() {
+        let err = import_dbc_info(std::path::Path::new("Z:/no-such-file.dbc")).unwrap_err();
+        assert_eq!(err.code, "io");
     }
 }
