@@ -113,8 +113,21 @@ impl IpcError {
             CoreError::LineOutOfRange => ("line_out_of_range", None),
             CoreError::Encoding(_) => ("encoding_unsupported", None),
             CoreError::InvalidPattern(_) => ("invalid_pattern", None),
-            CoreError::Conflict((size, _)) => {
-                ("conflict", Some(format!("disk size now {size}")))
+            CoreError::Conflict {
+                disk: (size, _),
+                unmappable,
+            } => {
+                // One informed confirmation: fold the lossy-encode consequence
+                // into the conflict detail so a single force prompt discloses
+                // both gates the plan's single knob couples (final-review I-1).
+                let detail = if *unmappable > 0 {
+                    format!(
+                        "磁盘现为 {size} 字节，且本次还将把 {unmappable} 处无法表示的字符写为 ?（不可恢复）"
+                    )
+                } else {
+                    format!("磁盘现为 {size} 字节")
+                };
+                ("conflict", Some(detail))
             }
             CoreError::Unmappable(n) => ("unmappable", Some(n.to_string())),
             CoreError::Locked => ("locked", None),

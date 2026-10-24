@@ -2,6 +2,32 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
+
+**Files:**
+- Create: `app/frontend/src/styles.css`（185+20 行有界视口布局）、`app/frontend/src/vite-env.d.ts`（`vite/client` 类型，使 CSS import 过 tsc）
+- Modify: `app/frontend/src/main.ts`（`import "./styles.css"`；Ctrl+G 跳行小输入框 + Ctrl+Shift+S 另存走 `save` 对话框；`appPing()` 计时终点；只读/编辑两路 `invalidCount` 常驻 ⚠；`saveActive/afterSave` 携带 `target` 路径重绑；DocState 加 `invalid`）
+- Modify: `app/frontend/src/listview.ts`（`loadWindow` 类型加 `invalidCount` + `onInvalidCount` 回调；删 inline height 交 CSS；catch 复位 `renderFirst/Last` 防短路）
+- Modify: `app/frontend/src/statusbar.ts`（编码名旁常驻 `⚠ {n}` + `setInvalidCount`，`clear` 复位）
+- Modify: `app/src-tauri/src/commands.rs`（`MAX_CHUNK_LINES=20000` + `doc_chunk` 上限守卫）
+- Modify: `crates/lumelog-core/src/{error.rs,doc/save.rs}` + `app/src-tauri/src/dto.rs`（`Conflict` 改结构体变体携带 `unmappable`；`save_text` 把 `encode_all` 移到冲突门之前使单确认「知情」；`from_core` 中文 detail 合并两门）
+- Modify: `crates/lumelog-core/src/bin/lumelog.rs`（`SIZE_LIMIT` `u64::MAX`→`u32::MAX as u64`，stat 阶段快拒 >4GiB）
+- Modify: `.github/workflows/release.yml`（资产上传 `find|while` 改进程替换 + `fail` 标志，任一失败 `exit 1` 使 job 失败）
+- Modify: `docs/test-checklist.md`（P1 门槛回写 spec 原值 ≤800ms；P1/P2 诚实标 **未验证**；冲突改单确认描述；另存/Ctrl+G 入冒烟；拖放/最近/Save-As 重绑记 §4 deferred）
+
+**Why:** 逐任务门禁因 DOM/交互 headless 不可测而漏掉跨层缝隙；whole-branch 终审暴露 1 Critical + 4 Important + 若干 Minor，一波修完再单点 scoped 复审。
+
+**Findings 处置：**
+- **C-1（Critical，修）**：前端原本零 CSS，`.listview` `height:100%` 在 auto 高度祖先里退化 → 撑满 spacer 全高 → `visibleWindow` 一次索取整文件，破 M1 旗舰「1GB 只读滚动」演示。根因修 = styles.css 从 `#root` 起每层给定确定高度；壳侧 `MAX_CHUNK_LINES` 兜底防线；N-4 fetch 失败复位窗口界防卡死。
+- **I-1（修）**：plan 钉单 `overwrite_policy` 旋钮耦合冲突门 + 不可映射门；原 `Force` 单确认跨两门 → 用户盲接受不可逆 `?` 覆写。改为 `save_text` 先 `encode_all`（纯、无落盘副作用）再在 `Conflict` 里携带 `unmappable`，前端一次「知情」确认披露全部后果；+回归测试 `conflict_reports_unmappable_count_too`。
+- **I-2（修）**：spec §12 M1 验收明列「另存」、§8 明列 Ctrl+G，原前端缺入口。补 Ctrl+Shift+S 另存（`save` 对话框 + `afterSave` 重绑 tab）+ Ctrl+G 跳行内联小输入框（不用 `window.prompt`，WKWebView 不可靠）。拖放/最近 20 非 M1 项 → defer Plan 2。
+- **I-3（修）**：checklist 把 P1 误写 ≤1s（spec 实为 ≤800ms），且 P1/P2 本属 GUI 计时 headless 不可测——诚实标未验证，`app_ping` 接线为 P1 计时终点。
+- **I-4（修）**：spec §5.4 要求每块 `invalid_count>0` 时状态栏常驻 ⚠；原只读列表丢弃 invalidCount、编辑模式仅一次性 toast。改为两路都透传 → statusbar 常驻 ⚠，随 tab 切换按 doc 恢复。
+
+**Rulings（残留 defer，非阻塞）：** N-1 async 命令化、N-2 UTF-16 整文件、N-6 CSP、N-9 CI-canary 等 Minor 属打磨/加固，不进本 wave；Save-As 后壳侧 doc 仍绑原文件（编码切换重读原内容）为已知 v1 简化，记 checklist §4 归 Plan 2。
+
+**验证:** `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test -p lumelog-core` + `npx vitest run` + `npm run build` 全绿（见下方 commit）。
+
 ## 2026-10-24 — Task 11：M1 集成验收 + CI + 发布物（Plan 1 收尾）
 
 **Files:**

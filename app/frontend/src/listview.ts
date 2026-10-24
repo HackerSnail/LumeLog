@@ -24,7 +24,13 @@ export interface ListViewOpts {
    *  while indexing is synchronous (v1), streams ahead of it in Task 11. */
   indexedLines: () => number;
   /** Fetch one window of decoded lines. Injected so the view has no IPC import. */
-  loadWindow: (start: number, count: number) => Promise<{ first: number; lines: string[] }>;
+  loadWindow: (
+    start: number,
+    count: number,
+  ) => Promise<{ first: number; lines: string[]; invalidCount: number }>;
+  /** Report decoded-but-unmappable counts for the live window (spec §5.4: the
+   *  status bar shows a persistent ⚠ so a wrong encoding is discoverable). */
+  onInvalidCount?: (count: number) => void;
 }
 
 /**
@@ -75,7 +81,10 @@ export class ListView implements TabView {
     this.root.tabIndex = 0; // focusable so keyboard scroll works; read-only otherwise
     this.root.style.position = "relative";
     this.root.style.overflow = "auto";
-    this.root.style.height = "100%";
+    // Height is owned by the host layout (`styles.css`: `#tabs .listview` is a
+    // bounded flex child). Never set a percentage/auto height here — that is
+    // what let the box grow to the full spacer height and request the whole
+    // file in one go (final-review C-1).
 
     this.spacer = document.createElement("div");
     this.spacer.style.position = "relative";
@@ -172,14 +181,20 @@ export class ListView implements TabView {
 
   private async fetchAndRender(first: number, needEnd: number): Promise<void> {
     const mySeq = ++this.seq;
-    let res: { first: number; lines: string[] };
+    let res: { first: number; lines: string[]; invalidCount: number };
     try {
       res = await this.opts.loadWindow(first, needEnd - first);
     } catch {
-      // A failed fetch leaves the last paint intact; the next scroll retries.
+      // A failed fetch must not leave `renderFirst/renderLast` claiming the
+      // window is painted: the next scroll into the same range would hit the
+      // `!force && first===renderFirst && last===renderLast` short-circuit and
+      // the view would stay stuck on stale content forever (final-review N-4).
+      this.renderFirst = -1;
+      this.renderLast = -1;
       return;
     }
     if (this.destroyed || mySeq !== this.seq) return; // superseded by a newer scroll
+    this.opts.onInvalidCount?.(res.invalidCount); // spec §5.4 persistent ⚠
     this.cache = new Map();
     for (let i = 0; i < res.lines.length; i++) this.cache.set(res.first + i, res.lines[i]);
     // Derive the cached span from what actually arrived, not from what we

@@ -117,9 +117,13 @@ jobs:
             -d "tag_name=${TAG}" \
             -d "name=LumeLog ${TAG}" \
             -d "body=M1 editor-core release: streaming large-file open, GBK/GB18030/UTF-16 encodings, literal/regex search."
-          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) |
-          while read -r f; do
+          # A failed asset upload must fail the job, not print-and-pass. Process
+          # substitution (not `find | while`) keeps the loop in the current shell
+          # so the `fail` flag survives to the final gate (final-review N-7).
+          fail=0
+          while IFS= read -r -d '' f; do
             curl -sf -X POST "https://gitee.com/api/v5/repos/${OWNER}/${REPO}/releases/${TAG}/assets" \
               -F "access_token=${TOKEN}" \
-              -F "file=@${f}" || echo "asset upload failed: ${f}"
-          done
+              -F "file=@${f}" || { echo "asset upload failed: ${f}" >&2; fail=1; }
+          done < <(find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -print0)
+          test "$fail" -eq 0 || { echo "one or more Gitee asset uploads failed" >&2; exit 1; }

@@ -5,7 +5,7 @@
 //! scroll) is the Task 11 pass; the logic below is headless-checked by
 //! `tsc --noEmit` (strict) + `vitest`.
 
-import { open, ask } from "@tauri-apps/plugin-dialog";
+import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import {
   docOpen,
   docClose,
@@ -14,6 +14,7 @@ import {
   loadAllText,
   loadWindow,
   searchRun,
+  appPing,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -25,6 +26,7 @@ import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
 import type { ModeChoice } from "./language";
+import "./styles.css";
 
 interface DocState {
   path: string;
@@ -32,6 +34,8 @@ interface DocState {
   eol: string;
   totalLines: number;
   mode: "edit" | "readonly";
+  /** Unmappable bytes in the last decoded window (spec §5.4 persistent ⚠). */
+  invalid: number;
 }
 
 const docStates = new Map<number, DocState>();
@@ -135,21 +139,26 @@ function onIndexProgress(p: IndexProgress): void {
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
   const total = info.totalLines ?? info.lineCountEstimate;
   indexed.set(info.docId, total);
-  const handle = await openEditable({
-    parent: tabsEl,
-    info,
-    ext: extOf(path),
-    onDirty: () => tabs.refreshDirty(info.docId),
-    onInvalid: (n) => {
-      if (n > 0) toastMsg(`解码时发现 ${n} 处无法映射字符（以 ? 显示）`);
-    },
-  });
   docStates.set(info.docId, {
     path,
     encoding: info.encoding,
     eol: info.eol || "LF",
     totalLines: total,
     mode: "edit",
+    invalid: 0,
+  });
+  const handle = await openEditable({
+    parent: tabsEl,
+    info,
+    ext: extOf(path),
+    onDirty: () => tabs.refreshDirty(info.docId),
+    onInvalid: (n) => {
+      // Persistent ⚠ beside the encoding (spec §5.4), not a transient toast —
+      // a wrong-encoding file must stay discoverable while it is open.
+      const d = docStates.get(info.docId);
+      if (d) d.invalid = n;
+      status.setInvalidCount(n);
+    },
   });
   editors.set(info.docId, handle);
   tabs.add({ docId: info.docId, path }, handle);
@@ -167,12 +176,20 @@ function mountList(info: DocInfo, path: string): void {
     eol: info.eol || "LF",
     totalLines: total,
     mode: "readonly",
+    invalid: 0,
   });
   const list = new ListView({
     docId: info.docId,
     totalLines: () => docStates.get(info.docId)?.totalLines ?? 0,
     indexedLines: () => indexed.get(info.docId) ?? docStates.get(info.docId)?.totalLines ?? 0,
     loadWindow: (start, count) => loadWindow(info.docId, start, count),
+    onInvalidCount: (n) => {
+      // §5.4: every fetched window reports its unmappable count; keep the
+      // status-bar ⚠ in sync (only repaint if this doc is the shown one).
+      const d = docStates.get(info.docId);
+      if (d) d.invalid = n;
+      if (info.docId === tabs.active()?.info.docId) status.setInvalidCount(n);
+    },
   });
   lists.set(info.docId, list);
   tabs.add({ docId: info.docId, path }, list);
@@ -193,7 +210,7 @@ function updatePos(handle: EditorHandle): void {
   status.setPos(line, col, docStates.get(handle.docId)?.totalLines ?? line);
 }
 
-async function saveActive(): Promise<void> {
+async function saveActive(saveAs = false): Promise<void> {
   const a = tabs.active();
   if (!a || busy) return;
   const handle = editors.get(a.info.docId);
@@ -203,24 +220,38 @@ async function saveActive(): Promise<void> {
   }
   const ds = docStates.get(a.info.docId);
   if (!ds) return;
+
+  // Save-As (Ctrl+Shift+S): pick a destination first; cancelling aborts quietly.
+  let target = ds.path;
+  if (saveAs) {
+    const dest = await save({
+      defaultPath: ds.path,
+      filters: [{ name: "日志/文本", extensions: ["*"] }],
+    });
+    if (typeof dest !== "string") return;
+    target = dest;
+  }
+
   setBusy(true);
   try {
     const report = await docSave({
       docId: a.info.docId,
       text: handle.getText(),
-      path: ds.path,
+      path: target,
       encoding: ds.encoding,
       eol: ds.eol,
       force: false,
     });
-    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false);
+    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target);
   } catch (err) {
     if (
       err instanceof IpcError &&
       (err.payload.code === "conflict" || err.payload.code === "unmappable")
     ) {
       // Cross-platform async dialog (I4): window.confirm is unreliable on
-      // WKWebView / webkit2gtk.
+      // WKWebView / webkit2gtk. One *informed* confirmation folds both gates
+      // (final-review I-1): the shell's conflict detail already spells out the
+      // lossy-`?` consequence, so a single force prompt discloses everything.
       setBusy(false);
       const go = await ask(`${err.zh}\n\n确定要强制覆盖吗？`, {
         title: err.payload.code === "conflict" ? "保存冲突" : "编码无法表示",
@@ -234,12 +265,12 @@ async function saveActive(): Promise<void> {
           const report = await docSave({
             docId: a.info.docId,
             text: handle.getText(),
-            path: ds.path,
+            path: target,
             encoding: ds.encoding,
             eol: ds.eol,
             force: true,
           });
-          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true);
+          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target);
         } catch (err2) {
           reportError(err2);
         } finally {
@@ -261,7 +292,9 @@ function afterSave(
   replaceCount: number,
   conflict: boolean,
   forced: boolean,
+  target: string,
 ): void {
+  ds.path = target; // a Save-As rebinds the tab to its new file
   handle.markSaved();
   tabs.refreshDirty(docId);
   const total = handle.view.state.doc.lines; // line count after edits (Nit3)
@@ -357,6 +390,7 @@ function syncStatus(docId: number): void {
   if (!ds) return;
   status.setEncoding(ds.encoding);
   status.setEol(ds.eol);
+  status.setInvalidCount(ds.invalid); // §5.4 — per-doc, restored on tab switch
   const view = tabs.get(docId);
   if (view) status.setDirty(view.isDirty());
   const handle = editors.get(docId); // line/col only for editable docs
@@ -510,6 +544,48 @@ function jumpToLine(zeroBasedLine: number): void {
   lists.get(a.info.docId)?.scrollToLine(zeroBasedLine); // read-only list
 }
 
+/** Ctrl+G: a small inline go-to-line box (not `window.prompt` — unreliable on
+ *  WKWebView / webkit2gtk, the same reason the search panel uses an `<input>`). */
+function openJumpPrompt(): void {
+  if (!tabs.active()) {
+    toastMsg("请先打开一个文档");
+    return;
+  }
+  const existing = document.getElementById("jump-panel");
+  if (existing) {
+    (existing.querySelector("input") as HTMLInputElement | null)?.focus();
+    return;
+  }
+  const panel = document.createElement("div");
+  panel.id = "jump-panel";
+  panel.className = "jump-panel";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.inputMode = "numeric";
+  input.placeholder = "跳转到行号";
+  const go = document.createElement("button");
+  go.textContent = "跳转";
+  const close = () => panel.remove();
+  const submit = () => {
+    const n = Number.parseInt(input.value, 10);
+    if (Number.isFinite(n) && n >= 1) {
+      jumpToLine(n - 1); // jumpToLine takes a 0-based line
+      close();
+    } else {
+      toastMsg("请输入有效行号（≥1）");
+    }
+  };
+  go.addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) submit();
+    else if (e.key === "Escape") close();
+  });
+  panel.append(input, go);
+  document.getElementById("root")?.append(panel);
+  input.focus();
+  input.select();
+}
+
 function reportError(err: unknown): void {
   const msg = err instanceof IpcError ? err.zh : String(err);
   toastMsg(msg);
@@ -536,10 +612,13 @@ function registerShortcuts(): void {
     const key = e.key.toLowerCase();
     if (key === "s") {
       e.preventDefault();
-      void saveActive();
+      void saveActive(e.shiftKey); // Ctrl+S save, Ctrl+Shift+S save-as (spec §12 M1)
     } else if (key === "o") {
       e.preventDefault();
       void openFile();
+    } else if (key === "g") {
+      e.preventDefault();
+      openJumpPrompt(); // Ctrl+G jump-to-line (spec §8)
     } else if (key === "f" && e.shiftKey) {
       e.preventDefault();
       openSearchFlow();
@@ -549,3 +628,7 @@ function registerShortcuts(): void {
 
 layout();
 registerShortcuts();
+// First-interaction probe (spec P1/P2): the app_ping round-trip is the wired
+// timing endpoint for the manual GUI cold-start measurement. A headless CI
+// cannot observe real first-paint, so §2 records P1/P2 as human smoke items.
+void appPing().catch(() => {});

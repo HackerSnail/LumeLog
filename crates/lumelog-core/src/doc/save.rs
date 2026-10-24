@@ -39,11 +39,13 @@ pub enum OverwritePolicy {
     /// The user already confirmed — write regardless of conflict / unmappable.
     ///
     /// v1 uses one knob for both pre-write confirmations (the plan pins a single
-    /// `overwrite_policy` field, and the dialogs that reach it are built in the
-    /// Task 8/9 UI). `Force` therefore means "the user has confirmed *every*
-    /// gate `SafetyConfirm` would raise" — the UI must present the conflict
-    /// prompt and the unmappable prompt separately and only pass `Force` once
-    /// both are accepted; it must never be the default path.
+    /// `overwrite_policy` field). Because the two gates are coupled, `save_text`
+    /// computes the unmappable count *before* the conflict gate and returns it
+    /// inside `CoreError::Conflict`, so the UI can fold both into ONE *informed*
+    /// confirmation — the user is told exactly what a forced overwrite costs (the
+    /// external change *and* how many characters become `?`) before consenting.
+    /// `Force` therefore means "the user accepted every gate `SafetyConfirm`
+    /// would raise, with full knowledge of each"; it must never be the default.
     Force,
 }
 
@@ -157,16 +159,24 @@ pub fn save_text(
     let real_target = fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
     let current = disk_state(&real_target);
     let conflict = overwriting_original && current != Some(disk_meta);
-    if conflict && opts.overwrite_policy == OverwritePolicy::SafetyConfirm {
-        // Hand back the *live* disk meta so the UI can show what changed.
-        return Err(CoreError::Conflict(
-            current.unwrap_or((0, SystemTime::UNIX_EPOCH)),
-        ));
-    }
 
+    // Encode *before* the conflict gate so a conflict response can also report
+    // the unmappable consequence of forcing. `encode_all` is pure (no disk side
+    // effect), so this does not weaken the "leave the disk untouched until
+    // confirmed" guarantee. The plan pins one `overwrite_policy` knob, so the UI
+    // folds both gates into a single informed confirmation instead of two.
     let lf = normalize_lf(text);
     let with_eol = apply_eol(&lf, opts.eol);
     let enc = encode_all(opts.encoding, &with_eol);
+
+    if conflict && opts.overwrite_policy == OverwritePolicy::SafetyConfirm {
+        // Hand back the *live* disk meta + the unmappable count so the UI can
+        // spell out exactly what a forced overwrite will do.
+        return Err(CoreError::Conflict {
+            disk: current.unwrap_or((0, SystemTime::UNIX_EPOCH)),
+            unmappable: enc.replace_count,
+        });
+    }
 
     if enc.replace_count > 0 && opts.overwrite_policy != OverwritePolicy::Force {
         // Unmappable characters would be written as a `?` placeholder — confirm
@@ -357,7 +367,7 @@ mod tests {
 
         let err = save_text(&mut doc, "mine\n", &opts(None, EncodingLabel::Utf8, EolStyle::Lf), stale)
             .unwrap_err();
-        assert!(matches!(err, CoreError::Conflict(_)), "got {err:?}");
+        assert!(matches!(err, CoreError::Conflict { .. }), "got {err:?}");
         assert_eq!(fs::read(&p).unwrap(), b"changed by someone else and longer\n", "not overwritten");
 
         // Force overrides the conflict and reports it.
@@ -385,6 +395,40 @@ mod tests {
         assert!(matches!(err, CoreError::Unmappable(1)), "got {err:?}");
         assert_eq!(fs::read(&p).unwrap(), before, "disk untouched on unmappable");
         assert!(stray_tmps(parent(&p)).is_empty(), "no temp file created before the gate");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn conflict_reports_unmappable_count_too() {
+        // Final-review I-1: the plan pins ONE overwrite knob, so a conflict
+        // response must ALSO carry the lossy-encode consequence — letting the UI
+        // fold both gates into a single *informed* force confirmation (spec §4.4)
+        // instead of forcing the user to accept an irreversible `?`-write blind.
+        let p = write_tmp(b"seed\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let stale = doc.disk_meta();
+        // External rewrite trips the conflict gate.
+        fs::write(&p, b"changed by someone else\n").unwrap();
+
+        let err = save_text(
+            &mut doc,
+            "ok💩\n",
+            &opts(None, EncodingLabel::Gbk, EolStyle::Lf),
+            stale,
+        )
+        .unwrap_err();
+        match err {
+            CoreError::Conflict { unmappable, .. } => {
+                assert_eq!(unmappable, 1, "conflict carries the lossy-encode count");
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read(&p).unwrap(),
+            b"changed by someone else\n",
+            "disk untouched until confirmed"
+        );
+        assert!(stray_tmps(parent(&p)).is_empty(), "no temp file before the gate");
         fs::remove_file(&p).ok();
     }
 

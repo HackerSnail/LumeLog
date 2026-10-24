@@ -24,6 +24,13 @@ const SIZE_LIMIT: u64 = u32::MAX as u64;
 /// larger open in the read-only virtual list (Task 10). The shell owns this
 /// threshold and returns it as `DocInfo.mode` so the front end never re-derives it.
 const EDIT_THRESHOLD: u64 = 200 * 1024 * 1024;
+/// Hard cap on a single `doc_chunk` request. The read-only list requests at most
+/// `viewport + 2*OVERSCAN` lines (a few hundred), and edit-mode `loadAllText`
+/// pages in blocks of 20 000, so no legitimate caller exceeds this. The cap is
+/// the shell-side half of the spec §3 "后端永不把整个大文件交给前端" invariant:
+/// a front-end sizing bug must not be able to pull a whole gigabyte across IPC
+/// in one call (final-review C-1). Matches `loadAllText`'s `blockLines`.
+const MAX_CHUNK_LINES: u32 = 20_000;
 /// Matches flushed to the front end per `on_batch` message.
 const SEARCH_BATCH: usize = 200;
 
@@ -91,6 +98,12 @@ pub fn doc_chunk(
     let mut doc = doc_arc
         .lock()
         .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+    if line_count > MAX_CHUNK_LINES {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!("line_count {line_count} exceeds chunk cap {MAX_CHUNK_LINES}"),
+        ));
+    }
     let chunk = doc
         .chunk_at(line_start as usize, line_count as usize)
         .map_err(IpcError::from_core)?;

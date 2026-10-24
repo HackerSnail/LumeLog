@@ -1,0 +1,204 @@
+/* LumeLog baseline layout. The app ships no other stylesheet; this is the
+ * contract the read-only virtual list depends on: every ancestor of
+ * `.listview` up to `#root` must have a *definite* height, or `.listview`'s
+ * `overflow:auto` never engages, `clientHeight` collapses to the full spacer
+ * height (totalLines * ROW_HEIGHT), and `visibleWindow` asks for the whole
+ * file at once (spec §3 "数据按块流动"). Viewport units give `#root` a definite
+ * height; flex distributes it so the view host fills exactly the leftover. */
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  font: 13px/1.5 system-ui, "Segoe UI", sans-serif;
+  color: #1f2328;
+}
+
+.appbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #d0d7de;
+  background: #f6f8fa;
+}
+.appbar button {
+  padding: 3px 10px;
+}
+
+/* Tab host: the strip is a fixed row, the active view fills the rest.
+ * `min-height:0` is what lets the flex child actually shrink and scroll. */
+#tabs {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#tabs .tabbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fbfcfd;
+}
+#tabs .tab {
+  flex: 0 0 auto;
+  max-width: 240px;
+  padding: 4px 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-bottom: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#tabs .tab.active {
+  border-color: #d0d7de;
+  background: #fff;
+  border-radius: 4px 4px 0 0;
+}
+#tabs .dirty-dot {
+  color: #d1242f;
+}
+#tabs .tab-label {
+  margin-left: 2px;
+}
+
+/* Both document views fill the space under the tab strip. For the read-only
+ * list this is the bounded viewport the virtualization math requires; `.cm` /
+ * `.cm-editor` get a definite height so CodeMirror scrolls instead of growing. */
+#tabs .listview,
+#tabs .cm,
+#tabs .cm-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+}
+#tabs .cm-editor {
+  outline: none;
+}
+
+.listview {
+  position: relative;
+  overflow: auto;
+}
+.list-row {
+  display: flex;
+  width: 100%;
+}
+.list-gutter {
+  flex: 0 0 auto;
+  min-width: 5ch;
+  padding-right: 10px;
+  text-align: right;
+  color: #8b949e;
+  user-select: none;
+}
+.list-text {
+  flex: 1 1 auto;
+}
+.list-pending {
+  color: #8b949e;
+  font-style: italic;
+}
+
+/* Search panel (Ctrl+Shift+F) — a fixed-height sheet above the status bar. */
+#search-panel {
+  flex: 0 0 auto;
+  max-height: 40%;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #d0d7de;
+  background: #f6f8fa;
+}
+.search-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+}
+.search-head input {
+  flex: 1 1 auto;
+  padding: 3px 6px;
+}
+.search-status {
+  flex: 0 0 auto;
+  color: #57606a;
+}
+.search-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.search-row {
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-row:hover {
+  background: #eaeef2;
+}
+
+/* Ctrl+G go-to-line: a small floating box anchored top-center. */
+.jump-panel {
+  position: fixed;
+  left: 50%;
+  top: 48px;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+.jump-panel input {
+  width: 10ch;
+  padding: 3px 6px;
+}
+
+#status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 10px;
+  border-top: 1px solid #d0d7de;
+  background: #f6f8fa;
+  color: #57606a;
+}
+#status .status-invalid {
+  color: #bf8700;
+  cursor: help;
+}
+
+/* Transient toast (bottom-center, auto-dismiss). */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 48px;
+  transform: translateX(-50%);
+  max-width: 80vw;
+  padding: 8px 14px;
+  border-radius: 6px;
+  background: #1f2328;
+  color: #fff;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s;
+}
+#toast.visible {
+  opacity: 1;
+}

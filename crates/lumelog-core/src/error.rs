@@ -21,9 +21,16 @@ pub enum CoreError {
     #[error("invalid search pattern: {0}")]
     InvalidPattern(String),
 
-    /// payload = current disk (size, mtime_millis) observed on save attempt
+    /// payload = current disk (size, mtime_millis) observed on save attempt.
+    /// `unmappable` is how many characters the target encoding would drop to a
+    /// `?` if the save proceeds — computed up-front so the UI can present the
+    /// conflict and the lossy-encode consequence as ONE informed confirmation
+    /// (single `overwrite_policy` knob is a plan pin; spec §4.4 "确认后执行").
     #[error("disk file changed since open (conflict)")]
-    Conflict((u64, SystemTime)),
+    Conflict {
+        disk: (u64, SystemTime),
+        unmappable: usize,
+    },
 
     /// N characters could not be represented in the target encoding
     #[error("{0} characters are unmappable in the target encoding")]

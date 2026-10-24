@@ -22,9 +22,11 @@ use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::error::CoreError;
 use lumelog_core::search::{search_stream, Match, Mode, SearchQuery};
 
-/// Effectively-unlimited open size cap; the 4 GiB u32-index ceiling is still
-/// enforced inside the line-index builder (`CoreError::TooLarge`).
-const SIZE_LIMIT: u64 = u64::MAX;
+/// Open size cap: reject a >4 GiB file at stat time, before reading anything.
+/// This mirrors the shell's `u32::MAX` line-index ceiling (`validate_open_path`)
+/// so the CLI fast-rejects oversized files instead of scanning them whole only
+/// to fail at `LineIndexBuilder::finish` (final-review N-3).
+const SIZE_LIMIT: u64 = u32::MAX as u64;
 
 const USAGE: &str = "usage: lumelog <open|search|save> --file PATH [options]\n\
        open   [--encoding LABEL] [--line-count | --head N]\n\

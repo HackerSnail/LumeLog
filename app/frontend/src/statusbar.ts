@@ -21,6 +21,7 @@ export class Statusbar {
   private readonly modeSel: HTMLSelectElement;
   private readonly dirtyEl: HTMLElement;
   private readonly posEl: HTMLElement;
+  private readonly invalidEl: HTMLElement;
 
   constructor(root: HTMLElement, cb: StatusbarCallbacks = {}) {
     this.root = root;
@@ -42,9 +43,15 @@ export class Statusbar {
 
     this.dirtyEl = mkSpan("dirty-flag", "");
     this.posEl = mkSpan("doc-pos", "");
+    // Persistent ⚠ beside the encoding name (spec §5.4): a decoded window that
+    // hit unmappable bytes stays flagged while the doc is open, so a wrong
+    // encoding is discoverable — not a one-shot toast that scrolls away.
+    this.invalidEl = mkSpan("status-invalid", "");
+    this.invalidEl.title = "当前编码无法映射部分字符（以 ? 显示），可能是编码选错了";
+    this.invalidEl.style.display = "none";
 
     root.append(
-      mkLabel("编码"), this.encSel,
+      mkLabel("编码"), this.encSel, this.invalidEl,
       mkLabel("行尾"), this.eolSel,
       mkLabel("语法"), this.modeSel,
       this.dirtyEl, this.posEl,
@@ -87,6 +94,17 @@ export class Statusbar {
     this.dirtyEl.classList.toggle("visible", dirty);
   }
 
+  /** Show/hide the persistent ⚠ beside the encoding for a decoded window. */
+  setInvalidCount(count: number): void {
+    if (count > 0) {
+      this.invalidEl.textContent = `⚠ ${count}`;
+      this.invalidEl.style.display = "";
+    } else {
+      this.invalidEl.textContent = "";
+      this.invalidEl.style.display = "none";
+    }
+  }
+
   setPos(line: number, col: number, lines: number): void {
     this.posEl.textContent = `行 ${line}/${lines} · 列 ${col}`;
   }
@@ -99,6 +117,7 @@ export class Statusbar {
 
   clear(): void {
     this.setDirty(false);
+    this.setInvalidCount(0);
     this.posEl.textContent = "";
   }
 
