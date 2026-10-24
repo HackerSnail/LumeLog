@@ -15,9 +15,11 @@ use tauri::ipc::Channel;
 use crate::dto::*;
 use crate::state::AppDocs;
 
-/// Effectively-unlimited open cap; the 4 GiB u32 line-index ceiling is still
-/// enforced inside the core builder (`CoreError::TooLarge`).
-const SIZE_LIMIT: u64 = u64::MAX;
+/// 4 GiB u32 line-index ceiling (spec §4.1/A9). `validate_open_path` rejects at
+/// the stat stage — zero I/O — with the `too_large` code before any read, matching
+/// the `DocFile::open` size gate and the byte-identical `file_size > u32::MAX`
+/// check inside `LineIndexBuilder::finish` (`CoreError::TooLarge`).
+const SIZE_LIMIT: u64 = u32::MAX as u64;
 /// Matches flushed to the front end per `on_batch` message.
 const SEARCH_BATCH: usize = 200;
 

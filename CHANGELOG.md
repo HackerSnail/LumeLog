@@ -10,9 +10,16 @@
   - `create-tauri-app` 需交互/浏览器 → 手写等价壳（plan Step1 明示“非交互参数按其 CLI 现状调整”，产物与模板同形）。
   - `IpcError { code, message, detail? }` 自定义可序列化错误类型作命令 `Err`：`from_core`/`from_open_reject` 映射码 `io|too_large|conflict|unmappable|locked|line_out_of_range|encoding_unsupported|invalid_pattern|not_found|is_directory|permission_denied`（对齐 plan Produces）。
   - `state.rs`：`AppDocs { docs: Mutex<HashMap<u64, Arc<Mutex<DocFile>>>>, next_doc_id: AtomicU64, cancels: Mutex<HashMap<u64, Arc<AtomicBool>>>, next_req_id }` 挂 `tauri::manage`。
-  - **Ruling**：v1 `doc_open` 同步索引 + `SIZE_LIMIT=u64::MAX`（4GB/u32 上限仍由行索引内部 `TooLarge` 把关）；后台线程逐 8MB 流式推进留 Task 11 GUI 联调（IPC 面 `Channel<IndexProgress>` 已就绪）。`tauri::generate_handler!` 编译期校验全命令签名，故 IPC 接线在 `cargo check` 阶段即被类型检查。
+  - **Ruling**：v1 `doc_open` 同步索引（~0.6 s/GB）+ `SIZE_LIMIT=u32::MAX as u64`（与 core `LineIndexBuilder::finish` 的 4GB/u32 硬门逐字节一致，前置零 I/O 快速拒）；后台线程逐 8MB 流式推进留 Task 11 GUI 联调（IPC 面 `Channel<IndexProgress>` 已就绪）。`tauri::generate_handler!` 编译期校验全命令签名，故 IPC 接线在 `cargo check` 阶段即被类型检查。
   - `icon.ico`：tauri-build 的 winres 步骤硬性要求 `icons/icon.ico` → `.superpowers/gen_icon.cjs`（node）合成合法 16×16 32bpp ICO，纳入版本库（构建所需资源）。
 - 验证：`cargo check -p lumelog-app` → Finished（build script 通过后真正 typecheck commands/dto/state/lib，tauri v2.12.5 全树 362 包编译通过，无 error/warning）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 无告警；`cargo test -p lumelog-core` → 57 lib + 9 cli(+1 ignored) + 8 docfile + proptest 全 passed（阶段 B 未波及 core）。Step4 `npm run tauri dev` GUI 冒烟 headless 无 display 不可行 → 依 plan 缓至 Task 11；前端 `npm run build` 属 Task 9 Step1 交付物，本任务不越界。
+
+### Task 8 CodeReview：首轮 SPEC ❌ / Changes requested（1 必修 + 1 Ruling 接受）
+
+首轮 CodeReview（区间 7912c47..4a6985a，Stage A+B）裁定：
+- **F1（必修、spec §9 / plan Step 3 合规）**：`doc_open` 的 `SIZE_LIMIT = u64::MAX` 使 >4GB 前置快速拒绝形同虚设——`validate_open_path(p, u64::MAX)` 永不因 size 拒（旁路），`DocFile::open(_, u64::MAX)` 的 `size > size_limit` 门亦旁路，>4GB 文件要完整流式扫到 `LineIndexBuilder::finish` 才报 `TooLarge`（与 spec §9“前置校验…>4GB → 对应错误码弹窗、不记入最近文件”的零 I/O 快速拒意图相左）。修：`SIZE_LIMIT = u32::MAX as u64`——与 `line_index.rs:125` 的 `file_size > u32::MAX as u64` 硬门逐字节一致（拒收集不变），仅把拒绝时机前移到 stat 阶段。修后 `cargo clippy -p lumelog-app --all-targets -- -D warnings` 仍干净。
+- **F2（Ruling 接受、缓至 Task 10）**：`search_run` 同步模型下整段扫描完成才 `Ok(req_id)`，前端 `await` 期间无法取到 id 调 `search_cancel`→必返 `unknown_request`。取消机制结构上生命周期完整、无泄漏；commands.rs 模块注释已明记“Heavy calls run as synchronous commands for Task 8”，属 plan Step2 明示的 v1 文档化简化，非遗漏。async/非阻塞索引是 Task 10 大文件 UI 交付，自然修复。
+- **裁决（GUI 冒烟 / IPC 无运行时测试）**：评审认 Step4 `npm run tauri dev` headless 不可执行属可接受（编译期 `generate_handler!` 已校签名 + Channel 类型，clippy 干净，plan 将运行时 GUI 验收归 Task 9/10/11）；Stage B commands 无运行时测亦可接受（plan 明文“纯逻辑下沉 core、commands 只做转发”，可测逻辑已由 Stage A 6 测覆盖）。
 
 ## 2026-10-24 — Task 8（阶段 A）：IPC 前置校验 + 带进度索引下沉 core
 
