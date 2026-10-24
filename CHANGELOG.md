@@ -28,6 +28,16 @@
 **Why:** 对齐 NoteLume 的三栏外壳（左导航 + 右检查器）；日志场景侧栏用实时的「已打开文档」列表（前端 `docStates`/tabs 本就权威，不新增后端 IPC；真正的最近文件需 `doc_list` 持久化，归后续）。检查器集中呈现 §5.4 ⚠ 详情。
 **验证:** `npx vitest run` 19 pass（shell 5）+ `tsc --noEmit` 净 + `vite build` OK（css 6.58KB）。
 
+### C. 命令面板（Ctrl+Shift+P）
+**Files:**
+- Create: `app/frontend/src/palette.ts`（`Command` 接口 + 纯函数 `fuzzyScore`（大小写不敏感子序列，前缀/连续/紧凑加分，非子序列返 null）+ `filterCommands`（空查询按原序全列、否则按分降序））
+- Create: `app/frontend/src/palette.test.ts`（8 例：空查询=0 / 非子序列=null / 大小写 / 前缀胜于分散 / 排序 / 全列 / 空结果 / 子集）
+- Modify: `app/frontend/src/main.ts`（`buildCommands()` 命令集：打开/保存/另存/搜索/跳行/关闭/侧栏/信息/主题×4；`openPalette()` 覆盖层：模糊过滤 + ↑↓/Enter(IME 安全)/Escape + 背板点击关闭 + 选中高亮）；`registerShortcuts` 新增 Ctrl+Shift+P
+- Modify: `app/frontend/src/styles.css`（`.palette-overlay` 居中覆盖 + `.palette-box/input/list/row/hint` + 选中 accent + 空态“无匹配命令”）
+
+**Why:** 对齐 NoteLume 的命令面板；把已实现的打开/保存/另存/跳行/搜索/主题/面板收放聚合为可模糊检索的统一入口。评分/过滤为纯函数可 headless 测（与 listview/ipc 同构）。未重复绑 Ctrl+Shift+S（已为另存），侧栏/信息切换走工具条按钮 + 面板。
+**验证:** `npx vitest run` 27 pass（palette 8）+ `tsc --noEmit` 净 + `vite build` OK（css 7.58KB）。
+
 ## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
 
 **Files:**

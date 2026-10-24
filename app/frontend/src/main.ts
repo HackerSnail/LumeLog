@@ -36,6 +36,7 @@ import {
   MIN_INSPECTOR,
   MAX_INSPECTOR,
 } from "./shell";
+import { filterCommands, type Command } from "./palette";
 import "./styles.css";
 
 // Paint the stored theme as early as module eval allows (index.html also runs a
@@ -790,6 +791,125 @@ function openJumpPrompt(): void {
   input.select();
 }
 
+/** The command set offered by the palette, rebuilt per open so it reflects
+ *  live state (e.g. hints). Titles are what `fuzzyScore` matches. */
+function buildCommands(): Command[] {
+  return [
+    { id: "open", title: "打开文件…", hint: "Ctrl+O", run: () => void openFile() },
+    { id: "save", title: "保存", hint: "Ctrl+S", run: () => void saveActive(false) },
+    { id: "save-as", title: "另存为…", hint: "Ctrl+Shift+S", run: () => void saveActive(true) },
+    { id: "search", title: "在文档中搜索…", hint: "Ctrl+Shift+F", run: () => openSearchFlow() },
+    { id: "jump", title: "跳转到行…", hint: "Ctrl+G", run: () => openJumpPrompt() },
+    {
+      id: "close",
+      title: "关闭当前文档",
+      run: () => {
+        const a = tabs.active();
+        if (a) void handleClose(a.info.docId);
+      },
+    },
+    { id: "sidebar", title: "显示 / 隐藏侧栏", run: () => toggleSidebar() },
+    { id: "inspector", title: "显示 / 隐藏文档信息栏", run: () => toggleInspector() },
+    { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
+    { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
+    { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },
+    { id: "theme-auto", title: "主题：跟随系统", run: () => theme.set("auto") },
+  ];
+}
+
+/** Ctrl+Shift+P palette: a fuzzy-filtered, keyboard-navigable command list. */
+function openPalette(): void {
+  const already = document.getElementById("palette");
+  if (already) {
+    (already.querySelector("input") as HTMLInputElement | null)?.focus();
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.id = "palette";
+  overlay.className = "palette-overlay";
+  const box = document.createElement("div");
+  box.className = "palette-box";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "palette-input";
+  input.placeholder = "输入命令…";
+  const list = document.createElement("div");
+  list.className = "palette-list";
+  box.append(input, list);
+  overlay.append(box);
+  document.getElementById("app")?.append(overlay);
+
+  const cmds = buildCommands();
+  let view: Command[] = filterCommands("", cmds);
+  let sel = 0;
+
+  const paintSel = () => {
+    Array.from(list.children).forEach((el, i) =>
+      el.classList.toggle("sel", i === sel),
+    );
+  };
+  const close = () => overlay.remove();
+  const run = (i: number) => {
+    const c = view[i];
+    close();
+    c?.run();
+  };
+  const render = () => {
+    list.textContent = "";
+    view.forEach((c, i) => {
+      const row = document.createElement("div");
+      row.className = "palette-row" + (i === sel ? " sel" : "");
+      const t = document.createElement("span");
+      t.className = "palette-title";
+      t.textContent = c.title;
+      row.append(t);
+      if (c.hint) {
+        const h = document.createElement("span");
+        h.className = "palette-hint";
+        h.textContent = c.hint;
+        row.append(h);
+      }
+      row.addEventListener("mouseenter", () => {
+        sel = i;
+        paintSel();
+      });
+      row.addEventListener("click", () => run(i));
+      list.append(row);
+    });
+  };
+  const update = (q: string) => {
+    view = filterCommands(q, cmds);
+    sel = 0;
+    render();
+  };
+
+  input.addEventListener("input", () => update(input.value));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      close();
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (view.length) sel = (sel + 1) % view.length;
+      paintSel();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (view.length) sel = (sel - 1 + view.length) % view.length;
+      paintSel();
+    } else if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      if (view.length) run(sel);
+    }
+  });
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  render();
+  input.focus();
+}
+
 function reportError(err: unknown): void {
   const msg = err instanceof IpcError ? err.zh : String(err);
   toastMsg(msg);
@@ -826,6 +946,9 @@ function registerShortcuts(): void {
     } else if (key === "f" && e.shiftKey) {
       e.preventDefault();
       openSearchFlow();
+    } else if (key === "p" && e.shiftKey) {
+      e.preventDefault();
+      openPalette(); // Ctrl+Shift+P command palette (UI reference: NoteLume)
     }
   });
 }

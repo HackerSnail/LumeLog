@@ -428,6 +428,69 @@ body {
   padding: 3px 6px;
 }
 
+/* Ctrl+Shift+P command palette: a centered modal sheet over a dim backdrop. */
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.28);
+}
+.palette-box {
+  width: min(560px, 90vw);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 10px 30px var(--shadow);
+  overflow: hidden;
+}
+.palette-input {
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  padding: 12px 14px;
+  font: 15px var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+}
+.palette-list {
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px 0;
+}
+.palette-list:empty::after {
+  content: "无匹配命令";
+  display: block;
+  padding: 12px 14px;
+  color: var(--faint);
+}
+.palette-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--text);
+}
+.palette-row:hover,
+.palette-row.sel {
+  background: var(--bg-hover);
+}
+.palette-row.sel {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.palette-hint {
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 #status {
   flex: 0 0 auto;
   display: flex;
