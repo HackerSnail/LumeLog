@@ -38,6 +38,7 @@
 - [x] 流式加载大文件（按需取块虚拟列表，不一次性全载入内存；>200MB 只读）
       ↳ M1 已交付：`DocFile::chunk_at` 分块解码 + 64MB LRU + 前端只读虚拟列表按需取窗；后台流式索引（边索引边刷新）为后续增强
 - [ ] DBC 文件导入，CAN 报文翻译、信号查看
+      ↳ M2 引擎已交付（Plan 2 `feat/m2-can-engine`，纯 Rust `lumelog-can`）：DBC 子集解析 + Intel/Motorola 信号位序解码（cantools golden 对拍）+ candump/ASC/正则三源 + 解码 CLI（10 万帧验收）。IPC 命令层与 CanPanel 报文表格 UI 属 Plan 3
 - [ ] 日志行过滤、高亮标记、时序筛选
 - [ ] 导出筛选后的报文/日志片段
 - [x] 自定义主题（浅 / 暗 / Dracula 三主题 + 跟随系统 + localStorage 持久化；无边框自绘标题栏；Ctrl+Shift+P 命令面板）
