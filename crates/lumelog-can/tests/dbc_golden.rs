@@ -95,3 +95,20 @@ fn lenient_skips_bad_line_records_context() {
         other => panic!("expected Err(DbcSyntax) at line 14, got {other:?}"),
     }
 }
+
+#[test]
+fn signal_length_out_of_range_is_rejected() {
+    // A regex-matching SG_ with length 65 (> one 64-bit frame) must be rejected
+    // so decode can never shift a u64 by >= 64.
+    let src = "BO_ 100 M: 8 N\n SG_ Big : 0|65@1+ (1,0) [0|1] \"\" R\n";
+    match parse(src) {
+        Err(CanError::DbcSyntax { line, kind, .. }) => {
+            assert_eq!(line, 2);
+            assert_eq!(kind, "signal length out of range");
+        }
+        other => panic!("expected DbcSyntax, got {other:?}"),
+    }
+    let outcome = parse_lenient(src);
+    assert_eq!(outcome.errors.len(), 1, "{outcome:?}");
+    assert!(outcome.database.messages[0].signals.is_empty());
+}

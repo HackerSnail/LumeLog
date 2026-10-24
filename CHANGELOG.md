@@ -78,6 +78,11 @@
 
 **M2 引擎汇总：** Plan 2 七个任务（数据模型/DBC 解析/位序解码/candump/ASC/正则/CLI）全部完成；引擎侧验收达标（10万帧正确 + golden 对拍）。IPC 命令层与 CanPanel 属 Plan 3。
 
+### 终审修复（CodeReview 全分支审查 → 两条 Important，“绝不 panic”硬约束）
+**Files:** `src/dbc/parse.rs`（`build_signal` 拒绝 length==0 或 >64）、`src/decode.rs`（`extract_raw` 入参防御 `length.min(64)` 钳位）、`src/source/asc.rs`（remote 声明 dlc>64 → 跳过）。
+**Why:** 终审发现畸形 DBC `SG_ ...|65@`（移位 ≥64 debug panic）与 ASC remote `Tx r 200`（下游 `data[..dlc]` 越界 panic）两处 panic 路径，违反 Global Constraint“绝不 panic”。三处各加一道守卫（parse 拒范围 + decode 钳位为双保险 + asc 限幅），新3 个回归测试钉住（`signal_length_out_of_range_is_rejected`/`overlong_signal_does_not_panic`/`remote_dlc_over_64_is_skipped`）。
+**验证:** `cargo test -p lumelog-can` 48 pass（+3 回归）+ `cargo clippy --all-targets -- -D warnings` 净。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。

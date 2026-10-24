@@ -165,6 +165,11 @@ fn build_signal(lineno: usize, ctx: &str, c: &Captures) -> Result<Signal, CanErr
     };
     let start_bit: u32 = c[3].parse().map_err(|_| syntax(lineno, ctx, "bad start_bit"))?;
     let length: u32 = c[4].parse().map_err(|_| syntax(lineno, ctx, "bad length"))?;
+    // A DBC signal spans at most one 64-bit (CAN-FD) frame; reject out-of-range
+    // lengths here so `decode::extract_raw` can never shift by >= 64.
+    if length == 0 || length > 64 {
+        return Err(syntax(lineno, ctx, "signal length out of range"));
+    }
     let byte_order = if &c[5] == "1" { ByteOrder::LittleEndian } else { ByteOrder::BigEndian };
     let is_signed = &c[6] == "-";
     let factor: f64 = c[7].trim().parse().map_err(|_| syntax(lineno, ctx, "bad factor"))?;

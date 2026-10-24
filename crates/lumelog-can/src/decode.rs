@@ -16,9 +16,12 @@ use crate::frame::SignalValue;
 
 /// Extract the `sig.length` raw bits for `sig` from `data` as an unsigned value.
 pub fn extract_raw(data: &[u8], sig: &Signal) -> u64 {
+    // Defensive clamp: a validated DBC signal is already 1..=64, but this is
+    // public API and a hand-built Signal must never shift a u64 by >= 64.
+    let length = sig.length.min(64);
     match sig.byte_order {
-        ByteOrder::LittleEndian => extract_intel(data, sig.start_bit, sig.length),
-        ByteOrder::BigEndian => extract_motorola(data, sig.start_bit, sig.length),
+        ByteOrder::LittleEndian => extract_intel(data, sig.start_bit, length),
+        ByteOrder::BigEndian => extract_motorola(data, sig.start_bit, length),
     }
 }
 

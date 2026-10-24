@@ -50,6 +50,15 @@ fn remote_frame_rx_r() {
 }
 
 #[test]
+fn remote_dlc_over_64_is_skipped() {
+    // A malformed remote declaration must not yield a frame whose dlc would make
+    // a downstream `data[..dlc]` slice panic; it is skipped and counted instead.
+    let (frames, st) = drain(src("3.000000 1 321 Tx r 200"));
+    assert!(frames.is_empty());
+    assert_eq!(st.skipped, 1);
+}
+
+#[test]
 fn skips_boe_bcs_error_counted() {
     // boe/bcs lines carry a real timestamp+Rx but an unsupported frame type → skipped.
     let text = "4.000000 1 100 Rx boe 1 2\n5.000000 1 100 Rx bcs 8";

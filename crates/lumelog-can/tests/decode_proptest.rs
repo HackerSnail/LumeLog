@@ -86,3 +86,16 @@ proptest! {
         prop_assert!((phys - want).abs() <= tol, "{phys} vs {want}");
     }
 }
+
+/// A hand-built over-long signal (which `dbc::parse` now rejects) must still not
+/// panic in the public `extract_raw` — the defensive clamp caps the shift at 64.
+#[test]
+fn overlong_signal_does_not_panic() {
+    let data = [0u8; 8];
+    let mut sig = intel_signal(0, 65);
+    let _ = extract_raw(&data, &sig); // must not panic
+    sig.byte_order = ByteOrder::BigEndian;
+    let _ = extract_raw(&data, &sig);
+    // raw_to_signed on an out-of-range width returns raw unchanged, no underflow.
+    let _ = raw_to_signed(0xFFFF_FFFF_FFFF_FFFF, 100);
+}

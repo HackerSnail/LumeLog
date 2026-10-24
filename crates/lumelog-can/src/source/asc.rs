@@ -83,6 +83,11 @@ fn parse_line(lineno: u64, text: &str) -> Option<Frame> {
             flags.is_remote = true;
             data = Vec::new();
             dlc = toks.get(5).and_then(|t| t.parse::<u8>().ok())?;
+            // A declared dlc beyond 64 (CAN-FD max) is malformed — skip, don't
+            // let a downstream `data[..dlc]` slice panic.
+            if dlc > 64 {
+                return None;
+            }
         }
         // `boe`, `bcs`, `error`, … — recognized but not decoded (skipped).
         _ => return None,
