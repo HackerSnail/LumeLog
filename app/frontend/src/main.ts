@@ -16,13 +16,21 @@ import {
   loadWindow,
   searchRun,
   appPing,
+  dbcImport,
+  canParse,
+  canCancel,
+  canDecodeSnippet,
   IpcError,
   type DocInfo,
   type IndexProgress,
   type MatchJson,
+  type FrameJson,
+  type DbcInfo,
 } from "./ipc";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
+import { CanPanel, FrameStore } from "./canpanel";
+import { type CanFilter } from "./canfilter";
 import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
@@ -61,6 +69,28 @@ const lists = new Map<number, ListView>();
 /** Lines indexed so far per doc; drives the list "待索引" placeholder (Task 11). */
 const indexed = new Map<number, number>();
 let busy = false;
+
+// ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
+// One panel instance is re-attached to whichever document is active; each
+// document keeps its own accumulated frames + last filter so switching tabs
+// restores that doc's table instead of the previous one's.
+const canStores = new Map<number, FrameStore>();
+const canFilters = new Map<number, CanFilter>();
+let lastDbcId: number | null = null; // most-recently imported DBC, reused per parse
+let canPanel: CanPanel | null = null; // lazily built on first dock open
+let canDockEl: HTMLElement | null = null;
+let canDockVisible = false;
+let canParsing = false;
+let canReqId: number | null = null; // job id from the (now early) can_parse resolve, for Stop
+// Dock controls, resolved in layout(); guarded null until then.
+let canSrcSel: HTMLSelectElement | null = null;
+let canRegexInput: HTMLInputElement | null = null;
+let canRegexRow: HTMLElement | null = null;
+let canDbcLine: HTMLElement | null = null;
+let canRunBtn: HTMLButtonElement | null = null;
+let canHostEl: HTMLElement | null = null;
+// filter inputs (per-active-doc view filter)
+const canF = {} as Record<string, HTMLInputElement | HTMLSelectElement>;
 
 const tabsEl = document.createElement("div");
 tabsEl.id = "tabs";
@@ -124,6 +154,7 @@ function layout(): void {
     appName,
     mkBtn("打开文件", "", () => void openFile()),
     mkBtn("搜索", "在当前文档中搜索 (Ctrl+Shift+F)", () => openSearchFlow()),
+    mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
     mkBtn("主题", "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）", () => theme.cycle()),
@@ -170,7 +201,7 @@ function layout(): void {
   panel.id = "search-panel";
   panel.className = "search-panel";
   panel.style.display = "none";
-  center.append(tabsEl, panel);
+  center.append(tabsEl, panel, buildCanDock());
 
   sidebarHandleEl = document.createElement("div");
   sidebarHandleEl.className = "pane-resizer";
@@ -355,6 +386,357 @@ function updateInspector(docId: number | null): void {
 function refreshPanels(): void {
   refreshSidebar();
   updateInspector(tabs.active()?.info.docId ?? null);
+  switchCanView();
+}
+
+// ---- CAN decode dock (spec §7.4) --------------------------------------------
+
+/** Build (once) and return the message dock: source/DBC controls, a filter row,
+ *  and the CanPanel host. Hidden until `toggleCanDock` reveals it. */
+function buildCanDock(): HTMLElement {
+  if (canDockEl) return canDockEl;
+  const dock = document.createElement("div");
+  dock.id = "can-dock";
+  dock.className = "can-dock";
+  dock.style.display = "none";
+
+  const bar = document.createElement("div");
+  bar.className = "can-dockbar";
+
+  canSrcSel = document.createElement("select");
+  canSrcSel.className = "can-src";
+  for (const [v, t] of [
+    ["candump", "candump"],
+    ["asc", "ASC"],
+    ["regex", "正则"],
+  ]) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    canSrcSel.append(o);
+  }
+  canSrcSel.addEventListener("change", () => {
+    if (canRegexRow) canRegexRow.style.display = canSrcSel!.value === "regex" ? "" : "none";
+  });
+
+  canRegexRow = document.createElement("span");
+  canRegexRow.className = "can-regex-row";
+  canRegexRow.style.display = "none";
+  canRegexInput = document.createElement("input");
+  canRegexInput.type = "text";
+  canRegexInput.placeholder = "命名组 (?<id>...) 与 (?<data>...)";
+  canRegexRow.append(document.createTextNode("正则 "), canRegexInput);
+
+  const importBtn = mkBtn("导入 DBC", "导入 .dbc 信号数据库", () => void importDbc());
+  canDbcLine = document.createElement("span");
+  canDbcLine.className = "can-dbc-line";
+  canDbcLine.textContent = "未导入 DBC";
+
+  canRunBtn = mkBtn("解析报文", "解码当前文档为报文表格", () => void onCanRunClick());
+  const decodeBtn = mkBtn("识别选中", "把编辑器选中文本识别为一条报文", () => void decodeSelection());
+
+  bar.append(
+    document.createTextNode("源 "),
+    canSrcSel,
+    canRegexRow,
+    importBtn,
+    canDbcLine,
+    canRunBtn,
+    decodeBtn,
+  );
+
+  dock.append(bar, buildCanFilterRow(), (canHostEl = mkHost()));
+  canDockEl = dock;
+  return dock;
+}
+
+/** The view-filter toolbar; each change rebuilds the active doc's `CanFilter`. */
+function buildCanFilterRow(): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "can-filter";
+  const num = (key: string, ph: string): HTMLInputElement => {
+    const i = document.createElement("input");
+    i.type = "text";
+    i.placeholder = ph;
+    i.className = "can-fnum";
+    canF[key] = i;
+    i.addEventListener("change", () => applyFilterFromInputs());
+    row.append(i);
+    return i;
+  };
+  const txt = (key: string, ph: string): HTMLInputElement => {
+    const i = num(key, ph);
+    i.classList.add("can-ftxt");
+    return i;
+  };
+  row.append(document.createTextNode("ID "));
+  txt("idFrom", "起(hex/dec)");
+  row.append(document.createTextNode("–"));
+  txt("idTo", "止");
+  row.append(document.createTextNode(" 消息 "));
+  txt("msgName", "名");
+  row.append(document.createTextNode(" 信号 "));
+  txt("signalName", "名");
+  const op = document.createElement("select");
+  canF.signalOp = op;
+  for (const o of [">", "<", ">=", "<=", "=="]) {
+    const opt = document.createElement("option");
+    opt.value = o;
+    opt.textContent = o;
+    op.append(opt);
+  }
+  op.addEventListener("change", () => applyFilterFromInputs());
+  row.append(op);
+  txt("signalValue", "值");
+  row.append(document.createTextNode(" 时间(ms) "));
+  num("timeFromMs", "起");
+  row.append(document.createTextNode("–"));
+  num("timeToMs", "止");
+  const clear = mkBtn("清除过滤", "清空视图过滤条件", () => {
+    for (const el of Object.values(canF)) el.value = "";
+    // the operator is a select: reset it to its default rather than a blank `-1`
+    if (canF.signalOp) (canF.signalOp as HTMLSelectElement).value = ">";
+    applyFilterFromInputs();
+  });
+  row.append(clear);
+  return row;
+}
+
+function mkHost(): HTMLElement {
+  const host = document.createElement("div");
+  host.className = "can-host";
+  return host;
+}
+
+/** Parse a filter field: numeric, or hex `0x..`; empty → undefined. */
+function parseNum(v: string): number | undefined {
+  const s = v.trim();
+  if (s === "") return undefined;
+  const n = s.toLowerCase().startsWith("0x")
+    ? Number.parseInt(s, 16)
+    : Number(s);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Rebuild a `CanFilter` from the input row and push it to the panel. */
+function applyFilterFromInputs(): void {
+  const a = tabs.active();
+  if (!a) return;
+  const f: CanFilter = {};
+  const idFrom = parseNum(canF.idFrom?.value ?? "");
+  const idTo = parseNum(canF.idTo?.value ?? "");
+  const sigVal = parseNum(canF.signalValue?.value ?? "");
+  const tFrom = parseNum(canF.timeFromMs?.value ?? "");
+  const tTo = parseNum(canF.timeToMs?.value ?? "");
+  if (idFrom !== undefined) f.idFrom = idFrom;
+  if (idTo !== undefined) f.idTo = idTo;
+  const msg = canF.msgName?.value.trim();
+  if (msg) f.msgName = msg;
+  const sig = canF.signalName?.value.trim();
+  if (sig && sigVal !== undefined) {
+    f.signalName = sig;
+    f.signalOp = (canF.signalOp as HTMLSelectElement).value as CanFilter["signalOp"];
+    f.signalValue = sigVal;
+  }
+  if (tFrom !== undefined) f.timeFromMs = tFrom;
+  if (tTo !== undefined) f.timeToMs = tTo;
+  canFilters.set(a.info.docId, f);
+  canPanel?.setFilter(f);
+}
+
+function toggleCanDock(): void {
+  canDockVisible = !canDockVisible;
+  if (canDockEl) canDockEl.style.display = canDockVisible ? "" : "none";
+  if (canDockVisible) {
+    ensurePanel();
+    switchCanView();
+  }
+}
+
+/** Create the shared panel on first use, wiring row-activate → source jump. */
+function ensurePanel(): void {
+  if (canPanel || !canHostEl) return;
+  canPanel = new CanPanel(canHostEl, {
+    onRowActivate: (lineNumber) => revealSourceLine(lineNumber),
+    onError: (e) => toastMsg(e),
+  });
+}
+
+/** Show the active document's store+filter in the shared panel. */
+function switchCanView(): void {
+  if (!canPanel) return;
+  const a = tabs.active();
+  const docId = a?.info.docId ?? -1;
+  // Reuse the doc's existing store (registered on first parse) instead of
+  // minting a fresh empty one every switch, so re-attaching shows real frames.
+  let store = docId >= 0 ? canStores.get(docId) : undefined;
+  if (!store) {
+    store = new FrameStore();
+    if (docId >= 0) canStores.set(docId, store);
+  }
+  canPanel.attachStore(store);
+  canPanel.setFilter((docId >= 0 && canFilters.get(docId)) || {});
+  restoreFilterInputs(docId >= 0 ? canFilters.get(docId) : undefined);
+}
+
+/** Reflect a doc's filter back into the input row (blank when none). */
+function restoreFilterInputs(f: CanFilter | undefined): void {
+  const set = (k: string, v?: number | string) => {
+    const el = canF[k];
+    if (el) el.value = v === undefined ? "" : String(v);
+  };
+  set("idFrom", f?.idFrom);
+  set("idTo", f?.idTo);
+  set("msgName", f?.msgName);
+  set("signalName", f?.signalName);
+  set("signalValue", f?.signalValue);
+  set("timeFromMs", f?.timeFromMs);
+  set("timeToMs", f?.timeToMs);
+  // Always reset the operator select (default `>` when the doc has no signal
+  // filter) so a doc switch doesn't leave the previous doc's operator showing.
+  const opEl = canF.signalOp as HTMLSelectElement | undefined;
+  if (opEl) opEl.value = f?.signalOp ?? ">";
+}
+
+/** Frame row click → jump the matching source line (list 0-based, CM 1-based). */
+function revealSourceLine(lineNumber: number): void {
+  const a = tabs.active();
+  if (!a) return;
+  const list = lists.get(a.info.docId);
+  if (list) list.revealLine(lineNumber - 1);
+  else editors.get(a.info.docId)?.revealLine(lineNumber);
+}
+
+async function importDbc(): Promise<void> {
+  const picked = await open({
+    multiple: false,
+    filters: [{ name: "DBC", extensions: ["dbc"] }],
+  });
+  if (typeof picked !== "string") return;
+  try {
+    const info: DbcInfo = await dbcImport(picked);
+    lastDbcId = info.dbcId;
+    const name = basenameOf(picked);
+    canDbcLine!.textContent = `DBC：${name}（${info.messages.length} 报文）`;
+    if (info.errors.length > 0) {
+      toastMsg(`已宽容导入 ${name}，${info.errors.length} 处告警（坏信号行已跳过）`);
+    } else {
+      toastMsg(`已导入 ${name}`);
+    }
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+function onCanRunClick(): void {
+  if (canParsing) {
+    // `can_parse` now returns its job id up front, so Stop is real: flip the
+    // shared cancel flag the worker checks per frame. The tally still arrives on
+    // `onDone` (a cancelled run sends partial stats), which resets the button.
+    if (canReqId !== null) {
+      canCancel(canReqId).catch((e) => reportError(e));
+    }
+    return;
+  }
+  void parseActive();
+}
+
+async function parseActive(): Promise<void> {
+  // Re-entrancy guard lives here (not only in the button handler) so the command
+  // palette's `can-parse` entry can't start a second run that double-fills the
+  // table while one is already streaming.
+  if (canParsing) {
+    toastMsg("解析进行中，请稍候…");
+    return;
+  }
+  const a = tabs.active();
+  if (!a) {
+    toastMsg("请先打开一个文档");
+    return;
+  }
+  if (!canDockVisible) toggleCanDock();
+  ensurePanel();
+  const docId = a.info.docId;
+
+  // Validate inputs BEFORE touching the store: a rejected launch (empty regex)
+  // must leave the previous table intact rather than clear it and stream nothing.
+  const sourceKind = canSrcSel!.value;
+  const regex = sourceKind === "regex" ? canRegexInput!.value : null;
+  if (sourceKind === "regex" && regex === "") {
+    toastMsg("正则源需填写含命名组 id/data 的正则");
+    return;
+  }
+
+  const store = canStores.get(docId) ?? new FrameStore();
+  canStores.set(docId, store);
+  store.clear(); // a re-parse replaces the table wholesale
+  canPanel!.attachStore(store);
+  canPanel!.setFilter(canFilters.get(docId) ?? {});
+  setCanParsing(true);
+  canReqId = null;
+  try {
+    // Resolves as soon as the shell has validated + spawned the worker (frames
+    // keep streaming on the channels afterward), giving us the id for Stop.
+    canReqId = await canParse({
+      docId,
+      dbcId: lastDbcId,
+      sourceKind,
+      regex,
+      onBatch: (frames: FrameJson[]) => {
+        store.push(frames);
+        canPanel?.render();
+      },
+      onDone: (s) => {
+        toastMsg(`解码 ${s.decoded} 帧，跳过 ${s.skipped} 行`);
+        canPanel?.render();
+        // Completion (including a cancelled run) is the only place parsing ends;
+        // the promise itself resolves early, so `finally` must not reset here.
+        setCanParsing(false);
+      },
+    });
+    // Only flip to Stop if the run is still going (a tiny file can finish before
+    // this line, where onDone has already reset the button).
+    if (canParsing && canRunBtn) canRunBtn.textContent = "停止";
+  } catch (err) {
+    reportError(err);
+    setCanParsing(false); // a rejected start never streams, so reset here
+  }
+}
+
+function setCanParsing(b: boolean): void {
+  canParsing = b;
+  if (!b) canReqId = null;
+  if (canRunBtn) canRunBtn.textContent = b ? "解析中…" : "解析报文";
+}
+
+/** Editor-selection → one frame, surfaced as a toast ("识别为报文"). */
+async function decodeSelection(): Promise<void> {
+  const a = tabs.active();
+  if (!a) {
+    toastMsg("请先打开一个文档");
+    return;
+  }
+  const handle = editors.get(a.info.docId);
+  if (!handle) {
+    toastMsg("只读视图不支持选中文本识别");
+    return;
+  }
+  const sel = handle.view.state.selection.main;
+  const text = handle.view.state.sliceDoc(sel.from, sel.to).trim();
+  if (text === "") {
+    toastMsg("请先在编辑器中选中一行报文");
+    return;
+  }
+  try {
+    // Pass the active source kind so an ASC selection decodes as ASC (mirrors
+    // the dock's `源` select); a regex selection is rejected by the shell with a
+    // clear `source_format` toast rather than silently mis-parsed as candump.
+    const f = await canDecodeSnippet({ text, dbcId: lastDbcId, sourceKind: canSrcSel?.value ?? null });
+    const sig = f.signals.length ? `，${f.signals.length} 信号` : "";
+    toastMsg(`报文 ${f.canIdHex}${f.msgName ? " " + f.msgName : ""}：${f.dlc} 字节${sig}`);
+  } catch (err) {
+    reportError(err);
+  }
 }
 
 async function openFile(): Promise<void> {
@@ -644,6 +1026,8 @@ async function handleClose(docId: number): Promise<void> {
   editors.delete(docId);
   lists.delete(docId);
   indexed.delete(docId);
+  canStores.delete(docId);
+  canFilters.delete(docId); // a closed doc drops its table; the panel is rebuilt on demand
   refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
 }
@@ -868,6 +1252,10 @@ function buildCommands(): Command[] {
     },
     { id: "sidebar", title: "显示 / 隐藏侧栏", run: () => toggleSidebar() },
     { id: "inspector", title: "显示 / 隐藏文档信息栏", run: () => toggleInspector() },
+    { id: "can-panel", title: "报文面板：显示 / 隐藏", run: () => toggleCanDock() },
+    { id: "can-import", title: "导入 DBC…", run: () => void importDbc() },
+    { id: "can-parse", title: "解析当前文档为报文", run: () => void parseActive() },
+    { id: "can-snippet", title: "识别选中为报文", run: () => void decodeSelection() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
     { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },

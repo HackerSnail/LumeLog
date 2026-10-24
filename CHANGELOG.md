@@ -2,6 +2,87 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 3 M2 CanPanel + IPC（feat/m2-can-panel）
+
+**依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
+
+### 终审修复波（CodeReview 全分支 → Request changes，0 Critical / 6 Important / 7 Minor）
+**Files:**
+- Modify: `app/src-tauri/src/commands.rs`（① `can_parse` 同步 prologue 只做校验、随即 `tauri::async_runtime::spawn_blocking` 后台解码并**立即返回 req_id**——解码移出主线程、UI 不再冻结、流式批次实时可见；② `doc_lines`（整文件 `Vec`）重写为惰性 `DocLines` 迭代器，一次只持有一个 `MAX_CHUNK_LINES` 窗口（`chunk_to_lines` 抽出共享），符 §3“never hand the whole file over”；`AppHandle`+`Manager` 供 worker 结束 `end_search`；regex 用一次性 `RegexSource::new(empty)` 预校验；`#[allow(too_many_arguments)]` IPC 签名）
+- Modify: `app/src-tauri/src/commands.rs`（`can_parse_tests` 三例改喂 `DocLines::new(Arc::new(Mutex::new(doc))).collect()`）
+- Modify: `app/frontend/src/main.ts`（① 恢复“停止”：`parseActive` 拿到提前返回的 req_id 存入 `canReqId`，`onCanRunClick` 在 `canParsing` 时调 `canCancel`，`canParsing` 仅在 `onDone`（含取消）置否；④ `decodeSelection` 传 `sourceKind`（ASC 选中不再误当 candump）；⑤ 重入守卫移进 `parseActive` 开头（palette `can-parse` 无法并发灌帧）；Minor：`store.clear` 前先校验源/正则、`switchCanView` 复用已注册 store、清除/切换过滤时复位 `signalOp` 下拉）
+- Modify: `app/frontend/src/canpanel.ts`（③ 表头 `hrow` 去 `can-row`（`position:absolute` 会抽流致 `.can-thead` 塌陷盖首行）单列 `renderHeader`；⑥ `FrameStore.revision` + 缓存 `cachedRows/cachedTable` 按 (store,rev,filter) 失效，`render()` rAF 合并 `onBatch` 突发，滚动路径 first/last 未变短路——去 O(n²) 重建）
+- Modify: `app/frontend/src/canpanel.test.ts`（加 `frame_store_revision` 例）
+- Modify: `app/frontend/src/styles.css`（③ `.can-hrow` 补 `height:20px`+`white-space:nowrap`，独立成流并与 `.can-row` 列对齐）
+
+**Why:** 终审 6 项 Important 阻塞 merge，逐条修复。①②同源——同步命令既冻结主线程又让 req_id 只在结束时可得（取消形同虚设），一并异步化后取消才真实可用（推翻 Task 7 的“不提供停止”Ruling）。**Ruling（Minor 分诊）**：扩展帧 id 两层语义（依 Task 2 DBC bit31 还原，展示层不重复解码，改动会牵动 DTO 与已测夹具）、远程帧带数据解全 0 信号（can 语义边界、v1 展“无数据”已不崩）、DBC 只增不减（用户显式导入、数量极少）、非法过滤值静默忽略（`parseNum` 返 undefined 视作无上/下界，YAGNI）——四项均判为可在 M3 处理、非阻塞，按 final-review 规则记此 park 而非塞进本次修复波。**验证：** `cargo test -p lumelog-app` 12 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm --prefix app/frontend test` 39 pass（canpanel 2→3）+ `run build`（tsc 通过，41 modules）。
+
+**定向复审（CodeReview 子代理，fix range a5d27a6..6f055cd）：** 6 项 Important 全部 ADDRESSED，无新增 Critical/Important。唯一新 Warning：⑥ 把 `render()` 改为 rAF 合并后，`onScroll` 自身已在 rAF 内又调 `render()` → 双层 rAF、纯滚动多一帧延迟。**后续修正**：抽出 `paintNow()`，`render()` 与 `onScroll()` 的 rAF 均直调它（滚动不再回绕 `render()`），保持单帧重绘；`npm test` 39 pass + `run build`（42 modules）重跑净。结论：可 merge。
+
+
+### Task 7. main.ts 集成 CanPanel（报文 dock + 双向联动）
+**Files:**
+- Modify: `app/frontend/src/main.ts`（导入 CAN 命令 + `CanPanel/FrameStore` + `CanFilter`；报文 dock（源选择 candump/asc/正则 + 导入DBC + 解析/识别选中）+ 过滤栏（ID/消息/信号条件/时间窗）；每 docId 一份 `FrameStore`/`CanFilter`，共享一个 `CanPanel` 按活动文档重挂；行点击→`revealSourceLine`（列表 0-based、CodeMirror 1-based）；选中文本→`canDecodeSnippet`；appbar “报文面板”按钮 + 4 条 palette 命令；`handleClose` 清理 CAN 映射）
+- Modify: `app/frontend/src/styles.css`（`#can-dock`/`.canpanel`/`.can-*` 确定高度 flex 链 + `.list-flash`）
+
+**Why:** spec §7.4 CanPanel 接入主界面。行号对齐是 M2 验收核心：`FrameJson.lineNumber`（1-based）→ 列表 `revealLine(lineNumber-1)`（0-based）/编辑器 `revealLine(lineNumber)`。**Ruling（取消）**：`can_parse` 与 `search_run` 同为同步命令，只在整个扫描完成后才返回 req_id、且循环期间持有文档锁，因此前端无法在流式中途拿到 id 去 `can_cancel`——与仓内已有的 search-cancel 推诿（“需异步搜索”）同理，本次不提供会空转的“停止”按钮，改为解析中显示“解析中…”并提示；`can_cancel` 命令/包装保留为真实 API（已测），待 `can_parse` 异步化后接入。
+**验证:** `npm --prefix app/frontend test` 38 pass + `npm --prefix app/frontend run build`（tsc 通过，41 modules，canpanel+table-core 入 bundle）；`cargo test -p lumelog-app` 12 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+**手工验收（需 `tauri dev`，headless CI 无法跑 GUI）：**① 打开 `crates/lumelog-can/tests/data/candump_basic.log` → 报文面板 → 导入 `sample.dbc`（EngineData/ExtFrame/MuxedMsg，1 处坏 SG_ 告警仍宽容导入）→ 源 candump → 解析：表格出帧；② 点行→跳回源码行（闪烁）；③ ID 区间过滤生效；④ 展开行显 Speed 信号 physical/raw；⑤ 错误/远程帧行不崩（dataHex 空显 –）；⑥ 选中一行→“识别选中”弹层显解码帧。⑥需编辑器环境。无 GUI 时以单测+tsc 作为门。
+
+### Task 6. CanPanel 组件（table-core 列模型 + 行窗口虚拟滚动 + revealLine 联动）
+**Files:**
+- Create: `app/frontend/src/canpanel.ts`（`FrameStore` 累积批量/`all`/`clear`/`length` + `CanPanel` 手写 DOM 虚拟表：行号/时间/通道/ID/消息/DLC/信号/原始数据 8 列，表头取 `getFlatHeaders()`，体只画 `visibleWindow` 窗口 + 扩展子行，行点击→`onRowActivate(1-based lineNumber)`，ID hex/dec + 时间绝对/相对 + ms/µs 切换）
+- Create: `app/frontend/src/canpanel.test.ts`（`FrameStore` 2 例，DOM-free）
+- Modify: `app/frontend/src/listview.ts`（`revealLine(index0)`：`scrollToLine` + 一次闪烁高亮，`paint` 内施加、定时器清除、`destroy` 清理）
+- Modify: `app/frontend/src/editor.ts`（`EditorHandle.revealLine(line1)`：`doc.line` 钉位 + `dispatch` selection + `EditorView.scrollIntoView`）
+- Modify: `app/frontend/package.json` + `package-lock.json`（`@tanstack/table-core ^8`）
+
+**Why:** spec §7.4 报文表格。用户定使用 TanStack—但 table-core 无框架适配器时 `createTable` 需受控 `state`，故首次捕获特性默认 `initialState`、后续回传作 `state`（空 state 会致特性首次 `getState()` 崩）；无 `flexRender`，表头文本直接取 `columnDef.header`（字符串）。行窗口沿用 `listview.visibleWindow`。闪烁高亮放在 `paint` 内因目标行可能还在异步 fetch。`canpanel.css`/`.list-flash` 样式随 Task 7 挂载一并补（未挂载时不影响逻辑）。
+**验证:** `npm --prefix app/frontend test` 38 pass（新 `canpanel.test.ts` 2 例）+ `npm --prefix app/frontend run build`（tsc 通过，38 modules；canpanel 待 Task 7 接入才入 bundle）。
+
+### Task 5. CanPanel 视图过滤引擎（纯函数）
+**Files:**
+- Create: `app/frontend/src/canfilter.ts`（`CanFilter` 接口 + `applyCanFilter(frames, f)` 纯谓词）
+- Create: `app/frontend/src/canfilter.test.ts`（7 例）
+
+**Why:** spec §7.4 / 用户批复的过滤范围（ID 区间/消息名/信号条件/时间窗口）。纯函数不改入参数组与帧对象（视图级过滤不动行索引）；ID 闭区间且 `idFrom>idTo` 直接不匹配（非法区间不抛错）；时间窗口下 `timestampMs` 缺失的帧被排除；信号 `==` 用 `Object.is` 钉死浮点语义。各轴 AND。
+**验证:** `npm --prefix app/frontend test` 36 pass（新 `canfilter.test.ts` 7 例：no_filter/id 区间含单边界与反转/msg_name/signal 条件/time_window/组合 AND/不变更）+ `npm --prefix app/frontend run build`（tsc 通过，39 modules）。
+
+### Task 4. 前端 `ipc.ts` CAN 桥接 + 新错误码
+**Files:**
+- Modify: `app/frontend/src/ipc.ts`（`SignalValueJson`/`FrameJson`/`DbcMsgSummary`/`DbcErrorJson`/`DbcInfo`/`CanStatsJson` interface（camelCase 对齐 `dto.rs`）+ `IpcErrorCode` 联合加 `dbc_syntax`/`bad_regex`/`regex_compile`/`source_format` + `IPC_ERROR_ZH` 四条中文 + `dbcImport`/`canParse`（双 Channel 抄 `searchRun`）/`canCancel`/`canDecodeSnippet` 包装）
+- Modify: `app/frontend/src/ipc.test.ts`（`describe("CAN ipc bridge")` 两例：错误码含中文且 detail 代入、四包装均为函数）
+- Modify: `Cargo.lock`（补记 Task 1/3 已提交的 `lumelog-can` 依赖 + `tempfile` dev-dep 的锁）
+
+**Why:** spec §9 要求前端与 Rust DTO 字段逐一对齐、错误码→稳定中文文案；`canParse` 沿用 `search_run` 的批量流式双通道形态，`dbcId`/`regex` 缺省以 `null` 传递匹配 Rust `Option` 参数。
+**验证:** `npm --prefix app/frontend test` 29 pass（ipc.test.ts 由 5→7，新 CAN 两例由红转绿）+ `npm --prefix app/frontend run build`（`tsc --noEmit` 通过，38 modules transformed）。
+
+### Task 3. `can_parse` 流式命令 + doc_lines + can_cancel + can_decode_snippet
+**Files:**
+- Modify: `app/src-tauri/Cargo.toml`（dev-dep `tempfile = "3"`）
+- Modify: `app/src-tauri/src/commands.rs`（`doc_lines`（`DocFile` 分块→`Vec<Line>` 1-based）、`parse_frames`（`&mut dyn FrameSource` 批量+逐帧取消）、`can_parse`/`can_cancel`/`can_decode_snippet`）+ 4 单测
+- Modify: `app/src-tauri/src/lib.rs`（注册三命令）
+
+**Why:** spec §9 `can_parse` 采 `search_run` 的 Channel/批量/取消骨架（`PARSE_BATCH=512` 防 IPC 风暴、逐帧查共享 cancel 标志）；行数按 `stats()->SourceStats`。`can_decode_snippet` 支撑§7.4 “识别为报文”（选中行走单行源）。接入后剥除 Task 1/2 的 stale `#[allow(dead_code)]`。
+**验证:** `cargo test -p lumelog-app` 12 pass（新：`doc_lines_preserves_line_order`（CRLF 保序/去行尾）、`parse_frames_decodes_candump_and_counts_skips`（2 解/1 跳/1.5s→1500ms/1-based 行号）、`parse_frames_stops_on_cancel`（早停不 panic）、`frame_json_reconstructs_data_hex_for_full_payload`（dlc=64→128 hex 不越界））+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净 + `cargo check --workspace` 通过。
+
+### Task 2. DbcStore + `dbc_import` 命令
+**Files:**
+- Modify: `app/src-tauri/src/state.rs`（`AppDocs` 加 `dbc: Mutex<HashMap<u64, Arc<Database>>>` + `next_dbc_id` + `insert_dbc`/`get_dbc` + `dbc_store_roundtrip` 单测）
+- Modify: `app/src-tauri/src/commands.rs`（`import_dbc_info`（读文件 + `from_utf8_lossy` + `parse_lenient`）、`dbc_summaries`（报文行扩展 id 按 bit31 还原）、`#[tauri::command] dbc_import`）+ 2 单测
+- Modify: `app/src-tauri/src/lib.rs`（注册 `dbc_import`）
+
+**Why:** spec §9 `dbc_import` → `{dbc_id, messages, errors}`。走宽容解析使单行坏构造不致整库导入失败（§7.1）；缓存 `Database` 供 `can_parse` 按 `dbc_id` 取用。
+**验证:** `cargo test -p lumelog-app` 8 pass（新：`dbc_store_roundtrip`、`dbc_import_reads_sample_dbc`（EngineData 保留 2 信号/1 个 `bad SG_` 告警/ExtFrame id=2147484928/MuxedMsg 3 信号）、`dbc_import_missing_file_is_io_error`）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 1. 接入 lumelog-can + CAN DTO + from_can
+**Files:**
+- Modify: `app/src-tauri/Cargo.toml`（加 `lumelog-can` 路径依赖）
+- Modify: `app/src-tauri/src/dto.rs`（`SignalValueJson`/`FrameJson`/`DbcMsgSummary`/`DbcErrorJson`/`DbcInfo`/`CanStatsJson` camelCase serde + `frame_json`/`signal_value_json` + `IpcError::from_can` + 5 单测）
+
+**Why:** 接口先行，定住 Task 2/3 命令依赖的稳定 DTO 与错误映射（spec §9 code 契约）。按真实 crate API 修正了计划臆造项：`Line=(u64,String)` 行号由调用方提供、计数走 `stats()->SourceStats`、`Frame` 无 `is_extended`（`FrameJson` 不带）、`SignalValue.unit` 为 `String`；`timestamp` 秒→`timestampMs` 毫秒。
+**验证:** `cargo test -p lumelog-app can_tests` 5 pass（字段映射/sample.dbc 信号解码含 CoolantTemp raw=90→"Normal"/error 帧空数据/from_can 码稳定/camelCase 序列化）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净（CAN 条目未接入命令前加带注释 `#[allow(dead_code)]`）。
+
 ## 2026-10-25 — Plan 3 起草（M2 CanPanel + IPC）
 
 **Files:**

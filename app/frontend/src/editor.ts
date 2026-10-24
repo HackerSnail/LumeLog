@@ -43,6 +43,8 @@ export interface EditorHandle {
   eol(): string;
   focus(): void;
   openSearch(): void;
+  /** Scroll a 1-based source line into view and place the cursor there (CanPanel §7.4). */
+  revealLine(line1: number): void;
   destroy(): void;
 }
 
@@ -112,6 +114,16 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     eol: () => eol,
     focus: () => view.focus(),
     openSearch: () => openSearchPanel(view),
+    revealLine: (line1: number) => {
+      // Clamp to a real line, then jump the cursor + center it — the 1-based
+      // contract matches FrameJson.lineNumber (CodeMirror lines are 1-based).
+      const ln = view.state.doc.line(Math.max(1, Math.min(line1, view.state.doc.lines)));
+      view.dispatch({
+        selection: { anchor: ln.from },
+        effects: EditorView.scrollIntoView(ln.from, { y: "center" }),
+      });
+      view.focus();
+    },
     destroy: () => view.destroy(),
   };
 }

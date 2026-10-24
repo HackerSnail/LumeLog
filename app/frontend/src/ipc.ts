@@ -63,6 +63,59 @@ export interface DocEntry {
   totalLines: number;
 }
 
+/** A decoded signal within a frame (Rust `SignalValueJson`). */
+export interface SignalValueJson {
+  name: string;
+  raw: number;
+  physical: number;
+  enumText?: string;
+  unit: string;
+}
+
+/** One frame + optional DBC decode, streamed by `can_parse` (Rust `FrameJson`). */
+export interface FrameJson {
+  lineNumber: number;
+  timestampMs?: number;
+  channel: number;
+  canId: number;
+  canIdHex: string;
+  dlc: number;
+  dataHex: string;
+  isRemote: boolean;
+  isFd: boolean;
+  errorFrame: boolean;
+  msgName?: string;
+  signals: SignalValueJson[];
+}
+
+/** A message row of the `dbc_import` summary (Rust `DbcMsgSummary`). */
+export interface DbcMsgSummary {
+  id: number;
+  name: string;
+  dlc: number;
+  signalCount: number;
+}
+
+/** A lenient-parse warning row (Rust `DbcErrorJson`). */
+export interface DbcErrorJson {
+  line: number;
+  context: string;
+  kind: string;
+}
+
+/** Outcome of `dbc_import` (Rust `DbcInfo`). */
+export interface DbcInfo {
+  dbcId: number;
+  messages: DbcMsgSummary[];
+  errors: DbcErrorJson[];
+}
+
+/** Terminal `can_parse` tally (Rust `CanStatsJson`). */
+export interface CanStatsJson {
+  decoded: number;
+  skipped: number;
+}
+
 /** Structured IPC error shape as it crosses the boundary (Rust `IpcError`). */
 export interface IpcErrorPayload {
   code: string;
@@ -90,6 +143,10 @@ export type IpcErrorCode =
   | "unknown_doc"
   | "unknown_request"
   | "invalid_argument"
+  | "dbc_syntax"
+  | "bad_regex"
+  | "regex_compile"
+  | "source_format"
   | "unknown";
 
 /**
@@ -113,6 +170,10 @@ const IPC_ERROR_ZH: Record<IpcErrorCode, string> = {
   unknown_doc: "文档已关闭或不存在",
   unknown_request: "该搜索请求已结束或不存在",
   invalid_argument: "参数无效",
+  dbc_syntax: "DBC 解析出错%s",
+  bad_regex: "解析正则无效（需含命名组 id/data）%s",
+  regex_compile: "正则编译失败%s",
+  source_format: "日志源格式无法识别%s",
   unknown: "调用失败%s",
 };
 
@@ -319,4 +380,56 @@ export async function loadWindow(
       : p.text;
   const lines = count === 0 ? [] : body.split(/\r\n|\n/);
   return { first: p.startLine, lines, invalidCount: p.invalidCount };
+}
+
+// ---- CAN commands (spec §7.4 / §9) -----------------------------------------
+
+/** Import a DBC file; returns the cached `dbcId` + message summary + warnings. */
+export function dbcImport(path: string): Promise<DbcInfo> {
+  return call<DbcInfo>("dbc_import", { path });
+}
+
+/**
+ * Stream a CAN decode of `docId`. Frames arrive in batches on `onBatch`; the
+ * tally arrives once on `onDone`. Resolves with the job id for `canCancel`.
+ * Mirrors `searchRun`'s dual-channel shape.
+ */
+export function canParse(args: {
+  docId: number;
+  dbcId?: number | null;
+  sourceKind: string;
+  regex?: string | null;
+  onBatch: (f: FrameJson[]) => void;
+  onDone: (s: CanStatsJson) => void;
+}): Promise<number> {
+  const batchCh = new Channel<FrameJson[]>();
+  batchCh.onmessage = args.onBatch;
+  const doneCh = new Channel<CanStatsJson>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("can_parse", {
+    docId: args.docId,
+    dbcId: args.dbcId ?? null,
+    sourceKind: args.sourceKind,
+    regex: args.regex ?? null,
+    onBatch: batchCh,
+    onDone: doneCh,
+  });
+}
+
+/** Ask an in-flight `canParse` to stop. */
+export function canCancel(requestId: number): Promise<void> {
+  return call<void>("can_cancel", { requestId });
+}
+
+/** Decode a single editor selection as one frame ("识别为报文"). */
+export function canDecodeSnippet(args: {
+  text: string;
+  dbcId?: number | null;
+  sourceKind?: string | null;
+}): Promise<FrameJson> {
+  return call<FrameJson>("can_decode_snippet", {
+    text: args.text,
+    dbcId: args.dbcId ?? null,
+    sourceKind: args.sourceKind ?? null,
+  });
 }

@@ -71,6 +71,8 @@ export class ListView implements TabView {
   private seq = 0;
   private destroyed = false;
   private scrollScheduled = false;
+  private flashIndex = -1;
+  private flashTimer = 0;
 
   constructor(opts: ListViewOpts) {
     this.opts = opts;
@@ -124,6 +126,23 @@ export class ListView implements TabView {
     this.render(true);
   }
 
+  /**
+   * Scroll `index0` into view and flash-highlight the row once — the CanPanel
+   * row→list linkage target (spec §7.4). The highlight is applied inside `paint`
+   * (the row may still be an async fetch when this is called) and cleared on a
+   * timer, so a fast scroll never strands the flash class on the wrong row.
+   */
+  revealLine(index0: number): void {
+    this.scrollToLine(index0);
+    this.flashIndex = index0;
+    this.render(true);
+    window.clearTimeout(this.flashTimer);
+    this.flashTimer = window.setTimeout(() => {
+      this.flashIndex = -1;
+      if (!this.destroyed) this.render(true);
+    }, 700);
+  }
+
   // ---- TabView surface (read-only: never dirty, cheap focus/destroy) ----------
 
   isDirty(): boolean {
@@ -136,6 +155,7 @@ export class ListView implements TabView {
 
   destroy(): void {
     this.destroyed = true;
+    window.clearTimeout(this.flashTimer);
     this.cache.clear();
     this.root.remove();
   }
@@ -221,6 +241,7 @@ export class ListView implements TabView {
     for (let line = first; line < last; line++) {
       const row = document.createElement("div");
       row.className = "list-row";
+      if (line === this.flashIndex) row.className += " list-flash";
       row.style.position = "absolute";
       row.style.top = `${(line - first) * ROW_HEIGHT}px`;
       row.style.height = `${ROW_HEIGHT}px`;
