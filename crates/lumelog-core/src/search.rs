@@ -126,6 +126,12 @@ fn search_with_window(
         } else {
             win_start + step
         };
+        // `find_iter` is non-overlapping, so a whole-file scan resumes at the END
+        // of the last match it consumed. When that match straddles `committed_end`
+        // the next window must start at its END, not at `committed_end` — else a
+        // dense run of matches near the seam would be re-aligned and a real hit
+        // dropped/replaced (pinned by `dense_matches_across_seam_equal_whole_file`).
+        let mut resume = committed_end;
 
         for m in re.find_iter(&win) {
             let abs = win_start + m.start() as u64;
@@ -147,26 +153,41 @@ fn search_with_window(
                 snippet,
             });
             stats.matches += 1;
+            resume = resume.max(win_start + m.end() as u64);
         }
 
         stats.scanned_bytes = win_start + win_len;
-        if is_final || !progress(stats.scanned_bytes) {
-            stats.cancelled = !is_final;
+        if is_final {
+            // Report the final window too, so a UI progress bar reaches 100%;
+            // a cancel signal here is moot (the scan is done).
+            let _ = progress(stats.scanned_bytes);
             break;
         }
-        cursor = win_start + step;
+        if !progress(stats.scanned_bytes) {
+            stats.cancelled = true;
+            break;
+        }
+        cursor = resume;
     }
 
     Ok(stats)
 }
 
-/// Compile the raw-byte regex from the query, rejecting UTF-16 and empty
-/// literal patterns up front.
+/// Compile the raw-byte regex from the query. Rejects an empty pattern (both
+/// modes), a UTF-16 query (`0x00` in the encoded form), a literal query the
+/// codec cannot represent, and invalid regex syntax.
 fn build_regex(q: &SearchQuery) -> Result<Regex, CoreError> {
+    // Reject an empty query for both modes up front: a zero-width regex would
+    // otherwise emit a match at every byte boundary (a cleared input box in the
+    // UI must not fan out into millions of hits).
+    if q.pattern_text.is_empty() {
+        return Err(CoreError::InvalidPattern("empty search pattern".to_string()));
+    }
+
     // `A8`: encode the query into the file's codec, then match raw bytes. A
     // `0x00` in the result means UTF-16, which we refuse (see module docs).
-    let qbytes = encoding::encode_all(q.encoding, &q.pattern_text).bytes;
-    if qbytes.contains(&0u8) {
+    let enc = encoding::encode_all(q.encoding, &q.pattern_text);
+    if enc.bytes.contains(&0u8) {
         return Err(CoreError::Encoding(
             "UTF-16 search unsupported in v1".to_string(),
         ));
@@ -174,13 +195,18 @@ fn build_regex(q: &SearchQuery) -> Result<Regex, CoreError> {
 
     let pattern = match q.mode {
         Mode::Literal => {
-            if qbytes.is_empty() {
-                return Err(CoreError::Encoding("empty search pattern".to_string()));
+            // A character the file's codec cannot represent degraded to `?`
+            // (`encode_all`); matching that would silently search for a literal
+            // question mark. Refuse instead of returning wrong hits.
+            if enc.replace_count > 0 {
+                return Err(CoreError::InvalidPattern(
+                    "pattern is not representable in the file encoding".to_string(),
+                ));
             }
             // Hex-escape every byte so regex metacharacters (and arbitrary
             // GBK byte values) are matched literally against the raw file.
-            let mut s = String::with_capacity(qbytes.len() * 4);
-            for b in &qbytes {
+            let mut s = String::with_capacity(enc.bytes.len() * 4);
+            for b in &enc.bytes {
                 s.push_str(&format!("\\x{:02X}", b));
             }
             s
@@ -198,7 +224,7 @@ fn build_regex(q: &SearchQuery) -> Result<Regex, CoreError> {
     }
     builder
         .build()
-        .map_err(|e| CoreError::Encoding(e.to_string()))
+        .map_err(|e| CoreError::InvalidPattern(e.to_string()))
 }
 
 /// Decode the hit's line and keep the ±40 code-unit window around the match,
@@ -423,6 +449,87 @@ mod tests {
             &q("err(or|no)", Mode::Regex, EncodingLabel::Utf8, true),
         );
         assert_eq!(hits.len(), 2);
+        fs::remove_file(&p).ok();
+    }
+
+    /// Hit start offsets for a single-line haystack (no newline -> `line 0`, so
+    /// `byte_in_line == absolute offset`). Used to compare a windowed scan
+    /// against a whole-file reference.
+    fn starts(data: &[u8], query: &SearchQuery, window: usize, overlap: usize) -> Vec<u64> {
+        let p = temp_log("starts", data);
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let mut v = Vec::new();
+        search_with_window(
+            &mut doc,
+            query,
+            &mut |m| v.push(m.byte_in_line),
+            &mut |_| true,
+            window,
+            overlap,
+        )
+        .unwrap();
+        fs::remove_file(&p).ok();
+        v
+    }
+
+    #[test]
+    fn dense_matches_across_seam_equal_whole_file() {
+        // C1 guard: a windowed scan must equal a single-window (whole-file)
+        // reference even for dense adjacent hits that straddle seams. A naive
+        // `cursor = win_start + step` advance drops/replaces hits here.
+        let data = b"AAAAAAAAAB"; // literal "AA": whole-file find_iter {0,2,4,6}
+        let whole = starts(data, &q("AA", Mode::Literal, EncodingLabel::Utf8, true), data.len() + 16, 3);
+        assert_eq!(whole, vec![0, 2, 4, 6], "reference");
+        for (window, overlap) in [(8usize, 3usize), (6, 3), (5, 3), (10, 4), (4, 2)] {
+            let got = starts(data, &q("AA", Mode::Literal, EncodingLabel::Utf8, true), window, overlap);
+            assert_eq!(got, whole, "literal dense w={window} o={overlap}: {got:?}");
+        }
+
+        let data = b"123456789"; // regex [0-9]{3}: whole-file find_iter {0,3,6}
+        let whole = starts(data, &q("[0-9]{3}", Mode::Regex, EncodingLabel::Utf8, true), data.len() + 16, 3);
+        assert_eq!(whole, vec![0, 3, 6], "reference");
+        for (window, overlap) in [(8usize, 3usize), (6, 4), (5, 3)] {
+            let got = starts(data, &q("[0-9]{3}", Mode::Regex, EncodingLabel::Utf8, true), window, overlap);
+            assert_eq!(got, whole, "regex dense w={window} o={overlap}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn empty_pattern_rejected_both_modes() {
+        let p = temp_log("empty", b"abc");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        for mode in [Mode::Literal, Mode::Regex] {
+            let err = search_stream(&mut doc, &q("", mode, EncodingLabel::Utf8, true), |_| {}, |_| true)
+                .unwrap_err();
+            assert!(matches!(err, CoreError::InvalidPattern(_)), "{mode:?} got {err:?}");
+        }
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn unmappable_literal_pattern_rejected() {
+        // A GBK query the codec cannot represent degrades to `?` in encode_all;
+        // searching that would silently match every literal `?`. Refuse instead.
+        let p = temp_log("unmap", b"what? where? now?");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let err = search_stream(
+            &mut doc,
+            &q("\u{1F600}", Mode::Literal, EncodingLabel::Gbk, true),
+            |_| {},
+            |_| true,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidPattern(_)), "got {err:?}");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn invalid_regex_pattern_rejected() {
+        let p = temp_log("badre", b"abc");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let err = search_stream(&mut doc, &q("(", Mode::Regex, EncodingLabel::Utf8, true), |_| {}, |_| true)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidPattern(_)), "got {err:?}");
         fs::remove_file(&p).ok();
     }
 }

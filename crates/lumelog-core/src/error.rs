@@ -16,6 +16,11 @@ pub enum CoreError {
     #[error("encoding error: {0}")]
     Encoding(String),
 
+    /// A search pattern could not be used: empty, invalid regex syntax, or not
+    /// representable in the target encoding (all Regex/Literal query errors).
+    #[error("invalid search pattern: {0}")]
+    InvalidPattern(String),
+
     /// payload = current disk (size, mtime_millis) observed on save attempt
     #[error("disk file changed since open (conflict)")]
     Conflict((u64, SystemTime)),

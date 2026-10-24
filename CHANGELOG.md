@@ -14,6 +14,16 @@
   - snippet：取所在行 `chunk_at(line,1)` 解码文本 + `char_map.byte_to_line_cu` 定命中的行内 cu16，截 ±40 cu16 去尾换行（Ruling：BMP 文本 cu16==char，astral 罕见）。
 - 验证：`cargo test -p lumelog-core` → 47 lib passed（search 8：`literal_hits_gbk_chinese`/`regex_overlap_match_not_missed_not_doubled`/`cancel_stops_early`/`line_number_correct`/`stats_counts_all_matches_gb18030_file`/`utf16_query_is_rejected`/`case_insensitive_finds_both_cases`/`regex_mode_alternation_over_utf8`）+ chunk_proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。`cargo bench --bench search`（criterion，~0.9GB 合成日志，10 samples，`search_literal_1gb`）：time **[565.99 ms 580.63 ms 595.44 ms]**（P5 目标 <10s 达标，手动记录，不卡 CI）。
 
+### Task 6 修订（首轮 CodeReview 1C+1I+3M，均修复）
+
+首轮 CodeReview（区间 bc97b61..52bb492）裁定 Changes requested：
+- **C1** committed-region 每窗固定推进 `cursor = win_start + step`：当提交区内最后一条命中的 **END 越过 committed_end**（跨接缝的密集命中），下一窗从 committed_end 起重扫，与全文件 `find_iter` 的**非重叠续扫点不一致** → 真实命中被丢失、并被伪造命中替换（实测反例：`"AAAAAAAAAB"` 搜 `"AA"`，window=8/overlap=3 得 `{0,2,4,5,7}` 而非参考 `{0,2,4,6}`）。修：发射时记录 `resume = max(committed_end, 最后发射命中 END)`，下一窗 `cursor = resume`（`find_iter` 升序非重叠保证被跳过的尾部命中起点 ≥ resume，故不漏不重）。新增 `dense_matches_across_seam_equal_whole_file`：以单窗（整文件）为 oracle，对 (window,overlap) 网格拍字面与正则密集命中。关联：Regex 无界 pattern（`.*`/`\d{2000}`）可产 >OVERLAP(1024) 命中，seam 处不保证 → v1 界已在模块注释文档化。
+- **I1** 最终窗口从不回调 `progress`（`if is_final || !progress(..)` 短路）：小文件首轮即 final → `progress` 一次都不调，UI 进度到不了 100%。修：final 窗也回调一次（返回值忽略，扫描已完成），非 final 窗据返回值置 `cancelled`。
+- **M1** 非法正则误归 `CoreError::Encoding` → 新增 `CoreError::InvalidPattern(String)` 专用于 pattern 错误（空/正则语法错/不可表示），UTF-16 越域仍归 `Encoding`。
+- **M2** `encode_all` 的 `replace_count` 被忽略：不可表示的字符降级成 `?`，搜它会静默命中所有字面问号。修：Literal 下 `replace_count>0` → `InvalidPattern`。测 `unmappable_literal_pattern_rejected`。
+- **M3** 空 pattern 仅 Literal 拦截（Regex 空 → 每字节 0 宽命中，近 DoS）。修：`build_regex` 顶部对两模式统一拒空。测 `empty_pattern_rejected_both_modes` + `invalid_regex_pattern_rejected`。
+- 验证：`cargo test -p lumelog-core` → 51 lib passed（search 12：原 8 + `dense_matches_across_seam_equal_whole_file`/`empty_pattern_rejected_both_modes`/`unmappable_literal_pattern_rejected`/`invalid_regex_pattern_rejected`）+ proptest(500) + docfile 8 + encoding_proptest 全 passed；`cargo clippy --all-targets -D warnings` 无告警。
+
 ## 2026-10-24 — Task 5: 保存（原子写/EOL/冲突/不可映射）
 
 - 文件：新增 `src/doc/save.rs`（EolStyle/detect_eol、OverwritePolicy、SaveOptions/SaveReport、save_text、atomic_write）；`doc/file.rs`（DocFile 加 `eol_style` 字段，open 时从首部解码窗口 `detect_eol` 记录；加 `eol_style()` getter 与 `pub(crate) note_saved`）；`doc/mod.rs` 挂 `pub mod save` + re-export。
