@@ -412,7 +412,7 @@ export class CanPanel {
     this.scrollScheduled = true;
     requestAnimationFrame(() => {
       this.scrollScheduled = false;
-      if (!this.destroyed) this.render();
+      this.paintNow();
     });
   }
 }

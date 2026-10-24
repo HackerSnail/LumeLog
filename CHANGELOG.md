@@ -17,6 +17,8 @@
 
 **Why:** 终审 6 项 Important 阻塞 merge，逐条修复。①②同源——同步命令既冻结主线程又让 req_id 只在结束时可得（取消形同虚设），一并异步化后取消才真实可用（推翻 Task 7 的“不提供停止”Ruling）。**Ruling（Minor 分诊）**：扩展帧 id 两层语义（依 Task 2 DBC bit31 还原，展示层不重复解码，改动会牵动 DTO 与已测夹具）、远程帧带数据解全 0 信号（can 语义边界、v1 展“无数据”已不崩）、DBC 只增不减（用户显式导入、数量极少）、非法过滤值静默忽略（`parseNum` 返 undefined 视作无上/下界，YAGNI）——四项均判为可在 M3 处理、非阻塞，按 final-review 规则记此 park 而非塞进本次修复波。**验证：** `cargo test -p lumelog-app` 12 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm --prefix app/frontend test` 39 pass（canpanel 2→3）+ `run build`（tsc 通过，41 modules）。
 
+**定向复审（CodeReview 子代理，fix range a5d27a6..6f055cd）：** 6 项 Important 全部 ADDRESSED，无新增 Critical/Important。唯一新 Warning：⑥ 把 `render()` 改为 rAF 合并后，`onScroll` 自身已在 rAF 内又调 `render()` → 双层 rAF、纯滚动多一帧延迟。**后续修正**：抽出 `paintNow()`，`render()` 与 `onScroll()` 的 rAF 均直调它（滚动不再回绕 `render()`），保持单帧重绘；`npm test` 39 pass + `run build`（42 modules）重跑净。结论：可 merge。
+
 
 ### Task 7. main.ts 集成 CanPanel（报文 dock + 双向联动）
 **Files:**
