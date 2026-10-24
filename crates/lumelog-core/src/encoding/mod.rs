@@ -115,16 +115,21 @@ pub fn detect(head: &[u8]) -> EncodingLabel {
     if head.starts_with(&[0xFE, 0xFF]) {
         return EncodingLabel::Utf16Be;
     }
-    // 2. strict UTF-8 over the whole head
-    if std::str::from_utf8(head).is_ok() {
-        return EncodingLabel::Utf8;
+    // 2. strict UTF-8 over the head. A truncated sequence at the very end
+    //    (error_len() == None) is just the 64KB window cutting a char in half —
+    //    still UTF-8, not a real invalid byte.
+    match std::str::from_utf8(head) {
+        Ok(_) => return EncodingLabel::Utf8,
+        Err(e) if e.error_len().is_none() => return EncodingLabel::Utf8,
+        _ => {}
     }
     // 3. chardetng, hinting a Chinese TLD (spec §5.2). chardetng 0.1 returns
     //    (encoding, plausible): `plausible` means it beat at least one other
-    //    candidate — the crate's proxy for confidence. We require it.
+    //    candidate — the crate's proxy for confidence. We require it. allow_utf8
+    //    = true so a head truncated mid-char that failed step 2 can still land UTF-8.
     let mut det = chardetng::EncodingDetector::new();
     det.feed(head, true);
-    let (enc, plausible) = det.guess_assess(Some(b"cn"), false);
+    let (enc, plausible) = det.guess_assess(Some(b"cn"), true);
     if plausible {
         if let Some(label) = label_from_encoding(enc) {
             return label;
@@ -157,15 +162,13 @@ fn label_from_encoding(enc: &'static Encoding) -> Option<EncodingLabel> {
     }
 }
 
-/// Decode an entire buffer in one shot.
+/// Decode an entire buffer in one shot. `invalid_count` is the number of
+/// U+FFFD in the output (spec §5.4 heuristic — a literal U+FFFD in valid text
+/// also counts; documented approximation, kept consistent with `feed`).
 pub fn decode_all(label: EncodingLabel, bytes: &[u8]) -> Decoded {
     let body = strip_bom(label, bytes);
-    let (cow, had_errors) = label.encoding().decode_without_bom_handling(body);
-    let invalid_count = if had_errors {
-        cow.matches('\u{FFFD}').count()
-    } else {
-        0
-    };
+    let (cow, _had_errors) = label.encoding().decode_without_bom_handling(body);
+    let invalid_count = cow.matches('\u{FFFD}').count();
     Decoded {
         text: cow.into_owned(),
         invalid_count,
@@ -178,45 +181,95 @@ pub struct DecodeSegment {
     pub invalid_count: usize,
 }
 
-/// Stateful decoder that yields identical output to `decode_all` regardless of
-/// where the input byte stream is split (pinned by proptest). Used by DocFile's
-/// chunked reader (Task 4) to decode per-line regions of a whole stream.
+/// Stateful decoder that yields output identical to `decode_all` regardless of
+/// where the input byte stream is split (pinned by proptest). One instance
+/// decodes exactly one stream: `feed` any number of times, then `finish` (which
+/// consumes the decoder — encoding_rs forbids reusing a flushed decoder).
 pub struct IncrementalDecoder {
     label: EncodingLabel,
     decoder: encoding_rs::Decoder,
-    started: bool,
+    /// Leading bytes buffered until we have enough to decide whether a BOM is
+    /// present. Cleared once the BOM decision is made (`bom_done`).
+    head: Vec<u8>,
+    bom_done: bool,
 }
 
 impl IncrementalDecoder {
     /// Construct for a whole-stream decode starting at byte 0 (BOM-aware).
     pub fn new(label: EncodingLabel) -> Result<Self, crate::error::CoreError> {
-        // BOM removal is handled by stripping in `feed` on the first call so the
-        // codec receives pure body bytes at any split point.
         let decoder = label.encoding().new_decoder_without_bom_handling();
         Ok(Self {
             label,
             decoder,
-            started: false,
+            head: Vec::new(),
+            // Labels without a BOM concept need no buffering.
+            bom_done: bom_len(label) == 0,
         })
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> DecodeSegment {
-        let mut body = bytes;
-        if !self.started {
-            body = strip_bom(self.label, bytes);
-            self.started = true;
+        if self.bom_done {
+            return self.decode_body(bytes, false);
         }
+        // Accumulate the head until we can tell whether a BOM is present.
+        self.head.extend_from_slice(bytes);
+        if self.head.len() < bom_len(self.label) {
+            return DecodeSegment {
+                text: String::new(),
+                invalid_count: 0,
+            };
+        }
+        let body = self.take_bom_stripped_head();
+        self.decode_body(&body, false)
+    }
+
+    /// Flush trailing incomplete sequences (emits U+FFFD for a truncated
+    /// multi-byte tail) and return the flushed text + replacement count.
+    /// Consumes `self`: a flushed `encoding_rs::Decoder` must not be reused.
+    pub fn finish(mut self) -> DecodeSegment {
+        // If the stream ended before we could size the BOM, decide now.
+        let pending = if self.bom_done {
+            Vec::new()
+        } else {
+            self.take_bom_stripped_head()
+        };
+        let mut seg = self.decode_body(&pending, false);
+        let tail = self.decode_body(&[], true);
+        seg.text.push_str(&tail.text);
+        seg.invalid_count += tail.invalid_count;
+        seg
+    }
+
+    /// Uses the accumulated `head` exactly once: strips a matching BOM prefix
+    /// and returns the remaining bytes as an owned buffer.
+    fn take_bom_stripped_head(&mut self) -> Vec<u8> {
+        let n = bom_len(self.label);
+        let body = if has_bom(self.label, &self.head) {
+            self.head[n..].to_vec()
+        } else {
+            std::mem::take(&mut self.head)
+        };
+        self.head.clear();
+        self.bom_done = true;
+        body
+    }
+
+    /// Decode `bytes` (already BOM-free) into a fresh segment. `last` flushes
+    /// the decoder at end-of-stream. Loops until the input is fully consumed.
+    fn decode_body(&mut self, bytes: &[u8], last: bool) -> DecodeSegment {
         let mut out = String::new();
         let mut invalid = 0usize;
-        let mut src = body;
+        let mut src = bytes;
         loop {
             out.reserve(src.len() * 3 + 16);
             let before = out.len();
-            let (result, read, _replaced) =
-                self.decoder.decode_to_string(src, &mut out, false);
+            let (result, read, _replaced) = self.decoder.decode_to_string(src, &mut out, last);
             invalid += out[before..].matches('\u{FFFD}').count();
             src = &src[read..];
-            if read == 0 || matches!(result, encoding_rs::CoderResult::InputEmpty) {
+            // InputEmpty = all input consumed. OutputFull = dst filled; loop
+            // reserves more and drains the rest of `src` (read > 0 guarantees
+            // forward progress there).
+            if matches!(result, encoding_rs::CoderResult::InputEmpty) {
                 break;
             }
         }
@@ -224,25 +277,6 @@ impl IncrementalDecoder {
             text: out,
             invalid_count: invalid,
         }
-    }
-
-    /// Flush trailing incomplete sequences (emits U+FFFD for a truncated
-    /// multi-byte tail). Returns the replacement count for the flush.
-    pub fn finish(&mut self) -> usize {
-        let mut out = String::new();
-        let mut invalid = 0usize;
-        loop {
-            out.reserve(16);
-            let before = out.len();
-            let (result, read, _replaced) =
-                self.decoder.decode_to_string(&[], &mut out, true);
-            invalid += out[before..].matches('\u{FFFD}').count();
-            if read == 0 || matches!(result, encoding_rs::CoderResult::InputEmpty) {
-                break;
-            }
-        }
-        self.started = false;
-        invalid
     }
 }
 
@@ -289,8 +323,10 @@ pub fn encode_all(label: EncodingLabel, text: &str) -> Encoded {
             let enc = other.encoding();
             let (cow, _actual, had_errors) = enc.encode(text);
             let replace_count = if had_errors {
-                text.chars()
-                    .filter(|&c| enc.encode(c.to_string().as_str()).2)
+                let mut buf = [0u8; 4];
+                text
+                    .chars()
+                    .filter(|&c| enc.encode(c.encode_utf8(&mut buf)).2)
                     .count()
             } else {
                 0
@@ -375,6 +411,16 @@ mod tests {
         let enc = encode_all(EncodingLabel::Utf16Le, "ab线");
         assert!(enc.bytes.starts_with(&[0xFF, 0xFE]));
         let dec = decode_all(EncodingLabel::Utf16Le, &enc.bytes);
+        assert_eq!(dec.text, "ab线");
+        assert_eq!(dec.invalid_count, 0);
+    }
+
+    #[test]
+    fn utf16be_roundtrip_and_detect() {
+        let enc = encode_all(EncodingLabel::Utf16Be, "ab线");
+        assert!(enc.bytes.starts_with(&[0xFE, 0xFF]), "BE BOM first");
+        assert_eq!(detect(&enc.bytes), EncodingLabel::Utf16Be);
+        let dec = decode_all(EncodingLabel::Utf16Be, &enc.bytes);
         assert_eq!(dec.text, "ab线");
         assert_eq!(dec.invalid_count, 0);
     }

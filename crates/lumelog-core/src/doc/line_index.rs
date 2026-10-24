@@ -175,6 +175,25 @@ mod tests {
     }
 
     #[test]
+    fn utf16be_scan_even_aligned_only() {
+        // Big-endian mirror of the LE test: [0x0A,0x41] = unit 0x0A41 (LF in
+        // high byte, NOT a break), [0x00,0x0A] = unit 0x000A (real LF -> break).
+        let data = [0x0Au8, 0x41, 0x00, 0x0A];
+        let idx = build_aligned(&data, 0x000A, false).unwrap();
+        assert_eq!(idx.line_count(), 2, "only the aligned 0x000A is a break");
+        assert_eq!(offs(&idx), vec![0, 4]);
+    }
+
+    #[test]
+    fn builder_rejects_file_beyond_u32_range() {
+        // A >4GB file cannot be indexed with u32 offsets; finish must refuse
+        // rather than silently truncate. Constructed without allocating 4GB.
+        let mut b = LineIndexBuilder::new(u32::MAX as u64 + 1);
+        b.push_chunk(b"just some bytes\n");
+        assert!(matches!(b.finish(), Err(CoreError::TooLarge)));
+    }
+
+    #[test]
     fn builder_chunks_equal_whole() {
         let data = b"line1\nline2\nline3\n\ntrailing".to_vec();
         let whole = build(&data).unwrap();
