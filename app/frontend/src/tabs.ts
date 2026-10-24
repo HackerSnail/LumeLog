@@ -91,6 +91,16 @@ export class TabStrip {
     return this.activeId != null ? this.entries.get(this.activeId) ?? null : null;
   }
 
+  /** Open docs in tab order — drives the shell's sidebar list. */
+  list(): TabInfo[] {
+    const out: TabInfo[] = [];
+    for (const id of this.order) {
+      const info = this.entries.get(id)?.info;
+      if (info) out.push(info);
+    }
+    return out;
+  }
+
   /** Reflect the view's dirty flag onto the tab dot. */
   refreshDirty(docId: number): void {
     const e = this.entries.get(docId);

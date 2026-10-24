@@ -6,6 +6,7 @@
 //! `tsc --noEmit` (strict) + `vitest`.
 
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   docOpen,
   docClose,
@@ -26,7 +27,22 @@ import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
 import type { ModeChoice } from "./language";
+import { initTheme } from "./theme";
+import {
+  makeResizable,
+  loadFlag,
+  storeFlag,
+  MIN_SIDEBAR,
+  MAX_SIDEBAR,
+  MIN_INSPECTOR,
+  MAX_INSPECTOR,
+} from "./shell";
+import { filterCommands, type Command } from "./palette";
 import "./styles.css";
+
+// Paint the stored theme as early as module eval allows (index.html also runs a
+// pre-paint inline script to dodge a light flash on a dark preference).
+const theme = initTheme();
 
 interface DocState {
   path: string;
@@ -51,11 +67,23 @@ tabsEl.id = "tabs";
 const statusEl = document.createElement("div");
 statusEl.id = "status";
 
+// Shell panels, populated by layout(); the update helpers guard on null so
+// they are safe before layout() runs.
+let sidebarEl: HTMLElement | null = null;
+let sidebarListEl: HTMLElement | null = null;
+let sidebarHandleEl: HTMLElement | null = null;
+let inspectorEl: HTMLElement | null = null;
+let inspectorBodyEl: HTMLElement | null = null;
+let inspectorHandleEl: HTMLElement | null = null;
+let sidebarCollapsed = false;
+let inspectorCollapsed = false;
+
 const tabs = new TabStrip(tabsEl, {
   onActivate: (id) => {
     hideSearchPanel(); // stale hit rows belong to the previous doc — drop the panel
     if (id < 0) status.clear();
     else syncStatus(id);
+    refreshPanels();
   },
   onClose: (id) => void handleClose(id),
   onDirtyChanged: (id, dirty) => {
@@ -80,29 +108,253 @@ const status = new Statusbar(statusEl, {
 });
 
 function layout(): void {
-  const root = document.getElementById("root");
+  const root = document.getElementById("app");
   if (!root) return;
   root.textContent = "";
+
   const bar = document.createElement("div");
   bar.className = "appbar";
-  const openBtn = document.createElement("button");
-  openBtn.textContent = "打开文件";
-  openBtn.addEventListener("click", () => void openFile());
-  const searchBtn = document.createElement("button");
-  searchBtn.textContent = "搜索";
-  searchBtn.addEventListener("click", () => openSearchFlow());
-  bar.append(openBtn, searchBtn);
+  // Toolbar — with `decorations:false` this doubles as the window titlebar:
+  // app name + actions on the left, a draggable filler, window buttons on the
+  // right (buttons are only revealed when running under Tauri — see detectChrome).
+  const appName = document.createElement("span");
+  appName.className = "app-name";
+  appName.textContent = "LumeLog";
+  bar.append(
+    appName,
+    mkBtn("打开文件", "", () => void openFile()),
+    mkBtn("搜索", "在当前文档中搜索 (Ctrl+Shift+F)", () => openSearchFlow()),
+    mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
+    mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
+    mkBtn("主题", "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）", () => theme.cycle()),
+  );
+
+  const drag = document.createElement("div");
+  drag.className = "titlebar-drag";
+  drag.setAttribute("data-tauri-drag-region", "");
+
+  const winBtns = document.createElement("div");
+  winBtns.className = "win-btns";
+  winBtns.append(
+    mkWinBtn("﹣", "最小化", () => winAction("min")),
+    mkWinBtn("▢", "最大化 / 还原", () => winAction("max")),
+    mkWinBtn("✕", "关闭", () => winAction("close"), "close"),
+  );
+  bar.append(drag, winBtns);
+
+  // Left sidebar: the set of open documents (live from the tab strip).
+  const aside = document.createElement("aside");
+  aside.className = "sidebar";
+  sidebarEl = aside;
+  const asideTitle = document.createElement("div");
+  asideTitle.className = "panel-title";
+  asideTitle.textContent = "已打开文档";
+  sidebarListEl = document.createElement("div");
+  sidebarListEl.className = "side-list";
+  aside.append(asideTitle, sidebarListEl);
+
+  // Right inspector: metadata for the active document + the ⚠ detail.
+  const insp = document.createElement("aside");
+  insp.className = "inspector";
+  inspectorEl = insp;
+  const inspTitle = document.createElement("div");
+  inspTitle.className = "panel-title";
+  inspTitle.textContent = "文档信息";
+  inspectorBodyEl = document.createElement("div");
+  inspectorBodyEl.className = "insp-body";
+  insp.append(inspTitle, inspectorBodyEl);
+
+  const center = document.createElement("div");
+  center.className = "center";
+  const panel = document.createElement("div");
+  panel.id = "search-panel";
+  panel.className = "search-panel";
+  panel.style.display = "none";
+  center.append(tabsEl, panel);
+
+  sidebarHandleEl = document.createElement("div");
+  sidebarHandleEl.className = "pane-resizer";
+  inspectorHandleEl = document.createElement("div");
+  inspectorHandleEl.className = "pane-resizer";
+  makeResizable(aside, sidebarHandleEl, {
+    min: MIN_SIDEBAR,
+    max: MAX_SIDEBAR,
+    storageKey: "lumelog.ui.sidebar.w",
+    edge: "left",
+    collapsed: () => sidebarCollapsed,
+  });
+  makeResizable(insp, inspectorHandleEl, {
+    min: MIN_INSPECTOR,
+    max: MAX_INSPECTOR,
+    storageKey: "lumelog.ui.inspector.w",
+    edge: "right",
+    collapsed: () => inspectorCollapsed,
+  });
+
+  const workspace = document.createElement("div");
+  workspace.className = "workspace";
+  workspace.append(aside, sidebarHandleEl, center, inspectorHandleEl, insp);
 
   const toast = document.createElement("div");
   toast.id = "toast";
   toast.className = "toast";
 
-  const panel = document.createElement("div");
-  panel.id = "search-panel";
-  panel.className = "search-panel";
-  panel.style.display = "none";
+  sidebarCollapsed = loadFlag("lumelog.ui.sidebar", false);
+  inspectorCollapsed = loadFlag("lumelog.ui.inspector", false);
+  aside.classList.toggle("collapsed", sidebarCollapsed);
+  insp.classList.toggle("collapsed", inspectorCollapsed);
+  sidebarHandleEl.style.display = sidebarCollapsed ? "none" : "";
+  inspectorHandleEl.style.display = inspectorCollapsed ? "none" : "";
 
-  root.append(bar, tabsEl, panel, statusEl, toast);
+  root.append(bar, workspace, statusEl, toast);
+  refreshPanels();
+}
+
+function mkBtn(label: string, title: string, on: () => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.textContent = label;
+  if (title) b.title = title;
+  b.addEventListener("click", on);
+  return b;
+}
+
+function mkWinBtn(
+  glyph: string,
+  title: string,
+  on: () => void,
+  extra = "",
+): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.className = "win-btn" + (extra ? " " + extra : "");
+  b.textContent = glyph;
+  b.title = title;
+  b.addEventListener("click", on);
+  return b;
+}
+
+/** Drive the frameless window; guarded so a plain-browser `vite dev` (no Tauri
+ *  host, `getCurrentWindow()` throws) degrades to a toast instead of a crash. */
+function winAction(kind: "min" | "max" | "close"): void {
+  try {
+    const w = getCurrentWindow();
+    void (kind === "min" ? w.minimize() : kind === "max" ? w.toggleMaximize() : w.close());
+  } catch {
+    toastMsg("窗口控制不可用（非 Tauri 环境）");
+  }
+}
+
+/** Reveal the custom window buttons only under a real Tauri host, and tag the
+ *  platform so CSS can tune the titlebar chrome. */
+function detectChrome(): void {
+  const el = document.documentElement;
+  const inTauri =
+    typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ ===
+    "object";
+  if (inTauri) el.classList.add("has-custom-titlebar");
+  const ua = navigator.userAgent;
+  const plat = ua.includes("Windows")
+    ? "windows"
+    : ua.includes("Mac")
+      ? "mac"
+      : ua.includes("Linux")
+        ? "linux"
+        : "";
+  if (plat) el.dataset.tauriPlatform = plat;
+}
+
+function toggleSidebar(): void {
+  sidebarCollapsed = !sidebarCollapsed;
+  sidebarEl?.classList.toggle("collapsed", sidebarCollapsed);
+  if (sidebarHandleEl) sidebarHandleEl.style.display = sidebarCollapsed ? "none" : "";
+  storeFlag("lumelog.ui.sidebar", sidebarCollapsed);
+}
+
+function toggleInspector(): void {
+  inspectorCollapsed = !inspectorCollapsed;
+  inspectorEl?.classList.toggle("collapsed", inspectorCollapsed);
+  if (inspectorHandleEl) inspectorHandleEl.style.display = inspectorCollapsed ? "none" : "";
+  storeFlag("lumelog.ui.inspector", inspectorCollapsed);
+}
+
+function basenameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** Rebuild the sidebar's open-document list from the live tab strip. */
+function refreshSidebar(): void {
+  const list = sidebarListEl;
+  if (!list) return;
+  list.textContent = "";
+  const infos = tabs.list();
+  const activeId = tabs.active()?.info.docId ?? null;
+  if (infos.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "insp-empty";
+    empty.style.padding = "8px 10px";
+    empty.textContent = "尚无打开的文档";
+    list.append(empty);
+    return;
+  }
+  for (const info of infos) {
+    const row = document.createElement("div");
+    row.className = "side-item";
+    row.title = info.path;
+    if (info.docId === activeId) row.classList.add("active");
+    const enc = docStates.get(info.docId)?.encoding;
+    if (enc) {
+      const m = document.createElement("span");
+      m.className = "side-meta";
+      m.textContent = enc;
+      row.append(m);
+    }
+    const label = document.createElement("span");
+    label.textContent = basenameOf(info.path);
+    row.append(label);
+    row.addEventListener("click", () => tabs.activate(info.docId));
+    list.append(row);
+  }
+}
+
+/** Fill the inspector with the active document's metadata (spec §5.4 ⚠ detail). */
+function updateInspector(docId: number | null): void {
+  const body = inspectorBodyEl;
+  if (!body) return;
+  body.textContent = "";
+  const ds = docId != null ? docStates.get(docId) : undefined;
+  if (!ds) {
+    const empty = document.createElement("div");
+    empty.className = "insp-empty";
+    empty.textContent = "无打开文档";
+    body.append(empty);
+    return;
+  }
+  const rows: [string, string, boolean?][] = [
+    ["模式", ds.mode === "edit" ? "编辑（可修改）" : "只读（大文件）"],
+    ["编码", ds.encoding],
+    ["行尾", ds.eol],
+    ["总行数", String(ds.totalLines)],
+    ["已索引", String(indexed.get(docId ?? 0) ?? ds.totalLines)],
+    ["无法映射字符", String(ds.invalid), ds.invalid > 0],
+    ["路径", ds.path],
+  ];
+  for (const [key, value, warn] of rows) {
+    const row = document.createElement("div");
+    row.className = "insp-row";
+    const k = document.createElement("span");
+    k.className = "insp-key";
+    k.textContent = key;
+    const v = document.createElement("span");
+    v.className = warn ? "insp-val warn" : "insp-val";
+    v.textContent = value;
+    if (key === "路径") v.title = value;
+    row.append(k, v);
+    body.append(row);
+  }
+}
+
+function refreshPanels(): void {
+  refreshSidebar();
+  updateInspector(tabs.active()?.info.docId ?? null);
 }
 
 async function openFile(): Promise<void> {
@@ -188,7 +440,10 @@ function mountList(info: DocInfo, path: string): void {
       // status-bar ⚠ in sync (only repaint if this doc is the shown one).
       const d = docStates.get(info.docId);
       if (d) d.invalid = n;
-      if (info.docId === tabs.active()?.info.docId) status.setInvalidCount(n);
+      if (info.docId === tabs.active()?.info.docId) {
+        status.setInvalidCount(n);
+        updateInspector(info.docId);
+      }
     },
   });
   lists.set(info.docId, list);
@@ -354,6 +609,7 @@ async function changeEncoding(label: string): Promise<void> {
     ds.encoding = updated.encoding;
     ds.eol = updated.eol || ds.eol;
     status.setEncoding(updated.encoding);
+    updateInspector(docId); // inspector shows the new encoding / ⚠ detail
     if (handle) tabs.refreshDirty(docId);
   } catch (err) {
     reportError(err);
@@ -388,6 +644,7 @@ async function handleClose(docId: number): Promise<void> {
   editors.delete(docId);
   lists.delete(docId);
   indexed.delete(docId);
+  refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
 }
 
@@ -587,9 +844,128 @@ function openJumpPrompt(): void {
     else if (e.key === "Escape") close();
   });
   panel.append(input, go);
-  document.getElementById("root")?.append(panel);
+  document.getElementById("app")?.append(panel);
   input.focus();
   input.select();
+}
+
+/** The command set offered by the palette, rebuilt per open so it reflects
+ *  live state (e.g. hints). Titles are what `fuzzyScore` matches. */
+function buildCommands(): Command[] {
+  return [
+    { id: "open", title: "打开文件…", hint: "Ctrl+O", run: () => void openFile() },
+    { id: "save", title: "保存", hint: "Ctrl+S", run: () => void saveActive(false) },
+    { id: "save-as", title: "另存为…", hint: "Ctrl+Shift+S", run: () => void saveActive(true) },
+    { id: "search", title: "在文档中搜索…", hint: "Ctrl+Shift+F", run: () => openSearchFlow() },
+    { id: "jump", title: "跳转到行…", hint: "Ctrl+G", run: () => openJumpPrompt() },
+    {
+      id: "close",
+      title: "关闭当前文档",
+      run: () => {
+        const a = tabs.active();
+        if (a) void handleClose(a.info.docId);
+      },
+    },
+    { id: "sidebar", title: "显示 / 隐藏侧栏", run: () => toggleSidebar() },
+    { id: "inspector", title: "显示 / 隐藏文档信息栏", run: () => toggleInspector() },
+    { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
+    { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
+    { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },
+    { id: "theme-auto", title: "主题：跟随系统", run: () => theme.set("auto") },
+  ];
+}
+
+/** Ctrl+Shift+P palette: a fuzzy-filtered, keyboard-navigable command list. */
+function openPalette(): void {
+  const already = document.getElementById("palette");
+  if (already) {
+    (already.querySelector("input") as HTMLInputElement | null)?.focus();
+    return;
+  }
+  const overlay = document.createElement("div");
+  overlay.id = "palette";
+  overlay.className = "palette-overlay";
+  const box = document.createElement("div");
+  box.className = "palette-box";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "palette-input";
+  input.placeholder = "输入命令…";
+  const list = document.createElement("div");
+  list.className = "palette-list";
+  box.append(input, list);
+  overlay.append(box);
+  document.getElementById("app")?.append(overlay);
+
+  const cmds = buildCommands();
+  let view: Command[] = filterCommands("", cmds);
+  let sel = 0;
+
+  const paintSel = () => {
+    Array.from(list.children).forEach((el, i) =>
+      el.classList.toggle("sel", i === sel),
+    );
+  };
+  const close = () => overlay.remove();
+  const run = (i: number) => {
+    const c = view[i];
+    close();
+    c?.run();
+  };
+  const render = () => {
+    list.textContent = "";
+    view.forEach((c, i) => {
+      const row = document.createElement("div");
+      row.className = "palette-row" + (i === sel ? " sel" : "");
+      const t = document.createElement("span");
+      t.className = "palette-title";
+      t.textContent = c.title;
+      row.append(t);
+      if (c.hint) {
+        const h = document.createElement("span");
+        h.className = "palette-hint";
+        h.textContent = c.hint;
+        row.append(h);
+      }
+      row.addEventListener("mouseenter", () => {
+        sel = i;
+        paintSel();
+      });
+      row.addEventListener("click", () => run(i));
+      list.append(row);
+    });
+  };
+  const update = (q: string) => {
+    view = filterCommands(q, cmds);
+    sel = 0;
+    render();
+  };
+
+  input.addEventListener("input", () => update(input.value));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      close();
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (view.length) sel = (sel + 1) % view.length;
+      paintSel();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (view.length) sel = (sel - 1 + view.length) % view.length;
+      paintSel();
+    } else if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      if (view.length) run(sel);
+    }
+  });
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  render();
+  input.focus();
 }
 
 function reportError(err: unknown): void {
@@ -628,11 +1004,15 @@ function registerShortcuts(): void {
     } else if (key === "f" && e.shiftKey) {
       e.preventDefault();
       openSearchFlow();
+    } else if (key === "p" && e.shiftKey) {
+      e.preventDefault();
+      openPalette(); // Ctrl+Shift+P command palette (UI reference: NoteLume)
     }
   });
 }
 
 layout();
+detectChrome();
 registerShortcuts();
 // First-interaction probe (spec P1/P2): the app_ping round-trip is the wired
 // timing endpoint for the manual GUI cold-start measurement. A headless CI

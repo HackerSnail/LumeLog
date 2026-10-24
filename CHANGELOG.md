@@ -2,6 +2,59 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
+
+**依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。
+
+### A. 主题基座
+**Files:**
+- Create: `app/frontend/src/theme.ts`（`resolveTheme`/`nextPref` 纯函数 + `loadPref/savePref/paint/initTheme` 副作用层；三主题 light/dark/vampire + auto 跟随系统；`localStorage` 持久化；`matchMedia` change 重绘）
+- Create: `app/frontend/src/theme.test.ts`（`resolveTheme` 显式预设直通 / auto 随系统；`nextPref` 循环序 light→dark→vampire→auto→light）
+- Modify: `app/frontend/src/styles.css`（`:root[data-theme]` 三主题 token 层，浅/暗/Dracula 调色板取自 NoteLume；`--font-ui`（Inter/鸿蒙/思源黑，不用宋体）/`--font-mono`（JetBrains Mono/Fira Code）；主题化细滚动条；`box-sizing`；`color-scheme`；现有硬编码配色全迁变量；用 token 给 CodeMirror chrome（gutters/content/cursor/active-line/selection）着色）
+- Modify: `app/frontend/src/main.ts`（模块早期 `initTheme()` 绘制；工具条加「主题」循环按钮）
+
+**Why:** M1 交付的是功能骨架，`claude.md` 「自定义主题」仍为待办；先建立可切换的三主题 token 体系作为外壳重构的地基。
+**验证:** `npx vitest run` 14 pass（theme 4）+ `tsc --noEmit` 净 + `vite build` OK（styles.css 5.01KB）。
+
+### B. 应用外壳（侧栏 + 检查器 + 可拖分栏）
+**Files:**
+- Create: `app/frontend/src/shell.ts`（`clampWidth` 纯函数 + `makeResizable` 分栏拖拽（pointer 捕获/钳位/持久化）+ `loadFlag/storeFlag` 收放态持久化 + MIN/MAX 宽度常量）
+- Create: `app/frontend/src/shell.test.ts`（`clampWidth` 区间/越界/NaN/锁定；`loadFlag` 无存储回落默认）
+- Modify: `app/frontend/index.html`（预绘制内联主题脚本防 FOUC；根容器 `#root`→`#app`；`lang="zh"`）
+- Modify: `app/frontend/src/styles.css`（容器选择器 `#root`→`#app`；新增 `.workspace`/`.sidebar`/`.inspector`/`.center`/`.pane-resizer`/`.panel-title`/`.side-item`/`.insp-*` 布局与主题化样式，维持有界视口确定高度链）
+- Modify: `app/frontend/src/tabs.ts`（`TabStrip.list()` 按标签序枚举已打开文档）
+- Modify: `app/frontend/src/main.ts`（`layout()` 重构为工具条 + workspace（侧栏|拖栏|center(#tabs+搜索面板)|拖栏|检查器）+ 状态栏 + toast；新增 `refreshSidebar/updateInspector/refreshPanels/toggleSidebar/toggleInspector/mkBtn`；激活/关闭/切编码/列表窗口失效时刷新面板；侧栏列已打开文档，检查器展示模式/编码/行尾/总行数/已索引/⚠无法映射/路径）
+
+**Why:** 对齐 NoteLume 的三栏外壳（左导航 + 右检查器）；日志场景侧栏用实时的「已打开文档」列表（前端 `docStates`/tabs 本就权威，不新增后端 IPC；真正的最近文件需 `doc_list` 持久化，归后续）。检查器集中呈现 §5.4 ⚠ 详情。
+**验证:** `npx vitest run` 19 pass（shell 5）+ `tsc --noEmit` 净 + `vite build` OK（css 6.58KB）。
+
+### C. 命令面板（Ctrl+Shift+P）
+**Files:**
+- Create: `app/frontend/src/palette.ts`（`Command` 接口 + 纯函数 `fuzzyScore`（大小写不敏感子序列，前缀/连续/紧凑加分，非子序列返 null）+ `filterCommands`（空查询按原序全列、否则按分降序））
+- Create: `app/frontend/src/palette.test.ts`（8 例：空查询=0 / 非子序列=null / 大小写 / 前缀胜于分散 / 排序 / 全列 / 空结果 / 子集）
+- Modify: `app/frontend/src/main.ts`（`buildCommands()` 命令集：打开/保存/另存/搜索/跳行/关闭/侧栏/信息/主题×4；`openPalette()` 覆盖层：模糊过滤 + ↑↓/Enter(IME 安全)/Escape + 背板点击关闭 + 选中高亮）；`registerShortcuts` 新增 Ctrl+Shift+P
+- Modify: `app/frontend/src/styles.css`（`.palette-overlay` 居中覆盖 + `.palette-box/input/list/row/hint` + 选中 accent + 空态“无匹配命令”）
+
+**Why:** 对齐 NoteLume 的命令面板；把已实现的打开/保存/另存/跳行/搜索/主题/面板收放聚合为可模糊检索的统一入口。评分/过滤为纯函数可 headless 测（与 listview/ipc 同构）。未重复绑 Ctrl+Shift+S（已为另存），侧栏/信息切换走工具条按钮 + 面板。
+**验证:** `npx vitest run` 27 pass（palette 8）+ `tsc --noEmit` 净 + `vite build` OK（css 7.58KB）。
+
+### D. 工具条即标题栏（无边框窗口）
+**Files:**
+- Modify: `app/src-tauri/tauri.conf.json`（主窗口 `decorations: false`，工具条上沿即窗口顶边，对齐 NoteLume 无边框观感）
+- Modify: `app/src-tauri/capabilities/default.json`（新增 `core:window:allow-start-dragging/minimize/toggle-maximize/maximize/unmaximize/close/is-maximized` 权限，放行前端自绘窗口控制）
+- Modify: `app/frontend/src/main.ts`（`layout()` 工具条改为「应用名 + 动作按钮 | `data-tauri-drag-region` 弹性拖拽区 | 窗口按钮」；`mkWinBtn` 最小化/最大化/关闭；`winAction` 经 `getCurrentWindow()` 驱动且 try/catch 回落 toast；`detectChrome()` 仅在 Tauri 宿主加 `has-custom-titlebar` 并按 UA 标 `data-tauri-platform`）
+- Modify: `app/frontend/src/styles.css`（`.titlebar-drag` flex-1 拖拽区；`.win-btns` 默认隐藏、`html.has-custom-titlebar` 才显；`.win-btn` 扁平 42×30 + hover `--bg-hover`、`.close:hover` `--danger`；移除失效 `.appbar .spacer`）
+
+**Why:** 对齐 NoteLume 无边框、工具条兼作标题栏的一体化顶栏。窗口按钮仅在真实 Tauri 宿主出现（浏览器 `vite dev` 无宿主时 `getCurrentWindow()` 抛错 → 回落 toast，按钮也隐藏），拖拽只落在中间弹性区，两侧按钮不受 `data-tauri-drag-region` 干扰仍可点击。
+**验证:** `cargo check -p lumelog-app` 净 + `npx vitest run` 27 pass + `tsc --noEmit` 净 + `vite build` OK。拖拽/双击最大化/三按钮的窗口交互属 GUI 手动冒烟（`npm run tauri dev`），headless 不可测。
+
+### E. 收尾与全量验证
+**Files:**
+- Modify: `docs/claude.md`（功能清单拆分并勾选：「自定义主题」→ 已完成（三主题 + 持久化 + 无边框标题栏 + 命令面板）；「快捷键配置同步」单列为待办）
+
+**Why:** UI 重构 `feat/m-ui-notelume` 四任务（主题基座 / 应用外壳 / 命令面板 / 工具条即标题栏）全部交付，回写功能清单与实况一致。
+**验证:** `cargo test --workspace` 全绿（lumelog-core 58 单测 + chunk/cli/docfile/encoding 集成测试）+ `cargo clippy --workspace -- -D warnings` 净 + 前端 `vite build` OK + `npx vitest run` 27 pass。窗口拖拽/最大化/关闭为 headless 不可测的 GUI 项，留 `tauri dev` 手动冒烟。
+
 ## 2026-10-24 — M1 全分支终审 fix wave（final whole-branch review）
 
 **Files:**
