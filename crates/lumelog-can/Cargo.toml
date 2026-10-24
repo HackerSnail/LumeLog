@@ -5,3 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+regex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

@@ -2,6 +2,21 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — M2 CAN 引擎（feat/m2-can-engine）
+
+**依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7；计划 `docs/plans/2026-10-25-m2-can-engine.md`（只做纯 Rust 引擎，IPC/CanPanel 属 Plan 3）。
+
+### 1. lumelog-can 数据模型 + 错误 + workspace 收编
+**Files:**
+- Modify: `crates/lumelog-can/Cargo.toml`（deps `regex`/`thiserror`（workspace），dev-dep `proptest`，与 lumelog-core 同构）
+- Create: `crates/lumelog-can/src/error.rs`（`CanError` 五变体 + `ipc_code()` 钉 spec §9 code 契约）
+- Create: `crates/lumelog-can/src/dbc.rs`（`ByteOrder`/`Mux`/`Signal`/`Message`/`Database` 数据模型，解析器 Task 2）
+- Create: `crates/lumelog-can/src/frame.rs`（`Frame`/`FrameFlags`/`SignalValue`/`DecodedFrame`/`SourceStats`）
+- Create: `crates/lumelog-can/src/lib.rs`（先挂 `error`/`dbc`/`frame`；`decode`/`source` 由 Task 3/4 各自挂入）
+
+**Why:** 先定住后续任务依赖的稳定签名（接口先行），本任务不含算法。
+**验证:** `cargo test -p lumelog-can` 2 pass（crate_links + ipc_codes_are_stable）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。修正：`Frame` 含 `f64` 时间戳→只 derive `PartialEq` 不 derive `Eq`。偏离计划一条：proptest 直接入 crate dev-deps（对齐 core）而非 workspace deps。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。
