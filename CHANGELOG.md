@@ -2,6 +2,14 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 3 起草（M2 CanPanel + IPC）
+
+**Files:**
+- Create: `docs/plans/2026-10-25-m2-can-panel-ui.md`
+
+**Why:** Plan 2（引擎）已合并 main，起草 M2 另一半的实施计划：`dbc_import`/`can_parse` IPC 命令 + CanPanel 报文表格（列/虚拟滚动/视图过滤/与编辑器双向联动、行号对齐）。导出三件套按 spec §12 留 M3。
+**验证:** 纯文档，无代码变更；已按 writing-plans 自审（spec 覆盖 / 签名一致 / 类型一致 / Review Focus 落钉）。计划待用户审阅后执行。
+
 ## 2026-10-25 — M2 CAN 引擎（feat/m2-can-engine）
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7；计划 `docs/plans/2026-10-25-m2-can-engine.md`（只做纯 Rust 引擎，IPC/CanPanel 属 Plan 3）。
