@@ -39,6 +39,15 @@
 
 验证：vitest 10 passed；tsc strict + vite build 干净（本轮未触 Rust 侧，clippy/test 沿用 commit 3796355 结果）。
 
+### Task 10 round-1 复审（CLEAN）+ round 2 采纳处方
+
+复审判定 F1/F2/M1/M2 全部 ADDRESSED，无新增 Critical/Important；复审另开 2 条不阻塞 Minor，本轮直接采纳其处方原文：
+- **Minor-new1**（`ipc.ts`）：逐行无条件剥尾 `\r` 会吃掉混合 EOL 日志里“行内容以裸 `\r` 收尾且无 LF”的字符。修：改为 `split(/\r\n|\n/)`，只把 `\r` 当 CRLF 终止符的一部分处理，裸 `\r` 作为内容保留。
+- **Minor-new2**（`listview.ts`）：`cacheStart = Math.min(first, res.first)` 防御方向反了（map 只装有 `[res.first, gotEnd)`，min 会声称 `[first, res.first)` 也在缓存→幽灵命中画空白）。修：`cacheStart = res.first`。
+- 另有一条 pre-existing 观察（在途 fetch 落回覆盖 cache 命中绘制，需再滚一次自愈）+ 失败 fetch 无可见反馈：controller 判定归 Task 11（与流式索引/ResizeObserver 一并接），ledger 已记 deferred。
+
+验证：vitest 10 passed；tsc strict + vite build 干净（30 modules）。
+
 ## 2026-10-24 — Task 9：前端编辑模式（CodeMirror 6 + Tab + 状态栏）
 
 - 文件：`app/frontend/src/{ipc.ts,encoding-menu.ts,language.ts,editor.ts,tabs.ts,statusbar.ts,main.ts}` + `ipc.test.ts`；`package.json`（+@codemirror/*、@tauri-apps/plugin-dialog、vitest；+test 脚本）；`package-lock.json` 纳入版本库。

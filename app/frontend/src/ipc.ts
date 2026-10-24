@@ -308,14 +308,15 @@ export async function loadWindow(
   const p = payload;
   if (!p) return { first: start, lines: [], invalidCount: 0 };
   // The core keeps each line's raw terminator in the chunk text, so a CRLF
-  // file arrives with a `\r` before every `\n`. Strip one trailing terminator,
-  // then any per-line trailing `\r` — `pre`-rendered rows and copy-paste must
-  // not carry stray CRs (CodeMirror normalises internally, a raw list does not).
+  // file arrives with a `\r` before every `\n`. Split on `\r\n`/`\n` only — a
+  // bare trailing `\r` (no LF) is line *content* in a mixed-EOL log and must
+  // survive. `pre`-rendered rows and copy-paste must not carry stray CRs
+  // (CodeMirror normalises internally, a raw list does not).
   const body = p.text.endsWith("\r\n")
     ? p.text.slice(0, -2)
     : p.text.endsWith("\n")
       ? p.text.slice(0, -1)
       : p.text;
-  const lines = count === 0 ? [] : body.split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+  const lines = count === 0 ? [] : body.split(/\r\n|\n/);
   return { first: p.startLine, lines, invalidCount: p.invalidCount };
 }

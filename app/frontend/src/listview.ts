@@ -184,9 +184,11 @@ export class ListView implements TabView {
     for (let i = 0; i < res.lines.length; i++) this.cache.set(res.first + i, res.lines[i]);
     // Derive the cached span from what actually arrived, not from what we
     // asked for: the core clamps a window that runs past EOF, and claiming the
-    // requested range would serve phantom cache hits on the next scroll.
+    // requested range would serve phantom cache hits on the next scroll. Use
+    // `res.first` (the core's echoed start) as the left bound so a start that
+    // differs from our request cannot open a `[first, res.first)` phantom hole.
     const gotEnd = res.first + res.lines.length;
-    this.cacheStart = Math.min(first, res.first);
+    this.cacheStart = res.first;
     this.cacheEnd = gotEnd;
     // The window may have moved while awaiting; re-derive from current scroll.
     const total = this.opts.totalLines();
