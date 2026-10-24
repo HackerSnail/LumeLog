@@ -2,6 +2,7 @@
 //! Pure Rust, no Tauri dependency — reusable from CLI and the app shell.
 
 pub mod doc;
+pub mod encoding;
 pub mod error;
 
 #[cfg(test)]

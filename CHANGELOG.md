@@ -2,6 +2,13 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 3: 编码模块
+
+- 文件：新增 `src/encoding/mod.rs`（EncodingLabel 9 种显示名 + as_str/from_label、detect、decode_all、IncrementalDecoder、encode_all）、`tests/encoding_proptest.rs`；lib.rs 挂 `pub mod encoding`。
+- 为什么：实现 spec §5 检测顺序（BOM→严格 UTF-8→chardetng→兑底 GB18030）与 §5.4 U+FFFD 错误策略；GB2312→GBK 超集（A3）；增量解码器为 Task4 分块取行服务，split-invariance 是正确性根基地。
+- 实现决策：encoding_rs 静态名为 `SHIFT_JIS`（无 WINDOWS_932）、无 ISO_8859_1（Iso88591→WINDOWS_1252）；chardetng 0.1.17 无 float 置信度，用 `guess_assess(Some("cn"), false)` 的 plausible 标志实现 §5.2 的“置信阈值”。
+- 验证：`cargo test -p lumelog-core` → 16 lib passed + proptest split_anywhere passed；`cargo clippy --all-targets -D warnings` 无告警。
+
 ## 2026-10-24 — Task 2: LineIndex 行索引
 
 - 文件：新增 `src/error.rs`（CoreError：Io/TooLarge/LineOutOfRange/Encoding/Conflict/Unmappable/Locked）、`src/doc/line_index.rs`、`src/doc/mod.rs`；lib.rs 挂 `pub mod doc; pub mod error;`。

@@ -1,0 +1,381 @@
+//! Encoding detection, decoding, and encoding for the document engine.
+//! Display labels are pinned by spec §5.1; detection order by spec §5.2;
+//! decode error policy (U+FFFD replace) by spec §5.4.
+
+use encoding_rs::Encoding;
+
+/// User-facing encoding identities (spec §5.1). `GB2312` is intentionally
+/// absent — its input is decoded as `GBK` (superset), see `from_label`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncodingLabel {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    Gbk,
+    Gb18030,
+    Big5,
+    ShiftJis,
+    Iso88591,
+}
+
+impl EncodingLabel {
+    /// Fixed display name shown in the status bar / menu (Global Constraints).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EncodingLabel::Utf8 => "UTF-8",
+            EncodingLabel::Utf8Bom => "UTF-8 BOM",
+            EncodingLabel::Utf16Le => "UTF-16 LE",
+            EncodingLabel::Utf16Be => "UTF-16 BE",
+            EncodingLabel::Gbk => "GBK",
+            EncodingLabel::Gb18030 => "GB18030",
+            EncodingLabel::Big5 => "BIG5",
+            EncodingLabel::ShiftJis => "Shift-JIS",
+            EncodingLabel::Iso88591 => "ISO-8859-1",
+        }
+    }
+
+    /// Parse a display label. `GB2312` maps to `Gbk` (spec §5.1).
+    pub fn from_label(s: &str) -> Option<EncodingLabel> {
+        match s {
+            "UTF-8" => Some(EncodingLabel::Utf8),
+            "UTF-8 BOM" => Some(EncodingLabel::Utf8Bom),
+            "UTF-16 LE" => Some(EncodingLabel::Utf16Le),
+            "UTF-16 BE" => Some(EncodingLabel::Utf16Be),
+            "GBK" | "GB2312" | "GB_2312-80" => Some(EncodingLabel::Gbk),
+            "GB18030" => Some(EncodingLabel::Gb18030),
+            "BIG5" => Some(EncodingLabel::Big5),
+            "Shift-JIS" | "SHIFT_JIS" | "CP932" => Some(EncodingLabel::ShiftJis),
+            "ISO-8859-1" | "windows-1252" | "WINDOWS-1252" => Some(EncodingLabel::Iso88591),
+            _ => None,
+        }
+    }
+
+    /// The `encoding_rs` codec backing this label.
+    fn encoding(self) -> &'static Encoding {
+        match self {
+            EncodingLabel::Utf8 | EncodingLabel::Utf8Bom => encoding_rs::UTF_8,
+            EncodingLabel::Utf16Le => encoding_rs::UTF_16LE,
+            EncodingLabel::Utf16Be => encoding_rs::UTF_16BE,
+            EncodingLabel::Gbk => encoding_rs::GBK,
+            EncodingLabel::Gb18030 => encoding_rs::GB18030,
+            EncodingLabel::Big5 => encoding_rs::BIG5,
+            EncodingLabel::ShiftJis => encoding_rs::SHIFT_JIS,
+            EncodingLabel::Iso88591 => encoding_rs::WINDOWS_1252,
+        }
+    }
+}
+
+/// Byte-order-mark length for the label (0 if none expected).
+fn bom_len(label: EncodingLabel) -> usize {
+    match label {
+        EncodingLabel::Utf8Bom => 3,
+        EncodingLabel::Utf16Le | EncodingLabel::Utf16Be => 2,
+        _ => 0,
+    }
+}
+
+/// Strip the leading BOM matching `label`, if present.
+fn strip_bom(label: EncodingLabel, bytes: &[u8]) -> &[u8] {
+    let n = bom_len(label);
+    if bytes.len() >= n && has_bom(label, bytes) {
+        &bytes[n..]
+    } else {
+        bytes
+    }
+}
+
+fn has_bom(label: EncodingLabel, bytes: &[u8]) -> bool {
+    match label {
+        EncodingLabel::Utf8Bom => bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+        EncodingLabel::Utf16Le => bytes.starts_with(&[0xFF, 0xFE]),
+        EncodingLabel::Utf16Be => bytes.starts_with(&[0xFE, 0xFF]),
+        _ => false,
+    }
+}
+
+/// Result of decoding a whole buffer.
+pub struct Decoded {
+    pub text: String,
+    /// Number of U+FFFD replacement characters produced (spec §5.4 heuristic).
+    pub invalid_count: usize,
+}
+
+/// Detect the encoding of a file from its leading bytes (spec §5.2).
+/// `head` is the first up-to-64KB of the file.
+pub fn detect(head: &[u8]) -> EncodingLabel {
+    // 1. BOM
+    if head.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return EncodingLabel::Utf8Bom;
+    }
+    if head.starts_with(&[0xFF, 0xFE]) {
+        // UTF-16LE BOM; distinguish UTF-32LE (0xFF 0xFE 0x00 0x00) not supported in v1.
+        return EncodingLabel::Utf16Le;
+    }
+    if head.starts_with(&[0xFE, 0xFF]) {
+        return EncodingLabel::Utf16Be;
+    }
+    // 2. strict UTF-8 over the whole head
+    if std::str::from_utf8(head).is_ok() {
+        return EncodingLabel::Utf8;
+    }
+    // 3. chardetng, hinting a Chinese TLD (spec §5.2). chardetng 0.1 returns
+    //    (encoding, plausible): `plausible` means it beat at least one other
+    //    candidate — the crate's proxy for confidence. We require it.
+    let mut det = chardetng::EncodingDetector::new();
+    det.feed(head, true);
+    let (enc, plausible) = det.guess_assess(Some(b"cn"), false);
+    if plausible {
+        if let Some(label) = label_from_encoding(enc) {
+            return label;
+        }
+    }
+    // 4. fallback
+    EncodingLabel::Gb18030
+}
+
+/// Map an `encoding_rs::Encoding` (from chardetng) to our label set.
+fn label_from_encoding(enc: &'static Encoding) -> Option<EncodingLabel> {
+    if enc == encoding_rs::UTF_8 {
+        Some(EncodingLabel::Utf8)
+    } else if enc == encoding_rs::UTF_16LE {
+        Some(EncodingLabel::Utf16Le)
+    } else if enc == encoding_rs::UTF_16BE {
+        Some(EncodingLabel::Utf16Be)
+    } else if enc == encoding_rs::GBK {
+        Some(EncodingLabel::Gbk)
+    } else if enc == encoding_rs::GB18030 {
+        Some(EncodingLabel::Gb18030)
+    } else if enc == encoding_rs::BIG5 {
+        Some(EncodingLabel::Big5)
+    } else if enc == encoding_rs::SHIFT_JIS {
+        Some(EncodingLabel::ShiftJis)
+    } else if enc == encoding_rs::WINDOWS_1252 {
+        Some(EncodingLabel::Iso88591)
+    } else {
+        None
+    }
+}
+
+/// Decode an entire buffer in one shot.
+pub fn decode_all(label: EncodingLabel, bytes: &[u8]) -> Decoded {
+    let body = strip_bom(label, bytes);
+    let (cow, had_errors) = label.encoding().decode_without_bom_handling(body);
+    let invalid_count = if had_errors {
+        cow.matches('\u{FFFD}').count()
+    } else {
+        0
+    };
+    Decoded {
+        text: cow.into_owned(),
+        invalid_count,
+    }
+}
+
+/// One segment produced by `IncrementalDecoder::feed`.
+pub struct DecodeSegment {
+    pub text: String,
+    pub invalid_count: usize,
+}
+
+/// Stateful decoder that yields identical output to `decode_all` regardless of
+/// where the input byte stream is split (pinned by proptest). Used by DocFile's
+/// chunked reader (Task 4) to decode per-line regions of a whole stream.
+pub struct IncrementalDecoder {
+    label: EncodingLabel,
+    decoder: encoding_rs::Decoder,
+    started: bool,
+}
+
+impl IncrementalDecoder {
+    /// Construct for a whole-stream decode starting at byte 0 (BOM-aware).
+    pub fn new(label: EncodingLabel) -> Result<Self, crate::error::CoreError> {
+        // BOM removal is handled by stripping in `feed` on the first call so the
+        // codec receives pure body bytes at any split point.
+        let decoder = label.encoding().new_decoder_without_bom_handling();
+        Ok(Self {
+            label,
+            decoder,
+            started: false,
+        })
+    }
+
+    pub fn feed(&mut self, bytes: &[u8]) -> DecodeSegment {
+        let mut body = bytes;
+        if !self.started {
+            body = strip_bom(self.label, bytes);
+            self.started = true;
+        }
+        let mut out = String::new();
+        let mut invalid = 0usize;
+        let mut src = body;
+        loop {
+            out.reserve(src.len() * 3 + 16);
+            let before = out.len();
+            let (result, read, _replaced) =
+                self.decoder.decode_to_string(src, &mut out, false);
+            invalid += out[before..].matches('\u{FFFD}').count();
+            src = &src[read..];
+            if read == 0 || matches!(result, encoding_rs::CoderResult::InputEmpty) {
+                break;
+            }
+        }
+        DecodeSegment {
+            text: out,
+            invalid_count: invalid,
+        }
+    }
+
+    /// Flush trailing incomplete sequences (emits U+FFFD for a truncated
+    /// multi-byte tail). Returns the replacement count for the flush.
+    pub fn finish(&mut self) -> usize {
+        let mut out = String::new();
+        let mut invalid = 0usize;
+        loop {
+            out.reserve(16);
+            let before = out.len();
+            let (result, read, _replaced) =
+                self.decoder.decode_to_string(&[], &mut out, true);
+            invalid += out[before..].matches('\u{FFFD}').count();
+            if read == 0 || matches!(result, encoding_rs::CoderResult::InputEmpty) {
+                break;
+            }
+        }
+        self.started = false;
+        invalid
+    }
+}
+
+/// Result of encoding text to bytes.
+pub struct Encoded {
+    pub bytes: Vec<u8>,
+    /// Number of characters that could not be represented (spec §4.4 confirm flow).
+    pub replace_count: usize,
+}
+
+/// Encode `text` to `label`'s bytes. UTF variants are laid out by hand so byte
+/// order / BOM are deterministic; legacy codecs delegate to `encoding_rs`.
+pub fn encode_all(label: EncodingLabel, text: &str) -> Encoded {
+    match label {
+        EncodingLabel::Utf8 => Encoded {
+            bytes: text.as_bytes().to_vec(),
+            replace_count: 0,
+        },
+        EncodingLabel::Utf8Bom => {
+            let mut bytes = vec![0xEF, 0xBB, 0xBF];
+            bytes.extend_from_slice(text.as_bytes());
+            Encoded {
+                bytes,
+                replace_count: 0,
+            }
+        }
+        EncodingLabel::Utf16Le | EncodingLabel::Utf16Be => {
+            let le = label == EncodingLabel::Utf16Le;
+            let mut bytes = Vec::with_capacity(text.len() * 2 + 2);
+            bytes.extend_from_slice(if le { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+            for unit in text.encode_utf16() {
+                if le {
+                    bytes.extend_from_slice(&unit.to_le_bytes());
+                } else {
+                    bytes.extend_from_slice(&unit.to_be_bytes());
+                }
+            }
+            Encoded {
+                bytes,
+                replace_count: 0,
+            }
+        }
+        other => {
+            let enc = other.encoding();
+            let (cow, _actual, had_errors) = enc.encode(text);
+            let replace_count = if had_errors {
+                text.chars()
+                    .filter(|&c| enc.encode(c.to_string().as_str()).2)
+                    .count()
+            } else {
+                0
+            };
+            Encoded {
+                bytes: cow.into_owned(),
+                replace_count,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_bom_variants() {
+        assert_eq!(
+            detect(&[0xEF, 0xBB, 0xBF, b'h', b'i']),
+            EncodingLabel::Utf8Bom
+        );
+        assert_eq!(detect(&[0xFF, 0xFE, 0x00, 0x00]), EncodingLabel::Utf16Le);
+        assert_eq!(detect(&[0xFE, 0xFF, 0x00, 0x00]), EncodingLabel::Utf16Be);
+    }
+
+    #[test]
+    fn detect_utf8_strict_beats_chardetng() {
+        // "中文" in UTF-8 is valid UTF-8 and would otherwise confuse a
+        // statistical detector; step 2 must win.
+        let head = "台架 HIL 测试 OK\n".as_bytes();
+        assert_eq!(detect(head), EncodingLabel::Utf8);
+    }
+
+    #[test]
+    fn detect_gbk_sample_is_chinese() {
+        let (_, _, err) = encoding_rs::GBK.encode("动力系统控制台台架测试数据记录");
+        assert!(!err);
+        let gbk = encoding_rs::GBK.encode("动力系统控制台台架测试数据记录").0;
+        let label = detect(&gbk);
+        assert!(
+            matches!(label, EncodingLabel::Gbk | EncodingLabel::Gb18030),
+            "expected a Chinese label, got {label:?}"
+        );
+    }
+
+    #[test]
+    fn detect_falls_back_when_result_not_in_label_set() {
+        // Cyrillic in WINDOWS_1251 is valid & plausible for chardetng but NOT
+        // in our supported label map -> detection must fall through to GB18030.
+        let cyr = encoding_rs::WINDOWS_1251.encode("Привет мир, это тест").0;
+        assert_eq!(detect(&cyr), EncodingLabel::Gb18030);
+    }
+
+    #[test]
+    fn from_label_gb2312_maps_to_gbk() {
+        assert_eq!(
+            EncodingLabel::from_label("GB2312"),
+            Some(EncodingLabel::Gbk)
+        );
+        assert_eq!(EncodingLabel::Gbk.as_str(), "GBK");
+    }
+
+    #[test]
+    fn gbk_roundtrip() {
+        let text = "台架HIL测试";
+        let enc = encode_all(EncodingLabel::Gbk, text);
+        assert_eq!(enc.replace_count, 0);
+        let dec = decode_all(EncodingLabel::Gbk, &enc.bytes);
+        assert_eq!(dec.text, text);
+        assert_eq!(dec.invalid_count, 0);
+    }
+
+    #[test]
+    fn gbk_emoji_is_unmappable() {
+        let enc = encode_all(EncodingLabel::Gbk, "ok💩");
+        assert_eq!(enc.replace_count, 1, "emoji cannot be represented in GBK");
+    }
+
+    #[test]
+    fn utf16le_roundtrip_with_bom() {
+        let enc = encode_all(EncodingLabel::Utf16Le, "ab线");
+        assert!(enc.bytes.starts_with(&[0xFF, 0xFE]));
+        let dec = decode_all(EncodingLabel::Utf16Le, &enc.bytes);
+        assert_eq!(dec.text, "ab线");
+        assert_eq!(dec.invalid_count, 0);
+    }
+}
