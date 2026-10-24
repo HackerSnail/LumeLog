@@ -650,6 +650,8 @@ html.has-custom-titlebar .win-btns {
 .can-hrow {
   display: flex;
   align-items: center;
+  height: 20px;          /* matches ROW_HEIGHT so header columns align with body */
+  white-space: nowrap;   /* same wrapping rule as .can-row cells */
   font-weight: 600;
   color: var(--text);
 }

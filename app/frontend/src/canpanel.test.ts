@@ -36,4 +36,20 @@ describe("FrameStore (spec §7.4 batched frame accumulation)", () => {
     expect(s.length).toBe(0);
     expect(s.all()).toEqual([]);
   });
+
+  it("frame_store_revision: bumps on every mutation, so the panel can skip re-filtering on scroll", () => {
+    const s = new FrameStore();
+    const r0 = s.revision;
+    s.push([frame(1)]);
+    expect(s.revision).toBe(r0 + 1);
+    s.push([frame(2), frame(3)]);
+    expect(s.revision).toBe(r0 + 2);
+    s.clear();
+    expect(s.revision).toBe(r0 + 3);
+    // read-only access never advances the revision
+    const before = s.revision;
+    s.all();
+    void s.length;
+    expect(s.revision).toBe(before);
+  });
 });

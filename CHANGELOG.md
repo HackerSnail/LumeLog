@@ -6,6 +6,18 @@
 
 **依据：** spec `docs/specs/2026-10-24-lumelog-v1-design.md` §7.4/§9；计划 `docs/plans/2026-10-25-m2-can-panel-ui.md`（把 `lumelog-can` 引擎接入 Tauri 壳 + CanPanel）。用户批复：用 TanStack、纳入 `can_decode_snippet`、过滤范围 ID/消息名/信号条件/时间窗口。
 
+### 终审修复波（CodeReview 全分支 → Request changes，0 Critical / 6 Important / 7 Minor）
+**Files:**
+- Modify: `app/src-tauri/src/commands.rs`（① `can_parse` 同步 prologue 只做校验、随即 `tauri::async_runtime::spawn_blocking` 后台解码并**立即返回 req_id**——解码移出主线程、UI 不再冻结、流式批次实时可见；② `doc_lines`（整文件 `Vec`）重写为惰性 `DocLines` 迭代器，一次只持有一个 `MAX_CHUNK_LINES` 窗口（`chunk_to_lines` 抽出共享），符 §3“never hand the whole file over”；`AppHandle`+`Manager` 供 worker 结束 `end_search`；regex 用一次性 `RegexSource::new(empty)` 预校验；`#[allow(too_many_arguments)]` IPC 签名）
+- Modify: `app/src-tauri/src/commands.rs`（`can_parse_tests` 三例改喂 `DocLines::new(Arc::new(Mutex::new(doc))).collect()`）
+- Modify: `app/frontend/src/main.ts`（① 恢复“停止”：`parseActive` 拿到提前返回的 req_id 存入 `canReqId`，`onCanRunClick` 在 `canParsing` 时调 `canCancel`，`canParsing` 仅在 `onDone`（含取消）置否；④ `decodeSelection` 传 `sourceKind`（ASC 选中不再误当 candump）；⑤ 重入守卫移进 `parseActive` 开头（palette `can-parse` 无法并发灌帧）；Minor：`store.clear` 前先校验源/正则、`switchCanView` 复用已注册 store、清除/切换过滤时复位 `signalOp` 下拉）
+- Modify: `app/frontend/src/canpanel.ts`（③ 表头 `hrow` 去 `can-row`（`position:absolute` 会抽流致 `.can-thead` 塌陷盖首行）单列 `renderHeader`；⑥ `FrameStore.revision` + 缓存 `cachedRows/cachedTable` 按 (store,rev,filter) 失效，`render()` rAF 合并 `onBatch` 突发，滚动路径 first/last 未变短路——去 O(n²) 重建）
+- Modify: `app/frontend/src/canpanel.test.ts`（加 `frame_store_revision` 例）
+- Modify: `app/frontend/src/styles.css`（③ `.can-hrow` 补 `height:20px`+`white-space:nowrap`，独立成流并与 `.can-row` 列对齐）
+
+**Why:** 终审 6 项 Important 阻塞 merge，逐条修复。①②同源——同步命令既冻结主线程又让 req_id 只在结束时可得（取消形同虚设），一并异步化后取消才真实可用（推翻 Task 7 的“不提供停止”Ruling）。**Ruling（Minor 分诊）**：扩展帧 id 两层语义（依 Task 2 DBC bit31 还原，展示层不重复解码，改动会牵动 DTO 与已测夹具）、远程帧带数据解全 0 信号（can 语义边界、v1 展“无数据”已不崩）、DBC 只增不减（用户显式导入、数量极少）、非法过滤值静默忽略（`parseNum` 返 undefined 视作无上/下界，YAGNI）——四项均判为可在 M3 处理、非阻塞，按 final-review 规则记此 park 而非塞进本次修复波。**验证：** `cargo test -p lumelog-app` 12 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm --prefix app/frontend test` 39 pass（canpanel 2→3）+ `run build`（tsc 通过，41 modules）。
+
+
 ### Task 7. main.ts 集成 CanPanel（报文 dock + 双向联动）
 **Files:**
 - Modify: `app/frontend/src/main.ts`（导入 CAN 命令 + `CanPanel/FrameStore` + `CanFilter`；报文 dock（源选择 candump/asc/正则 + 导入DBC + 解析/识别选中）+ 过滤栏（ID/消息/信号条件/时间窗）；每 docId 一份 `FrameStore`/`CanFilter`，共享一个 `CanPanel` 按活动文档重挂；行点击→`revealSourceLine`（列表 0-based、CodeMirror 1-based）；选中文本→`canDecodeSnippet`；appbar “报文面板”按钮 + 4 条 palette 命令；`handleClose` 清理 CAN 映射）

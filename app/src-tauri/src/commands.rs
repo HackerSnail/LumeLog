@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use lumelog_can::dbc::{parse_lenient, ParseOutcome};
@@ -15,6 +15,7 @@ use lumelog_core::doc::{save_text, DocFile, EolStyle, OverwritePolicy, SaveOptio
 use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::search::{search_stream, Mode, SearchQuery};
 use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager};
 
 use crate::dto::*;
 use crate::state::AppDocs;
@@ -398,33 +399,90 @@ pub fn dbc_import(
 /// "每 ≤2ms 或 4096 条聚合" — bounded well under a storm; tuned for smooth table fill).
 const PARSE_BATCH: usize = 512;
 
-/// Read the whole document into `(1-based line number, text)` pairs for a
-/// `FrameSource`. v1 collects into a Vec (bench logs are moderate); the §3
-/// "never hand the whole file over" invariant holds because only line TEXT (not
-/// the raw file) crosses IPC, and CanPanel targets M2-sized logs.
-fn doc_lines(doc: &mut DocFile) -> Result<Vec<Line>, IpcError> {
-    let total = doc.line_count();
-    let mut out: Vec<Line> = Vec::with_capacity(total.min(MAX_CHUNK_LINES as usize * 4));
-    let mut start = 0usize;
-    while start < total {
-        let count = (MAX_CHUNK_LINES as usize).min(total - start);
-        let chunk = doc.chunk_at(start, count).map_err(IpcError::from_core)?;
-        let base = chunk.start_line; // 0-based index of chunk.text's first line
-        let mut body = chunk.text.as_str();
-        // chunk.text keeps every terminator; drop exactly the last one so the
-        // split yields `count` lines, not a trailing empty one.
-        if let Some(b) = body.strip_suffix("\r\n") {
-            body = b;
-        } else if let Some(b) = body.strip_suffix('\n') {
-            body = b;
-        }
-        for (i, raw) in body.split('\n').enumerate() {
-            let text = raw.strip_suffix('\r').unwrap_or(raw).to_string();
-            out.push(((base + i) as u64 + 1, text));
-        }
-        start += count;
+/// Split one `chunk_at` window into `(1-based line number, text)` pairs, dropping
+/// the window's trailing terminator so the split yields `count` lines, not a
+/// trailing empty one. Shared by the streaming reader and the line-order test.
+fn chunk_to_lines(base: usize, text: &str) -> Vec<Line> {
+    let mut body = text;
+    if let Some(b) = body.strip_suffix("\r\n") {
+        body = b;
+    } else if let Some(b) = body.strip_suffix('\n') {
+        body = b;
     }
-    Ok(out)
+    body.split('\n')
+        .enumerate()
+        .map(|(i, raw)| {
+            let t = raw.strip_suffix('\r').unwrap_or(raw).to_string();
+            ((base + i) as u64 + 1, t)
+        })
+        .collect()
+}
+
+/// Lazy, chunk-held line reader feeding a `FrameSource` (spec §3 "never hand the
+/// whole file over"). Pulls one `MAX_CHUNK_LINES` window at a time from the
+/// document, so peak memory is a single chunk regardless of file size — the
+/// eager `Vec` of every line is gone. The `Arc<Mutex<..>>` is locked only for the
+/// duration of each `chunk_at`, released before the source consumes the buffer.
+pub struct DocLines {
+    doc: Arc<Mutex<DocFile>>,
+    total: usize,
+    start: usize,
+    buf: std::vec::IntoIter<Line>,
+}
+
+impl DocLines {
+    /// Line count is read once up front; the body is never materialized here.
+    fn new(doc: Arc<Mutex<DocFile>>) -> Self {
+        let total = doc
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .line_count();
+        Self {
+            doc,
+            total,
+            start: 0,
+            buf: Vec::new().into_iter(),
+        }
+    }
+
+    /// Refill `buf` from the next chunk window, advancing `start`. An I/O error
+    /// (or reaching the end) simply stops the stream rather than poisoning it.
+    fn refill(&mut self) {
+        if self.start >= self.total {
+            self.buf = Vec::new().into_iter();
+            return;
+        }
+        let count = (MAX_CHUNK_LINES as usize).min(self.total - self.start);
+        let chunk = {
+            let mut g = self.doc.lock().unwrap_or_else(|p| p.into_inner());
+            g.chunk_at(self.start, count)
+        };
+        match chunk {
+            Ok(c) => {
+                self.start += count;
+                self.buf = chunk_to_lines(c.start_line, &c.text).into_iter();
+            }
+            Err(_) => {
+                self.start = self.total;
+                self.buf = Vec::new().into_iter();
+            }
+        }
+    }
+}
+
+impl Iterator for DocLines {
+    type Item = Line;
+    fn next(&mut self) -> Option<Line> {
+        loop {
+            if let Some(l) = self.buf.next() {
+                return Some(l);
+            }
+            if self.start >= self.total {
+                return None;
+            }
+            self.refill();
+        }
+    }
 }
 
 /// Drain a source into batched `FrameJson`, checking `cancelled` per frame and
@@ -453,11 +511,19 @@ fn parse_frames(
 }
 
 /// Stream a CAN decode of `doc_id` over `on_batch` (spec §9 `can_parse`). Returns
-/// the job id used to `can_cancel`. Batches cap IPC traffic; the cancel flag is
-/// checked per frame so a half-million-frame log stops promptly.
+/// the job id used to `can_cancel` BEFORE the scan runs: the command's synchronous
+/// prologue only validates the request, then hands the heavy decode to a blocking
+/// task, so the front end gets the id immediately (Stop works mid-flight), the
+/// main thread is never tied up parsing, and each `on_batch` flush renders as it
+/// arrives rather than all at the end. Cheap validation — unknown doc/source,
+/// missing pattern, and regex compilation — still happens synchronously so a bad
+/// request rejects instead of streaming an empty result. Batches cap IPC traffic;
+/// the cancel flag is checked per frame so a half-million-frame log stops promptly.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC signature: 5 request fields + 2 channels + handles
 pub fn can_parse(
     state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
     doc_id: u64,
     dbc_id: Option<u64>,
     source_kind: String,
@@ -474,34 +540,19 @@ pub fn can_parse(
         Some(a) => a,
         None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
     };
-    let mut doc = match doc_arc.lock() {
-        Ok(d) => d,
-        Err(_) => return Err(fail(IpcError::new("io", "document mutex poisoned"))),
-    };
-    let lines = match doc_lines(&mut doc) {
-        Ok(l) => l,
-        Err(e) => return Err(fail(e)),
-    };
-    let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
-    let db = db_arc.as_deref();
-    let mut src: Box<dyn FrameSource> = match source_kind.as_str() {
-        "candump" => Box::new(CandumpSource::new(lines.into_iter())),
-        "asc" => Box::new(AscSource::new(lines.into_iter())),
-        "regex" => {
-            let pat = match &regex {
-                Some(p) => p,
-                None => {
-                    return Err(fail(IpcError::new(
-                        "bad_regex",
-                        "regex source requires a pattern",
-                    )))
-                }
-            };
-            match RegexSource::new(lines.into_iter(), pat) {
-                Ok(s) => Box::new(s),
-                Err(e) => return Err(fail(IpcError::from_can(e))),
+    // Validate the request synchronously before spawning: a bad source kind or an
+    // uncompilable pattern must reject the promise, not stream zero frames.
+    let pattern = match source_kind.as_str() {
+        "candump" | "asc" => None,
+        "regex" => match &regex {
+            Some(p) => Some(p.clone()),
+            None => {
+                return Err(fail(IpcError::new(
+                    "bad_regex",
+                    "regex source requires a pattern",
+                )))
             }
-        }
+        },
         other => {
             return Err(fail(IpcError::new(
                 "source_format",
@@ -509,16 +560,38 @@ pub fn can_parse(
             )))
         }
     };
-    let mut emit = |batch: Vec<FrameJson>| {
-        // A send error means the front end detached — the per-frame `cancelled`
-        // check will see it next tick via the shared flag staying unset; we keep
-        // draining harmlessly rather than abort the command.
-        let _ = on_batch.send(batch);
-    };
-    let cancelled = || cancel.load(Ordering::Relaxed);
-    let (decoded, skipped) = parse_frames(&mut *src, db, &mut emit, &cancelled);
-    state.end_search(req_id);
-    let _ = on_done.send(CanStatsJson { decoded, skipped });
+    if let Some(p) = &pattern {
+        // Compile-check via a throwaway source over an empty stream: surfaces
+        // `bad_regex`/`regex_compile` now rather than inside the worker.
+        if let Err(e) = RegexSource::new(std::iter::empty::<Line>(), p) {
+            return Err(fail(IpcError::from_can(e)));
+        }
+    }
+    let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
+    // `AppHandle` is `'static` + `Clone`, so the worker can re-fetch the managed
+    // `AppDocs` to `end_search` when it finishes (a borrowed `State<'_>` cannot
+    // cross into the `'static` blocking closure).
+    let kind = source_kind.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let lines = DocLines::new(doc_arc);
+        // The `Box<dyn FrameSource>` is created and consumed entirely on this one
+        // blocking thread, so it never needs to be `Send` across the boundary.
+        let mut src: Box<dyn FrameSource> = match kind.as_str() {
+            "asc" => Box::new(AscSource::new(lines)),
+            "regex" => Box::new(RegexSource::new(lines, &pattern.expect("validated above")).expect("regex compiled above")),
+            _ => Box::new(CandumpSource::new(lines)),
+        };
+        let db = db_arc.as_deref();
+        let mut emit = |batch: Vec<FrameJson>| {
+            // A send error means the front end detached; the per-frame
+            // `cancelled` check drains the remainder rather than aborting.
+            let _ = on_batch.send(batch);
+        };
+        let cancelled = || cancel.load(Ordering::Relaxed);
+        let (decoded, skipped) = parse_frames(&mut *src, db, &mut emit, &cancelled);
+        let _ = on_done.send(CanStatsJson { decoded, skipped });
+        app.state::<AppDocs>().end_search(req_id);
+    });
     Ok(req_id)
 }
 
@@ -655,8 +728,8 @@ mod can_parse_tests {
 
     #[test]
     fn doc_lines_preserves_line_order() {
-        let (_keep, mut doc) = doc_of("alpha\r\nbravo\r\ncharlie\r\n");
-        let lines = doc_lines(&mut doc).unwrap();
+        let (_keep, doc) = doc_of("alpha\r\nbravo\r\ncharlie\r\n");
+        let lines: Vec<Line> = DocLines::new(Arc::new(Mutex::new(doc))).collect();
         assert_eq!(lines.len(), 3, "three \r\n-terminated lines");
         assert_eq!(lines[0], (1, "alpha".to_string()));
         assert_eq!(lines[1], (2, "bravo".to_string()));
@@ -666,8 +739,8 @@ mod can_parse_tests {
     #[test]
     fn parse_frames_decodes_candump_and_counts_skips() {
         let content = " (1.5) can0 100#0000960012340000\nnot-a-frame\ncan0 100#DEADBEEF\n";
-        let (_k, mut doc) = doc_of(content);
-        let lines = doc_lines(&mut doc).unwrap();
+        let (_k, doc) = doc_of(content);
+        let lines: Vec<Line> = DocLines::new(Arc::new(Mutex::new(doc))).collect();
         let mut src = CandumpSource::new(lines.into_iter());
         let mut got: Vec<FrameJson> = Vec::new();
         let (decoded, skipped) = parse_frames(&mut src, None, &mut |b| got.extend(b), &|| false);
@@ -684,8 +757,8 @@ mod can_parse_tests {
         for i in 0..20 {
             content.push_str(&format!("can0 100#{:02X}DEADBEEF\n", i));
         }
-        let (_k, mut doc) = doc_of(&content);
-        let lines = doc_lines(&mut doc).unwrap();
+        let (_k, doc) = doc_of(&content);
+        let lines: Vec<Line> = DocLines::new(Arc::new(Mutex::new(doc))).collect();
         let mut src = CandumpSource::new(lines.into_iter());
         let seen = std::cell::Cell::new(0u32);
         let mut got: Vec<FrameJson> = Vec::new();

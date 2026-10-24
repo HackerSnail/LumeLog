@@ -21,10 +21,12 @@ const EXPAND_H = 120;
 /** Accumulates decoded frames in arrival order; the table's data source. */
 export class FrameStore {
   private frames: FrameJson[] = [];
+  private rev = 0;
 
   push(frames: FrameJson[]): void {
     // Copy so a caller reusing its batch array can't mutate our history.
     for (const f of frames) this.frames.push(f);
+    this.rev++;
   }
 
   all(): readonly FrameJson[] {
@@ -33,10 +35,17 @@ export class FrameStore {
 
   clear(): void {
     this.frames = [];
+    this.rev++;
   }
 
   get length(): number {
     return this.frames.length;
+  }
+
+  // Bumps on every mutation so the panel can tell "data changed" from a
+  // scroll-only repaint and skip re-filtering / rebuilding the table.
+  get revision(): number {
+    return this.rev;
   }
 }
 
@@ -64,6 +73,18 @@ export class CanPanel {
   private viewMinTs: number | null = null; // earliest ts in the current filtered view
   private baseState: TableState | null = null; // controlled table state (feature defaults, built once)
 
+  // Render caches (spec ⑥): the filtered row array + built table are reused for
+  // scroll-only repaints so streaming/scrolling stay O(visible), not O(n²).
+  private cachedStore: FrameStore | null = null;
+  private cachedRev = -1;
+  private cachedFilter: CanFilter | null = null;
+  private cachedRows: readonly FrameJson[] = [];
+  private cachedTable: Table<FrameJson> | null = null;
+  private lastFirst = -1;
+  private lastLast = -1;
+  private forceRepaint = false; // set when a toggle/expand changes layout with no data change
+  private renderQueued = false; // coalesce burst of onBatch renders into one per frame
+
   private root!: HTMLElement;
   private thead!: HTMLElement;
   private bodyScroller!: HTMLElement;
@@ -83,12 +104,14 @@ export class CanPanel {
   attachStore(store: FrameStore): void {
     this.store = store;
     this.expanded.clear();
+    this.forceRepaint = true;
     this.render();
   }
 
   setFilter(f: CanFilter): void {
     this.filter = f;
     this.expanded.clear();
+    this.forceRepaint = true;
     this.render();
   }
 
@@ -151,6 +174,7 @@ export class CanPanel {
     btn.addEventListener("click", () => {
       flip();
       btn.textContent = `${on}: ${off!.split("/")[isActive() ? 0 : 1]}`;
+      this.forceRepaint = true; // formatting changes re-render every visible cell
       this.render();
     });
     return btn;
@@ -190,23 +214,61 @@ export class CanPanel {
   // ---- rendering ------------------------------------------------------------
 
   render(): void {
-    if (this.destroyed) return;
-    try {
-      this.renderInner();
-    } catch (e) {
-      this.opts.onError(`报文表格渲染出错：${String(e)}`);
-    }
+    if (this.destroyed || this.renderQueued) return;
+    // Coalesce: a burst of `onBatch` pushes (and scroll ticks) collapse into one
+    // repaint per animation frame, so the table rebuilds ≤ once per frame.
+    this.renderQueued = true;
+    requestAnimationFrame(() => {
+      this.renderQueued = false;
+      if (this.destroyed) return;
+      try {
+        this.renderInner();
+      } catch (e) {
+        this.opts.onError(`报文表格渲染出错：${String(e)}`);
+      }
+    });
   }
 
   private renderInner(): void {
-    const all = this.store ? this.store.all() : [];
-    const filtered = applyCanFilter(all as FrameJson[], this.filter);
-    const table = this.table(filtered);
+    const store = this.store;
+    const rev = store ? store.revision : 0;
+    const dataChanged =
+      store !== this.cachedStore || rev !== this.cachedRev || this.filter !== this.cachedFilter;
+    if (dataChanged) {
+      const all = store ? store.all() : [];
+      this.cachedRows = applyCanFilter(all as FrameJson[], this.filter);
+      this.cachedTable = this.table(this.cachedRows);
+      this.viewMinTs = this.minTimestamp(this.cachedRows);
+      this.cachedStore = store;
+      this.cachedRev = rev;
+      this.cachedFilter = this.filter;
+      this.renderHeader(this.cachedTable);
+    }
+    const n = this.cachedRows.length;
+    const total = store ? store.length : 0;
+    const expandCount = this.countExpanded(n);
+    this.spacer.style.height = `${Math.max(n, 1) * ROW_HEIGHT + expandCount * EXPAND_H}px`;
 
-    // Header row (rebuilt each render so toggles reflect; cheap, one row).
+    // Scroll-only repaints reuse the cached filtered rows + table and skip the
+    // window entirely when its bounds are unchanged — the O(n²) rebuild is gone.
+    const { first, last } = visibleWindow(this.bodyScrollerTop(), this.bodyScrollerHeight(), n);
+    if (dataChanged || this.forceRepaint || first !== this.lastFirst || last !== this.lastLast) {
+      this.paintRows(this.cachedRows, first, last);
+      this.lastFirst = first;
+      this.lastLast = last;
+      this.forceRepaint = false;
+    }
+    this.statusEl.textContent = `报文 ${n}/${total}`;
+  }
+
+  /** Static header labels — rebuilt only when the data/filter (hence table) changes. */
+  private renderHeader(table: Table<FrameJson>): void {
     this.thead.textContent = "";
     const hrow = document.createElement("div");
-    hrow.className = "can-row can-hrow";
+    // Not `can-row`: that is `position:absolute` and would pull the header out of
+    // the document flow, collapsing `.can-thead` and letting the header overlap
+    // the first body row. `.can-hrow` carries its own in-flow height (CSS).
+    hrow.className = "can-hrow";
     for (const header of table.getFlatHeaders()) {
       const cell = document.createElement("div");
       cell.className = "can-cell";
@@ -215,16 +277,6 @@ export class CanPanel {
       hrow.append(cell);
     }
     this.thead.append(hrow);
-
-    const n = filtered.length;
-    this.viewMinTs = this.minTimestamp(filtered);
-    const expandCount = this.countExpanded(n);
-    this.spacer.style.height = `${Math.max(n, 1) * ROW_HEIGHT + expandCount * EXPAND_H}px`;
-
-    const { first, last } = visibleWindow(this.bodyScrollerTop(), this.bodyScrollerHeight(), n);
-    this.paintRows(filtered, first, last);
-
-    this.statusEl.textContent = `报文 ${n}/${all.length}`;
   }
 
   private paintRows(rows: readonly FrameJson[], first: number, last: number): void {
@@ -273,6 +325,7 @@ export class CanPanel {
     row.addEventListener("click", () => {
       this.expanded.has(index) ? this.expanded.delete(index) : this.expanded.add(index);
       this.opts.onRowActivate(f.lineNumber);
+      this.forceRepaint = true; // expand/collapse shifts every row below
       this.render();
     });
     return row;

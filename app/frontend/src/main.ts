@@ -18,6 +18,7 @@ import {
   appPing,
   dbcImport,
   canParse,
+  canCancel,
   canDecodeSnippet,
   IpcError,
   type DocInfo,
@@ -80,6 +81,7 @@ let canPanel: CanPanel | null = null; // lazily built on first dock open
 let canDockEl: HTMLElement | null = null;
 let canDockVisible = false;
 let canParsing = false;
+let canReqId: number | null = null; // job id from the (now early) can_parse resolve, for Stop
 // Dock controls, resolved in layout(); guarded null until then.
 let canSrcSel: HTMLSelectElement | null = null;
 let canRegexInput: HTMLInputElement | null = null;
@@ -492,6 +494,8 @@ function buildCanFilterRow(): HTMLElement {
   num("timeToMs", "止");
   const clear = mkBtn("清除过滤", "清空视图过滤条件", () => {
     for (const el of Object.values(canF)) el.value = "";
+    // the operator is a select: reset it to its default rather than a blank `-1`
+    if (canF.signalOp) (canF.signalOp as HTMLSelectElement).value = ">";
     applyFilterFromInputs();
   });
   row.append(clear);
@@ -563,7 +567,13 @@ function switchCanView(): void {
   if (!canPanel) return;
   const a = tabs.active();
   const docId = a?.info.docId ?? -1;
-  const store = (docId >= 0 && canStores.get(docId)) || new FrameStore();
+  // Reuse the doc's existing store (registered on first parse) instead of
+  // minting a fresh empty one every switch, so re-attaching shows real frames.
+  let store = docId >= 0 ? canStores.get(docId) : undefined;
+  if (!store) {
+    store = new FrameStore();
+    if (docId >= 0) canStores.set(docId, store);
+  }
   canPanel.attachStore(store);
   canPanel.setFilter((docId >= 0 && canFilters.get(docId)) || {});
   restoreFilterInputs(docId >= 0 ? canFilters.get(docId) : undefined);
@@ -582,7 +592,10 @@ function restoreFilterInputs(f: CanFilter | undefined): void {
   set("signalValue", f?.signalValue);
   set("timeFromMs", f?.timeFromMs);
   set("timeToMs", f?.timeToMs);
-  if (canF.signalOp && f?.signalOp) (canF.signalOp as HTMLSelectElement).value = f.signalOp;
+  // Always reset the operator select (default `>` when the doc has no signal
+  // filter) so a doc switch doesn't leave the previous doc's operator showing.
+  const opEl = canF.signalOp as HTMLSelectElement | undefined;
+  if (opEl) opEl.value = f?.signalOp ?? ">";
 }
 
 /** Frame row click → jump the matching source line (list 0-based, CM 1-based). */
@@ -617,17 +630,25 @@ async function importDbc(): Promise<void> {
 
 function onCanRunClick(): void {
   if (canParsing) {
-    // `can_parse` is synchronous (mirrors `search_run`): it mints its job id but
-    // only hands it back once the scan finishes, and holds the document lock
-    // while looping — so a live Stop has no id to cancel with yet. Deferred to a
-    // future async `can_parse` (same rationale as the search-cancel note above).
-    toastMsg("解析进行中，请稍候…");
+    // `can_parse` now returns its job id up front, so Stop is real: flip the
+    // shared cancel flag the worker checks per frame. The tally still arrives on
+    // `onDone` (a cancelled run sends partial stats), which resets the button.
+    if (canReqId !== null) {
+      canCancel(canReqId).catch((e) => reportError(e));
+    }
     return;
   }
   void parseActive();
 }
 
 async function parseActive(): Promise<void> {
+  // Re-entrancy guard lives here (not only in the button handler) so the command
+  // palette's `can-parse` entry can't start a second run that double-fills the
+  // table while one is already streaming.
+  if (canParsing) {
+    toastMsg("解析进行中，请稍候…");
+    return;
+  }
   const a = tabs.active();
   if (!a) {
     toastMsg("请先打开一个文档");
@@ -636,21 +657,27 @@ async function parseActive(): Promise<void> {
   if (!canDockVisible) toggleCanDock();
   ensurePanel();
   const docId = a.info.docId;
-  const store = canStores.get(docId) ?? new FrameStore();
-  canStores.set(docId, store);
-  store.clear(); // a re-parse replaces the table wholesale
-  canPanel!.attachStore(store);
-  canPanel!.setFilter(canFilters.get(docId) ?? {});
 
+  // Validate inputs BEFORE touching the store: a rejected launch (empty regex)
+  // must leave the previous table intact rather than clear it and stream nothing.
   const sourceKind = canSrcSel!.value;
   const regex = sourceKind === "regex" ? canRegexInput!.value : null;
   if (sourceKind === "regex" && regex === "") {
     toastMsg("正则源需填写含命名组 id/data 的正则");
     return;
   }
+
+  const store = canStores.get(docId) ?? new FrameStore();
+  canStores.set(docId, store);
+  store.clear(); // a re-parse replaces the table wholesale
+  canPanel!.attachStore(store);
+  canPanel!.setFilter(canFilters.get(docId) ?? {});
   setCanParsing(true);
+  canReqId = null;
   try {
-    await canParse({
+    // Resolves as soon as the shell has validated + spawned the worker (frames
+    // keep streaming on the channels afterward), giving us the id for Stop.
+    canReqId = await canParse({
       docId,
       dbcId: lastDbcId,
       sourceKind,
@@ -660,22 +687,25 @@ async function parseActive(): Promise<void> {
         canPanel?.render();
       },
       onDone: (s) => {
-        // The `finally` resets the button below, so surface the tally as a toast
-        // rather than button text (a parse that ran to completion, not a cancel).
         toastMsg(`解码 ${s.decoded} 帧，跳过 ${s.skipped} 行`);
         canPanel?.render();
+        // Completion (including a cancelled run) is the only place parsing ends;
+        // the promise itself resolves early, so `finally` must not reset here.
+        setCanParsing(false);
       },
     });
+    // Only flip to Stop if the run is still going (a tiny file can finish before
+    // this line, where onDone has already reset the button).
+    if (canParsing && canRunBtn) canRunBtn.textContent = "停止";
   } catch (err) {
     reportError(err);
-  } finally {
-    setCanParsing(false);
-    canRunBtn!.textContent = "解析报文";
+    setCanParsing(false); // a rejected start never streams, so reset here
   }
 }
 
 function setCanParsing(b: boolean): void {
   canParsing = b;
+  if (!b) canReqId = null;
   if (canRunBtn) canRunBtn.textContent = b ? "解析中…" : "解析报文";
 }
 
@@ -698,7 +728,10 @@ async function decodeSelection(): Promise<void> {
     return;
   }
   try {
-    const f = await canDecodeSnippet({ text, dbcId: lastDbcId });
+    // Pass the active source kind so an ASC selection decodes as ASC (mirrors
+    // the dock's `源` select); a regex selection is rejected by the shell with a
+    // clear `source_format` toast rather than silently mis-parsed as candump.
+    const f = await canDecodeSnippet({ text, dbcId: lastDbcId, sourceKind: canSrcSel?.value ?? null });
     const sig = f.signals.length ? `，${f.signals.length} 信号` : "";
     toastMsg(`报文 ${f.canIdHex}${f.msgName ? " " + f.msgName : ""}：${f.dlc} 字节${sig}`);
   } catch (err) {
