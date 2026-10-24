@@ -2,6 +2,9 @@
 //! this module holds only the shared types for the rest of the crate and, later,
 //! the IPC layer.
 
+pub mod parse;
+pub use parse::{parse, parse_lenient, ParseOutcome};
+
 /// Signal bit order, from the DBC `@` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteOrder {

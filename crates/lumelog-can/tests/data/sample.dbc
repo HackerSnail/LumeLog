@@ -1,0 +1,29 @@
+VERSION ""
+
+NS_ :
+	[NODE]
+	SYMBL
+
+BS_:
+
+BU_: ECU1 ECU2 Dashboard
+
+BO_ 291 EngineData: 8 ECU1
+ SG_ EngineSpeed : 0|16@1+ (0.125,0) [0|8031.875] "rpm" Dashboard
+ SG_ CoolantTemp : 16|8@1- (1,-40) [-40|215] "degC" Dashboard,ECU2
+ SG_ BrokenSignal : 24|notanint@1+ (1,0) [0|1] "" Dashboard
+
+BO_ 2147484928 ExtFrame: 4 ECU2
+ SG_ SignalA : 7|16@0- (0.5,-10) [-100|100] "V" Dashboard
+
+BO_ 100 MuxedMsg: 8 ECU1
+ SG_ Mode : M 2|8@1+ (1,0) [0|255] "" Vector_
+ SG_ Speed : m0 16|16@1+ (1,0) [0|65535] "km/h" Dashboard
+ SG_ Temp : m1 16|16@1- (0.1,-20) [0|0] "degC" Dashboard
+
+VAL_ 291 CoolantTemp 0 "Freezing" 90 "Normal" 120 "Overheat" ;
+
+CM_ SG_ 291 EngineSpeed "Engine RPM comment";
+
+BA_DEF_ BO_ "CycleTime" INT 0 100 ;
+BA_ "CycleTime" BO_ 291 10 ;

@@ -17,6 +17,16 @@
 **Why:** 先定住后续任务依赖的稳定签名（接口先行），本任务不含算法。
 **验证:** `cargo test -p lumelog-can` 2 pass（crate_links + ipc_codes_are_stable）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。修正：`Frame` 含 `f64` 时间戳→只 derive `PartialEq` 不 derive `Eq`。偏离计划一条：proptest 直接入 crate dev-deps（对齐 core）而非 workspace deps。
 
+### 2. DBC 子集解析器
+**Files:**
+- Create: `crates/lumelog-can/src/dbc/parse.rs`（严格 `parse` 首个坏构造即中断；宽容 `parse_lenient` 记录行号+上下文+kind 并继续。正则驱动行式解析 `BO_`/`SG_`（含 mux `M`/`m<n`、Intel/Motorola、有符号、factor/offset/min/max/receivers）/`VAL_`（延迟回填 value_table）/`VERSION`/`BU_`；`NS_`/`BS_`/`CM_`/`BA_*`/`VAL_TABLE_` 识别并跳过；未知非空行忽略）
+- Modify: `crates/lumelog-can/src/dbc.rs`（`pub mod parse;` + re-export）
+- Create: `crates/lumelog-can/tests/data/sample.dbc`（含一条故意坏 `SG_`（行 14））
+- Create: `crates/lumelog-can/tests/dbc_golden.rs`（6 例：结构/大小端有符号精确值/注释属性跳过/枚举/mux 标记/宽容跳坏行且严格在该行报 DbcSyntax）
+
+**Why:** spec §7.1 的 DBC 子集；严格/宽容两路对应“跳过坏行继续”；`BO_` dlc 与节点间无逗号。Review Focus 4 钉住。
+**验证:** `cargo test -p lumelog-can` 8 pass（2 单测 + 6 dbc_golden）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净（引入 `type ValEntry` 消 type_complexity）。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。
