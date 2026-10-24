@@ -1,6 +1,9 @@
 //! LumeLog core engine: line indexing, encoding, chunked decode, search, save.
 //! Pure Rust, no Tauri dependency — reusable from CLI and the app shell.
 
+pub mod doc;
+pub mod error;
+
 #[cfg(test)]
 mod tests_common;
 
