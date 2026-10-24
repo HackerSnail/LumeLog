@@ -340,8 +340,14 @@ async function changeEncoding(label: string): Promise<void> {
     // Re-decode shell-side (clears the chunk cache); the returned encoding is truth.
     const updated = await docSetEncoding(docId, label, ds.totalLines, () => {});
     if (handle) {
-      const { text } = await loadAllText(docId, ds.totalLines);
+      const { text, invalidCount } = await loadAllText(docId, ds.totalLines);
       handle.replaceText(text);
+      // Refresh the persistent ⚠ for the NEW encoding (spec §5.4): the whole
+      // point is a wrong-encoding file stays discoverable *right after* a
+      // switch. The read-only path does the same via invalidate→refetch→
+      // onInvalidCount; the edit path loads here, so update it here too.
+      ds.invalid = invalidCount;
+      status.setInvalidCount(invalidCount);
     } else if (list) {
       list.invalidate(); // drop stale-decoded windows; refetch on next paint
     }
