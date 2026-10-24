@@ -46,6 +46,15 @@
 **Why:** spec §7.3.2 Vector ASC 形式；Review Focus 3（ASC 变体帧/非帧行不污染流、不 panic）。**已知限制**：ASC 方言众多，本实现只保证 spec 描述形态 + 夹具；未覆盖变体（如 `CAN` 前缀行、`boe`/`bcs` 状态行、绝对/相对时间基准换算）作跳过处理，date 头不作时间基准解析。短行安全访问用 `toks.get(..)` 杜绝越界 panic。
 **验证:** `cargo test -p lumelog-can` 22 pass（+6 asc）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
 
+### 6. 通用正则源（先于 Task 3 执行：无外部工具依赖）
+**Files:**
+- Create: `crates/lumelog-can/src/source/regex_source.rs`（`RegexSource<I: Iterator<Item=Line>>`；`new(lines, pattern) -> Result<Self, CanError>`：`Regex::new` 失败→`RegexCompile`，`capture_names()` 缺 `id`/`data` 命名组→`BadRegex`（`ts` 可选）。`parse_line` 为自由函数（避开 `self.lines.by_ref()` 与 `&self` 借用冲突）；id 容忍 `0x/0X` 前缀、data 剔除空格/`:`/`,`/`-` 后走 `hex_to_bytes`、dlc=字节数（>64 跳过）、ts→f64）
+- Modify: `crates/lumelog-can/src/source/mod.rs`（`pub mod regex_source;` + `pub use RegexSource`）
+- Create: `crates/lumelog-can/tests/regex_source.rs`（7 例：含/缺命名组/编译错/自研格式解码/不匹配行跳过/dlc 由 hex 长度驱动/奇数或非 hex 跳过）
+
+**Why:** spec §7.3.3 通用正则源；Review Focus 5（缺 `id`/`data` 构建期即报错；行不匹配跳过计数；data hex 长度驱动 dlc）。修正：regex 1.13 无 `capture_index`→改 `capture_names().flatten()`；`unwrap_err()` 需 `T: Debug`→给 `RegexSource` derive Debug。
+**验证:** `cargo test -p lumelog-can` 29 pass（+7 regex）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
+
 ## 2026-10-24 — 界面参考 NoteLume：完整设计系统（feat/m-ui-notelume）
 
 **依据：** 用户指令「界面参考 https://gitee.com/hackerSnail/note-lume 」，经确认采纳「完整设计系统 + 三套主题」。NoteLume 与 LumeLog 同为 Tauri v2 + Rust + Vite + CodeMirror 6 无框架，取其视觉设计语言（非 Markdown 功能）。

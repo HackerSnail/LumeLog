@@ -4,6 +4,7 @@
 
 pub mod asc;
 pub mod candump;
+pub mod regex_source;
 
 use crate::frame::{Frame, SourceStats};
 
@@ -35,3 +36,4 @@ pub(crate) fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
 
 pub use asc::AscSource;
 pub use candump::CandumpSource;
+pub use regex_source::RegexSource;
