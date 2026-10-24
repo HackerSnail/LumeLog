@@ -2,6 +2,18 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-24 — Task 9：前端编辑模式（CodeMirror 6 + Tab + 状态栏）
+
+- 文件：`app/frontend/src/{ipc.ts,encoding-menu.ts,language.ts,editor.ts,tabs.ts,statusbar.ts,main.ts}` + `ipc.test.ts`；`package.json`（+@codemirror/*、@tauri-apps/plugin-dialog、vitest；+test 脚本）；`package-lock.json` 纳入版本库。
+- 为什么：实现 spec §8/§4.3/§9——把 Task 8 的 IPC 命令接成可用编辑界面：打开（对话框）→ ≤200MB 进 CodeMirror 编辑、Ctrl+S 保存（冲突/不可映射→确认框）、编码/EOL/语法下拉、dirty 圆点、多标签、行/列状态；>200MB 路由到占位提示（只读虚拟列表属 Task 10）。
+- 实现决策：
+  - `ipc.ts`：DTO 接口逐字对齐 `dto.rs` 的 serde camelCase；`IpcError{code,message,detail?}` → 中文文案表（覆盖 8 个引擎码 + `not_found/is_directory/permission_denied/unknown_doc/unknown_request/invalid_argument`）；`call<T>` 将任何 rejection 归一化为类型化 `IpcError`（携 `.zh`）；命令包装按 §9 名称，`Channel` 作最后一参；`loadAllText` 循环 `doc_chunk` 拼接全文。
+  - **Ruling（包名修正）**：plan Step1 的 `@codemirror/lang-c`、`@codemirror/lang-ini` 均不存在（npm 404）——CodeMirror 官方无 lang-c/lang-ini。C → `@codemirror/lang-cpp`（lezer-cpp 兼盖 C/C++）；INI → 用 `StreamLanguage` 手写简易 mode（不引第三方，合 spec §8 “简易 mode”）。
+  - **Ruling（编码切换）**：壳侧 `doc_open` 无 `set_encoding`/编码参数（自动探测），而 core `DocFile::set_encoding` 尚未暴露为 IPC → v1 用“重开 + 用新标签保存”近似（保留行位属 Task 11 GUI 完善）；专 `set_encoding` IPC + 滚动保留缓至 Task 11。
+  - 语法高亮：默认 PlainText + log 风格（时间戳/级别/数字/hex，StreamLanguage）+ JSON/C（lezer）+ 自写 INI；扩展名推断 + 状态栏手动切换。标签名以字符串传入（不直接依赖 @lezer/highlight 作声明依赖；HighlightStyle 用 `t.*`）。
+  - 未写 CSS 样式表（DOM 结构就位），视觉打磨 + 拖放打开 + 最近 20 文件菜单 + 冲突/不可映射三选完整弹窗缓至 Task 11 GUI 集成。
+- 验证：`npm install`（修正后）→ 成功；`npx vitest run` → 5 passed（`ipc_error_code_maps_to_zh_text` 含 8 码全覆盖 + detail 插值 + 未知码回退；`encoding_menu_labels_match_spec` 9 显示名逐个断言）；`npm run build`（`tsc --noEmit` strict + vite）→ 29 模块转换成功，0 error。Step4 `npm run tauri dev` GUI 手测 headless 不可行 → 依 plan 缓至 Task 11。core/app Rust 未动（Stage B 仅前端）。
+
 ## 2026-10-24 — Task 8（阶段 B）：Tauri v2 壳 + IPC 命令层
 
 - 文件：新增 `app/src-tauri/`（`Cargo.toml` 包名 `lumelog-app`、`build.rs`、`tauri.conf.json`、`capabilities/default.json`、`src/{main.rs,lib.rs,state.rs,dto.rs,commands.rs}`、`icons/icon.ico`）；新增 `app/frontend/` Vite vanilla-ts 骨架（`package.json`/`vite.config.ts`/`index.html`/`src/main.ts`/`tsconfig.json` + `dist/index.html` 占位供 `generate_context!`）；根 `Cargo.toml` members 增 `app/src-tauri`。
