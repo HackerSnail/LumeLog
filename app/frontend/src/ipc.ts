@@ -11,6 +11,8 @@ export interface DocInfo {
   size: number;
   mtimeMillis: number;
   encoding: string;
+  /** Dominant EOL the core detected on open — save back with this (spec §4.4). */
+  eol: string;
   lineCountEstimate: number;
   totalLines: number | null;
 }
@@ -85,7 +87,8 @@ export type IpcErrorCode =
   | "permission_denied"
   | "unknown_doc"
   | "unknown_request"
-  | "invalid_argument";
+  | "invalid_argument"
+  | "unknown";
 
 /**
  * Chinese copy for each IPC error code (Global Constraints: user-facing text is
@@ -108,6 +111,7 @@ const IPC_ERROR_ZH: Record<IpcErrorCode, string> = {
   unknown_doc: "文档已关闭或不存在",
   unknown_request: "该搜索请求已结束或不存在",
   invalid_argument: "参数无效",
+  unknown: "调用失败%s",
 };
 
 /** All codes the shell can surface — exported so the test can pin full coverage. */
@@ -116,9 +120,11 @@ export const IPC_ERROR_CODES = Object.keys(IPC_ERROR_ZH) as IpcErrorCode[];
 /** Map an IPC error code (+ optional detail) to a Chinese user-facing message. */
 export function ipcErrorZh(code: string, detail?: string): string {
   const template = (IPC_ERROR_ZH as Record<string, string | undefined>)[code];
-  const base = template ?? "发生未知错误";
-  const suffix = detail ? `：${detail}` : "";
-  return base.replace("%s", suffix);
+  const hasDetail = detail !== undefined && detail !== "";
+  const suffix = hasDetail ? `：${detail}` : "";
+  if (template === undefined) return `发生未知错误${suffix}`;
+  if (template.includes("%s")) return template.replace("%s", suffix);
+  return template;
 }
 
 /** Normalize whatever `invoke` rejected with into an `IpcErrorPayload`. */
@@ -132,7 +138,7 @@ export function toIpcError(err: unknown): IpcErrorPayload {
     const e = err as IpcErrorPayload;
     return { code: e.code, message: e.message, detail: e.detail };
   }
-  return { code: "io", message: String(err) };
+  return { code: "unknown", message: String(err) };
 }
 
 /** A rejected IPC call, carrying the structured payload for the UI. */
@@ -182,11 +188,9 @@ export function docChunk(
   docId: number,
   lineStart: number,
   lineCount: number,
-  onData: (c: ChunkPayload) => void,
+  onData: Channel<ChunkPayload>,
 ): Promise<void> {
-  const ch = new Channel<ChunkPayload>();
-  ch.onmessage = onData;
-  return call<void>("doc_chunk", { docId, lineStart, lineCount, onData: ch });
+  return call<void>("doc_chunk", { docId, lineStart, lineCount, onData });
 }
 
 export function docSave(args: {
@@ -240,10 +244,44 @@ export async function loadAllText(
   let invalid = 0;
   for (let start = 0; start < totalLines; start += blockLines) {
     const count = Math.min(blockLines, totalLines - start);
-    await docChunk(docId, start, count, (c) => {
+    const ch = new Channel<ChunkPayload>();
+    ch.onmessage = (c) => {
       text += c.text;
       invalid += c.invalidCount;
-    });
+    };
+    // No manual release: the JS `Channel` unregisters its callback as soon as
+    // the Rust command returns and drops its `Channel` (the `end` marker).
+    await docChunk(docId, start, count, ch);
   }
   return { text, invalidCount: invalid };
+}
+
+/**
+ * Re-declare a document's encoding and re-read `[0, totalLines)` in one shell
+ * round-trip. The Rust `doc_set_encoding` clears the core cache, re-reads the
+ * first block (delivered over `onData`, its `startLine` is 0), and returns the
+ * updated `DocInfo` whose `encoding` is the now-authoritative label (spec §8).
+ */
+export function docSetEncoding(
+  docId: number,
+  encoding: string,
+  totalLines: number,
+  onData: (c: ChunkPayload) => void,
+): Promise<DocInfo> {
+  const ch = new Channel<ChunkPayload>();
+  ch.onmessage = onData;
+  // The command's return drops the Rust `Channel`, which fires the `end` marker
+  // and unregisters this JS callback — nothing to release manually.
+  return call<DocInfo>("doc_set_encoding", {
+    docId,
+    encoding,
+    lineStart: 0,
+    lineCount: Math.max(1, Math.min(20000, totalLines)),
+    onData: ch,
+  });
+}
+
+/** Release the shell-side document (closes handle + frees index/cache, I5). */
+export function docClose(docId: number): Promise<void> {
+  return call<void>("doc_close", { docId });
 }

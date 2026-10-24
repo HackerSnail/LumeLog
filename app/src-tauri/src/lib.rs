@@ -16,6 +16,8 @@ pub fn run() {
             commands::app_ping,
             commands::doc_open,
             commands::doc_chunk,
+            commands::doc_set_encoding,
+            commands::doc_close,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,

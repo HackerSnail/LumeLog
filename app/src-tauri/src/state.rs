@@ -40,6 +40,13 @@ impl AppDocs {
         self.docs.lock().unwrap().keys().copied().collect()
     }
 
+    /// Drop a document; returns whether the id was present. The last `Arc` goes
+    /// away here, so the `DocFile` (file handle + line index + LRU cache) is
+    /// released — repeated open/close no longer leaks documents.
+    pub fn remove(&self, id: u64) -> bool {
+        self.docs.lock().unwrap().remove(&id).is_some()
+    }
+
     /// Begin a search: mint a request id and its (shared) cancel flag.
     pub fn begin_search(&self) -> (u64, Arc<AtomicBool>) {
         let id = Self::next_id(&self.next_req_id);

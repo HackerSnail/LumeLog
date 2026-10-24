@@ -44,6 +44,7 @@ pub fn doc_open(
 
     let size = doc.size();
     let encoding = doc.encoding().as_str().to_string();
+    let eol = eol_str(doc.eol_style());
     let lines = doc.line_count() as u64;
     let mtime_millis = doc
         .mtime()
@@ -57,6 +58,7 @@ pub fn doc_open(
         size,
         mtime_millis,
         encoding,
+        eol,
         line_count_estimate: lines,
         total_lines: Some(lines),
     };
@@ -239,6 +241,78 @@ pub fn search_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Resul
             "unknown_request",
             format!("no in-flight search {request_id}"),
         ))
+    }
+}
+
+/// Re-declare a document's encoding label (spec §8 encoding switch). Clears the
+/// core chunk cache and re-reads `[line_start, line_start+line_count)` so the
+/// front end re-renders text decoded under the new label. This is a genuine
+/// re-decode, not a save-time relabel — the reported `encoding` is the truth.
+#[tauri::command]
+pub fn doc_set_encoding(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+    encoding: String,
+    line_start: u32,
+    line_count: u32,
+    on_data: Channel<ChunkPayload>,
+) -> Result<DocInfo, IpcError> {
+    let label = EncodingLabel::from_label(&encoding)
+        .ok_or_else(|| IpcError::new("encoding_unsupported", format!("unknown encoding '{encoding}'")))?;
+    let doc_arc = state
+        .get(doc_id)
+        .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
+    let mut doc = doc_arc
+        .lock()
+        .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+    doc.set_encoding(label);
+
+    let chunk = doc
+        .chunk_at(line_start as usize, line_count as usize)
+        .map_err(IpcError::from_core)?;
+    on_data
+        .send(ChunkPayload {
+            start_line: chunk.start_line as u64,
+            text: chunk.text,
+            invalid_count: chunk.invalid_count as u64,
+        })
+        .map_err(|e| IpcError::new("io", e.to_string()))?;
+
+    Ok(DocInfo {
+        doc_id,
+        size: doc.size(),
+        mtime_millis: doc
+            .mtime()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        encoding: doc.encoding().as_str().to_string(),
+        eol: eol_str(doc.eol_style()),
+        line_count_estimate: doc.line_count() as u64,
+        total_lines: Some(doc.line_count() as u64),
+    })
+}
+
+/// Release a document the front end no longer shows (tab close / rejected
+/// open). Drops the `DocFile` (closes the handle, frees the line index + cache)
+/// so opening/closing repeatedly does not leak documents (I5).
+#[tauri::command]
+pub fn doc_close(state: tauri::State<'_, AppDocs>, doc_id: u64) -> Result<(), IpcError> {
+    if state.remove(doc_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_doc",
+            format!("no document {doc_id}"),
+        ))
+    }
+}
+
+fn eol_str(e: EolStyle) -> String {
+    match e {
+        EolStyle::Lf => "lf".to_string(),
+        EolStyle::Crlf => "crlf".to_string(),
+        EolStyle::Mixed => "mixed".to_string(),
     }
 }
 

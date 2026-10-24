@@ -16,6 +16,10 @@ pub struct DocInfo {
     pub size: u64,
     pub mtime_millis: u64,
     pub encoding: String,
+    /// Dominant line-ending style the core detected on open (spec §4.4). The
+    /// front end MUST save back with this value (unless the user overrides it)
+    /// so a CRLF bench log is not silently rewritten to LF.
+    pub eol: String,
     pub line_count_estimate: u64,
     pub total_lines: Option<u64>,
 }

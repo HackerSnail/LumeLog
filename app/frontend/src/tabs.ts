@@ -87,20 +87,13 @@ export class TabStrip {
     const e = this.entries.get(docId);
     if (!e) return;
     const dirty = e.handle.isDirty();
+    e.dot.textContent = dirty ? "●" : ""; // no CSS dependency (I1)
     e.dot.classList.toggle("visible", dirty);
     this.cb.onDirtyChanged?.(docId, dirty);
   }
 
-  refreshActiveDirty(): void {
-    if (this.activeId != null) this.refreshDirty(this.activeId);
-  }
-
   get(docId: number): EditorHandle | undefined {
     return this.entries.get(docId)?.handle;
-  }
-
-  list(): TabInfo[] {
-    return this.order.map((id) => this.entries.get(id)!.info);
   }
 
   /** Ask the app to close (app decides on save-if-dirty). */
@@ -121,11 +114,8 @@ export class TabStrip {
       const next = this.order[this.order.length - 1] ?? null;
       this.activeId = next;
       if (next != null) this.activate(next);
+      else this.cb.onActivate?.(-1); // no tab left — app clears the status bar
     }
-  }
-
-  closeAll(): void {
-    for (const id of [...this.order]) this.remove(id);
   }
 }
 

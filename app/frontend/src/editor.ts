@@ -1,10 +1,11 @@
 //! Edit-mode editor (spec §4.3 / §8, ≤200MB path). `openEditable` pulls the
 //! whole document through `doc_chunk` and mounts a CodeMirror 6 `EditorView`.
 //! Exposes a small handle the tab/status-bar layer drives; no IPC knowledge
-//! lives here beyond `loadAllText`. EOL is a save-time concern (the shell owns
-//! line-ending write-back), so it is carried on the handle, not the buffer.
+//! lives here beyond `loadAllText`. EOL is a save-time concern carried on the
+//! handle (the shell owns line-ending write-back), seeded from the core's
+//! detected style so a CRLF file is not silently rewritten to LF (spec §4.4).
 
-import { EditorState } from "@codemirror/state";
+import { EditorState, Compartment } from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -32,6 +33,9 @@ export interface EditorHandle {
   getText(): string;
   isDirty(): boolean;
   markSaved(): void;
+  /** Replace the whole buffer (encoding re-decode re-render); marks dirty. */
+  replaceText(text: string): void;
+  /** Reconfigure only the language extension — keeps undo history + scroll. */
   setMode(ext: string): void;
   setEol(eol: string): void;
   eol(): string;
@@ -43,8 +47,12 @@ export interface EditorHandle {
 export interface OpenEditableOpts {
   parent: HTMLElement;
   info: DocInfo;
-  filename: string;
-  eol: string;
+  /** File extension (no dot) used to pick the starting syntax mode. */
+  ext: string;
+  /** Fires once on the first user edit (drives the tab dirty dot). */
+  onDirty?: () => void;
+  /** Decoded U+FFFD replacement count from the full load (spec §5). */
+  onInvalid?: (count: number) => void;
 }
 
 /**
@@ -54,18 +62,24 @@ export interface OpenEditableOpts {
  */
 export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle> {
   const total = opts.info.totalLines ?? opts.info.lineCountEstimate;
-  const { text } = await loadAllText(opts.info.docId, total);
+  const { text, invalidCount } = await loadAllText(opts.info.docId, total);
+  opts.onInvalid?.(invalidCount);
 
   let dirty = false;
-  let eol = opts.eol;
-  // Only user edits flip dirty: the listener is installed after construction,
-  // so the initial doc load never counts as a change.
+  let eol = opts.info.eol || "lf";
+  // Language lives in a Compartment so a mode switch reconfigures it in place —
+  // `setState` would drop undo history, scroll, and wrongly mark the doc dirty.
+  const langConf = new Compartment();
+
   const onDocChanged = () => {
-    dirty = true;
+    if (!dirty) {
+      dirty = true;
+      opts.onDirty?.();
+    }
   };
 
   const view = new EditorView({
-    state: buildState(text, opts, onDocChanged),
+    state: buildState(text, opts.ext, langConf, onDocChanged),
     parent: opts.parent,
   });
 
@@ -77,13 +91,20 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     markSaved: () => {
       dirty = false;
     },
-    setMode: (ext: string) => {
-      view.setState(buildState(view.state.doc.toString(), opts, onDocChanged, ext));
+    replaceText: (next: string) => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: next },
+      });
       dirty = true;
+      opts.onDirty?.();
+    },
+    setMode: (ext: string) => {
+      view.dispatch({ effects: langConf.reconfigure(modeForExtension(ext) ?? []) });
     },
     setEol: (next: string) => {
       eol = next;
       dirty = true;
+      opts.onDirty?.();
     },
     eol: () => eol,
     focus: () => view.focus(),
@@ -94,11 +115,10 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
 
 function buildState(
   text: string,
-  opts: OpenEditableOpts,
+  ext: string,
+  langConf: Compartment,
   onDocChanged: () => void,
-  modeExt?: string,
 ): EditorState {
-  const ext = modeExt ?? opts.filename;
   const lang = modeForExtension(ext);
   return EditorState.create({
     doc: text,
@@ -115,7 +135,11 @@ function buildState(
       EditorView.lineWrapping,
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
       search(),
-      lang ?? syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      // Language (may be none → PlainText) and the default highlight style coexist:
+      // `lang-*` packages only emit tags, they carry no style, so the style must
+      // always be present (spec §8).
+      langConf.of(lang ?? []),
+      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) onDocChanged();
       }),

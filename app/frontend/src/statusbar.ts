@@ -3,7 +3,7 @@
 //! label (see `main.ts` `reopenWithEncoding`); this widget only reports the
 //! choice — it never mutates the editor itself.
 
-import { ENCODINGS } from "./encoding-menu";
+import { ENCODINGS, EOL_OPTIONS } from "./encoding-menu";
 import { AVAILABLE_MODES, type ModeChoice } from "./language";
 
 export interface StatusbarCallbacks {
@@ -12,7 +12,7 @@ export interface StatusbarCallbacks {
   onMode?: (mode: ModeChoice) => void;
 }
 
-const EOL_CHOICES = ["LF", "CRLF", "MIXED"] as const;
+const EOL_CHOICES = EOL_OPTIONS;
 
 export class Statusbar {
   private readonly root: HTMLElement;
@@ -53,7 +53,27 @@ export class Statusbar {
 
   setEncoding(label: string): void {
     const i = ENCODINGS.findIndex((e) => e.label === label);
-    this.encSel.selectedIndex = i >= 0 ? i : 0;
+    if (i >= 0) {
+      // Drop any transient "raw" option from a previous unknown label.
+      if (this.encSel.dataset.raw === "1") {
+        this.encSel.querySelector("option[data-raw]")?.remove();
+        this.encSel.dataset.raw = "";
+      }
+      this.encSel.selectedIndex = i;
+    } else {
+      // Unknown (not one of the 9): show it verbatim rather than lying UTF-8.
+      let opt = this.encSel.querySelector("option[data-raw]") as HTMLOptionElement | null;
+      if (!opt) {
+        opt = document.createElement("option");
+        opt.dataset.raw = "1";
+        opt.disabled = true;
+        this.encSel.append(opt);
+      }
+      opt.value = label;
+      opt.textContent = label;
+      this.encSel.value = label;
+      this.encSel.dataset.raw = "1";
+    }
   }
 
   setEol(eol: string): void {

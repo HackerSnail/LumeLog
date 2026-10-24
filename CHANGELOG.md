@@ -14,6 +14,22 @@
   - 未写 CSS 样式表（DOM 结构就位），视觉打磨 + 拖放打开 + 最近 20 文件菜单 + 冲突/不可映射三选完整弹窗缓至 Task 11 GUI 集成。
 - 验证：`npm install`（修正后）→ 成功；`npx vitest run` → 5 passed（`ipc_error_code_maps_to_zh_text` 含 8 码全覆盖 + detail 插值 + 未知码回退；`encoding_menu_labels_match_spec` 9 显示名逐个断言）；`npm run build`（`tsc --noEmit` strict + vite）→ 29 模块转换成功，0 error。Step4 `npm run tauri dev` GUI 手测 headless 不可行 → 依 plan 缓至 Task 11。core/app Rust 未动（Stage B 仅前端）。
 
+### Task 9 CodeReview：首轮 SPEC ❌ / Changes requested → fix round 1（2 Critical + 5 Important + 6 Minor + Nit 全修）
+
+首轮 CodeReview（区间 17095e2..064887e）裁定 2 Critical / 5 Important / 6 Minor / 6 Nit。本轮 inline 全修，逐条：
+- **C1（必修，spec §4.4）**：`editor.ts` 硬编码 `eol:"LF"` 播种 → 打开 CRLF 文件一次保存即静默改写行尾。修：`doc_open` 于 `state.insert(doc)` 前捕获 `eol_str(doc.eol_style())`，`DocInfo` 新增 `eol` 字段，前端 `eol` 从 `info.eol` 播种（不再硬编码），`docStates.eol` 同步。
+- **C2（必修，非可推迟近似）**：编码切换把用户选的标签直接写进 `docStates.encoding` 却不重解码 → 后续 `doc_save` 用错标签静默转码损坏文件，且无 dirty 检查丢改动。修：新增 IPC 命令 `doc_set_encoding`（壳侧 `set_encoding` 清缓存 + `chunk_at` 重读头块 + 返回权威 `DocInfo.encoding`）；前端 `changeEncoding` 走真重解码：dirty 时 `ask` 确认丢弃 → `docSetEncoding` → `loadAllText` → `replaceText`，保存标签恒等于实际解码标签。旧“近似”Ruling 作废。
+- **I1**：dirty 圆点不更新——`tabs.refreshDirty` 未写圆点文本。修：`e.dot.textContent = dirty ? "●" : ""`，并在 `openEditable` 接 `onDirty` 首次编辑即刷新。
+- **I2**：`setMode` 用 `setState` 重建 state → 丢 undo/scroll 且误置 dirty。修：语言放入 `Compartment`（`@codemirror/state`），`setMode` 改 `view.dispatch({effects: langConf.reconfigure(...)})`，不置 dirty。
+- **I3**：高亮有 tag 无颜色（lang-* 只 emit tags）→ 实际不着色。修：`editor.ts` 挂 `syntaxHighlighting(defaultHighlightStyle,{fallback:true})` 与语言并存；`language.ts` 自写 log/INI 用 `HighlightStyle.define` 内联 color，时间戳 token 只吃到末尾（不再 skipToEnd 吞掉同行级别/数字）。
+- **I4**：`window.confirm` 在 WKWebView/webkit2gtk 不可靠（常返 false）。修：保存冲突/不可映射、编码切换、关闭脏文档一律改用 `@tauri-apps/plugin-dialog` 的异步 `ask()`。
+- **I5**：文档从不释放 → 壳侧 `DocFile`（索引+缓存）泄漏。修：新增 IPC `doc_close`（`state.remove(doc_id)`）；关闭标签、>200MB 拒开路径均调 `docClose`。
+- **Minor**：M1 `ipcErrorZh` 去多余“：”且 detail 不丢 + 补 `unknown` 码；M2 非结构化 rejection 归 `{code:"unknown"}`；M4 `tabs` 删死码 `list/closeAll/refreshActiveDirty`，空标签时 `onActivate(-1)`；M5 保存报告 `replaceCount>0` → toast；`encoding-menu.ts` 删死码 `inferEncoding/isSupportedEncoding/EolChoice/EXT_TO_ENCODING`（`EOL_OPTIONS` 作单一真值，`statusbar` 复用）；totalLines 保存后按 `doc.lines` 刷新。
+- **API 现实订正（Channel.release）**：首轮曾按“Channel 泄漏”加 `ch.release()`，但本版本 `@tauri-apps/api` 的 `Channel` 无 `release()`——命令返回时 Rust 侧 drop 即发 `end` 标记、JS 自动 `unregisterCallback`。移除错误的 `release()` 调用，注释说明自愈语义。
+- **search 缺口补齐**：Produces 要求的前端搜索本轮落地——`openSearchFlow`/`runSearch`（`searchRun mode:"literal"`）/`renderSearchPanel`（命中行 + snippet + 点击 jumpToLine + 取消/关闭）+ `Ctrl+Shift+F`。
+- 验证（fix round 1）：`npx vitest run` → 5 passed；`npm run build`（tsc strict）→ 29 模块 0 error；`cargo clippy -p lumelog-app --all-targets -- -D warnings` → 干净；`cargo test -p lumelog-core` → 57 lib + 9 cli(+1 ignored) + 8 docfile + 2 proptest 全 passed。GUI 手测/GBK 往返/实际高亮渲染仍 headless 不可验 → 依 plan 缓至 Task 11。
+
+
 ## 2026-10-24 — Task 8（阶段 B）：Tauri v2 壳 + IPC 命令层
 
 - 文件：新增 `app/src-tauri/`（`Cargo.toml` 包名 `lumelog-app`、`build.rs`、`tauri.conf.json`、`capabilities/default.json`、`src/{main.rs,lib.rs,state.rs,dto.rs,commands.rs}`、`icons/icon.ico`）；新增 `app/frontend/` Vite vanilla-ts 骨架（`package.json`/`vite.config.ts`/`index.html`/`src/main.ts`/`tsconfig.json` + `dist/index.html` 占位供 `generate_context!`）；根 `Cargo.toml` members 增 `app/src-tauri`。

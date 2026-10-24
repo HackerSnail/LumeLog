@@ -29,28 +29,10 @@ export const ENCODINGS: readonly EncodingOption[] = [
 /** The 9 labels, in order — handy for building a `<select>`. */
 export const ENCODING_LABELS = ENCODINGS.map((e) => e.label);
 
-/** Line-ending options surfaced next to the encoding (spec §4.4). */
+/** Line-ending options surfaced next to the encoding (spec §4.4). Single source
+ * of truth — the status bar renders these; `main.ts` seeds the current value
+ * from the core-detected `DocInfo.eol`. */
 export const EOL_OPTIONS = ["LF", "CRLF", "MIXED"] as const;
-export type EolChoice = (typeof EOL_OPTIONS)[number];
-
-const EXT_TO_ENCODING: Record<string, string> = {
-  txt: "UTF-8",
-  log: "UTF-8",
-  md: "UTF-8",
-  json: "UTF-8",
-  csv: "UTF-8",
-  ini: "UTF-8",
-  c: "UTF-8",
-  h: "UTF-8",
-  can: "UTF-8",
-  dbc: "UTF-8",
-  gbk: "GBK",
-  gb: "GB18030",
-  big5: "BIG5",
-  ble: "BIG5",
-  sjis: "Shift-JIS",
-  lat: "ISO-8859-1",
-};
 
 /** Lowercased extension of a path, without the dot ("" if none). */
 export function extOf(path: string): string {
@@ -58,18 +40,4 @@ export function extOf(path: string): string {
   const dot = base.lastIndexOf(".");
   if (dot <= 0) return "";
   return base.slice(dot + 1).toLowerCase();
-}
-
-/**
- * Best-guess encoding label from a filename. This is only a starting hint — the
- * shell's detection (`doc_open`) is authoritative and the user can override via
- * the dropdown. Unknown extensions default to UTF-8.
- */
-export function inferEncoding(path: string): string {
-  return EXT_TO_ENCODING[extOf(path)] ?? "UTF-8";
-}
-
-/** Whether a label is one of the 9 supported encodings. */
-export function isSupportedEncoding(label: string): boolean {
-  return (ENCODING_LABELS as readonly string[]).includes(label);
 }

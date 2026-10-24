@@ -2,9 +2,11 @@
 //! JSON / INI / C. Default is PlainText (no extension). Extension inference
 //! picks a starting mode; the status bar can override it per document.
 //!
-//! Tag names are passed as strings (resolved via lezer's `tags` inside the
-//! stream parser) so we don't import `@lezer/highlight` directly — it isn't a
-//! declared dependency, and the default highlight style covers these classes.
+//! Highlight colors are inline (`color`/`fontWeight`), not CSS classes, so the
+//! log/INI styles work without a stylesheet — CodeMirror's `HighlightStyle`
+//! emits its own managed CSS. JSON/C get colours from `defaultHighlightStyle`
+//! (mounted alongside the language in `editor.ts`), which maps the tags their
+//! lezer parsers emit.
 
 import {
   HighlightStyle,
@@ -21,9 +23,13 @@ const logLanguage = StreamLanguage.define<{ inQuotes: boolean }>({
   startState: () => ({ inQuotes: false }),
   copyState: (s) => ({ inQuotes: s.inQuotes }),
   token(stream, state) {
-    if (stream.sol() && stream.match(/^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}/, false)) {
-      stream.skipToEnd();
-      return "className"; // timestamp → distinctive class colour
+    // Timestamp prefix only — consume just the timestamp, not the whole line,
+    // so the level / numbers later on the same line still get coloured.
+    if (
+      stream.sol() &&
+      stream.match(/^\[?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?\]?/)
+    ) {
+      return "className";
     }
     if (stream.eatSpace()) return null;
     if (state.inQuotes) {
@@ -55,19 +61,17 @@ const logLanguage = StreamLanguage.define<{ inQuotes: boolean }>({
 /** Minimal INI: `[sections]`, `key = value`, `#`/`;` comments. */
 const iniLanguage = StreamLanguage.define({
   token(stream) {
-    if (stream.sol() && stream.peek() !== undefined) {
-      if (/^[#;]/.test(stream.string[stream.pos])) {
+    if (stream.sol()) {
+      if (/^[#;]/.test(stream.string.slice(stream.pos))) {
         stream.skipToEnd();
         return "comment";
       }
-      if (stream.match(/^\[[^\]]*\]/, false)) {
-        stream.skipToEnd();
-        return "className";
-      }
+      if (stream.match(/^\[[^\]]*\]/)) return "className";
       if (stream.match(/^[^=\s]+(?=\s*=)/)) return "propertyName";
     }
     if (stream.eatSpace()) return null;
-    if (stream.match(/#/) || stream.match(/;/)) {
+    if (stream.eat("=")) return "operator";
+    if (/[#;]/.test(stream.string[stream.pos])) {
       stream.skipToEnd();
       return "comment";
     }
@@ -77,51 +81,43 @@ const iniLanguage = StreamLanguage.define({
   },
 });
 
-/** Highlight style mapping the log/INI tag classes to colours. */
-const logHighlight = HighlightStyle.define([
-  { tag: t.keyword, class: "cm-log-level" },
-  { tag: t.className, class: "cm-log-ts" },
-  { tag: t.number, class: "cm-log-num" },
-  { tag: t.string, class: "cm-log-str" },
-  { tag: t.comment, class: "cm-ini-comment" },
-  { tag: t.propertyName, class: "cm-ini-key" },
+/** Inline highlight style for the log / INI stream modes (no CSS needed). */
+const streamHighlight = HighlightStyle.define([
+  { tag: t.keyword, color: "#b25000", fontWeight: "bold" }, // log level
+  { tag: t.className, color: "#708090" }, // timestamp / INI [section]
+  { tag: t.number, color: "#1a6fb0" }, // number / hex
+  { tag: t.string, color: "#0a7d33" }, // value / quoted string
+  { tag: t.comment, color: "#8a8a8a", fontStyle: "italic" },
+  { tag: t.propertyName, color: "#800080" }, // INI key
+  { tag: t.operator, color: "#666" },
 ]);
 
 /**
  * Resolve a syntax mode for an extension. `""`/unknown → null = PlainText.
- * `log` returns the log language plus its highlight; JSON/C use their lezer
- * parsers (highlight comes from the language's own style); INI uses the
- * hand-written stream mode.
+ * `log`/`ini` return their stream language + the inline highlight; JSON/C use
+ * their lezer parsers (colour supplied by `defaultHighlightStyle` in editor.ts).
  */
 export function modeForExtension(ext: string): LanguageSupport | null {
-  switch (ext.toLowerCase()) {
+  const e = ext.toLowerCase();
+  switch (e) {
     case "json":
       return json();
     case "c":
     case "h":
+    case "cpp":
+    case "cc":
       return cpp();
     case "ini":
     case "cfg":
     case "conf":
-      return new LanguageSupport(iniLanguage, [syntaxHighlighting(logHighlight)]);
+      return new LanguageSupport(iniLanguage, [syntaxHighlighting(streamHighlight)]);
     case "log":
-    case "txt":
+      return new LanguageSupport(logLanguage, [syntaxHighlighting(streamHighlight)]);
     default:
-      // `.log` gets the log style; plain/unknown stays unstyled (PlainText).
-      if (ext.toLowerCase() === "log") {
-        return new LanguageSupport(logLanguage, [syntaxHighlighting(logHighlight)]);
-      }
-      return null;
+      return null; // PlainText
   }
 }
 
 /** The set of languages the status-bar switcher offers. */
 export const AVAILABLE_MODES = ["auto", "plain", "log", "json", "ini", "c"] as const;
 export type ModeChoice = (typeof AVAILABLE_MODES)[number];
-
-/** Map an explicit mode choice (or "" → auto) to a `modeForExtension` ext key. */
-export function modeToExt(choice: ModeChoice, filename: string): string {
-  if (choice === "auto") return filename; // caller passes the raw extension
-  if (choice === "plain") return "";
-  return choice;
-}
