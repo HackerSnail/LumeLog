@@ -67,11 +67,20 @@ impl EncodingLabel {
 }
 
 /// Byte-order-mark length for the label (0 if none expected).
-fn bom_len(label: EncodingLabel) -> usize {
+pub fn bom_len(label: EncodingLabel) -> usize {
     match label {
         EncodingLabel::Utf8Bom => 3,
         EncodingLabel::Utf16Le | EncodingLabel::Utf16Be => 2,
         _ => 0,
+    }
+}
+
+/// How many leading bytes `decode_all` would strip as a BOM from `bytes`.
+pub fn leading_bom_len(label: EncodingLabel, bytes: &[u8]) -> usize {
+    if has_bom(label, bytes) {
+        bom_len(label)
+    } else {
+        0
     }
 }
 
@@ -85,7 +94,7 @@ fn strip_bom(label: EncodingLabel, bytes: &[u8]) -> &[u8] {
     }
 }
 
-fn has_bom(label: EncodingLabel, bytes: &[u8]) -> bool {
+pub(crate) fn has_bom(label: EncodingLabel, bytes: &[u8]) -> bool {
     match label {
         EncodingLabel::Utf8Bom => bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
         EncodingLabel::Utf16Le => bytes.starts_with(&[0xFF, 0xFE]),
