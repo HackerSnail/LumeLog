@@ -108,6 +108,7 @@ fn save_roundtrips_gbk_from_stdin() {
     let mut child = lumelog()
         .args(["save", "--file", tmp.to_str().unwrap(), "--encoding", "GBK"])
         .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     // Replace the document with a short Chinese line; save re-encodes to GBK.
@@ -152,6 +153,27 @@ fn missing_file_is_error_code_1() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+}
+
+/// A missing required flag is a *usage* error (exit 2), not a runtime error
+/// (exit 1) — the M0 exit-code contract classifies it as usage.
+#[test]
+fn missing_required_flag_is_usage_exit_2() {
+    let out = lumelog().arg("open").output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("missing --file"), "stderr: {err}");
+}
+
+#[test]
+fn bad_flag_value_is_usage_exit_2() {
+    ensure_sample();
+    let out = lumelog()
+        .args(["open", "--file", "tests/data/sample_gbk.log", "--head", "abc"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--head must be a number"));
 }
 
 /// Manual M0 P2/P3 smoke (opt-in): builds a ~1 GiB log and times the CLI

@@ -31,6 +31,26 @@ const USAGE: &str = "usage: lumelog <open|search|save> --file PATH [options]\n\
        search --pattern STR [--encoding LABEL] [--regex] [--ignore-case] [--max N]\n\
        save   [--encoding LABEL] [--eol LF|CRLF] [--out PATH]   (reads new text from stdin)\n";
 
+/// A CLI failure. `Usage` is a bad or missing argument (exit code 2, the M0
+/// acceptance contract for usage errors); `Engine` is a runtime error surfaced
+/// by the core crate or the filesystem (exit code 1).
+enum CliError {
+    Usage(String),
+    Engine(CoreError),
+}
+
+impl From<CoreError> for CliError {
+    fn from(e: CoreError) -> Self {
+        CliError::Engine(e)
+    }
+}
+
+impl From<std::io::Error> for CliError {
+    fn from(e: std::io::Error) -> Self {
+        CliError::Engine(e.into())
+    }
+}
+
 /// A parsed command line: a flat key/value bag plus the subcommand.
 struct Args {
     sub: String,
@@ -75,7 +95,11 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
+        Err(CliError::Usage(msg)) => {
+            eprintln!("lumelog: {msg}\n{USAGE}");
+            ExitCode::from(2)
+        }
+        Err(CliError::Engine(e)) => {
             eprintln!("lumelog: {e}");
             ExitCode::from(1)
         }
@@ -109,21 +133,21 @@ fn parse(argv: &[String]) -> Option<Args> {
     Some(Args { sub, flags })
 }
 
-fn open_doc(args: &Args) -> Result<DocFile, CoreError> {
+fn open_doc(args: &Args) -> Result<DocFile, CliError> {
     let path = args
         .get("file")
-        .ok_or_else(|| CoreError::Encoding("missing --file".to_string()))?;
+        .ok_or_else(|| CliError::Usage("missing --file".to_string()))?;
     let mut doc = DocFile::open(Path::new(path), SIZE_LIMIT)?;
     if let Some(label) = args.get("encoding") {
         let label = EncodingLabel::from_label(label)
-            .ok_or_else(|| CoreError::Encoding(format!("unknown encoding '{label}'")))?;
+            .ok_or_else(|| CliError::Usage(format!("unknown encoding '{label}'")))?;
         doc.set_encoding(label);
     }
     Ok(doc)
 }
 
-fn cmd_open(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
-    let doc = open_doc(args)?;
+fn cmd_open(args: &Args, out: &mut impl Write) -> Result<(), CliError> {
+    let mut doc = open_doc(args)?;
     if args.has("line-count") {
         writeln!(out, "{}", doc.line_count())?;
         return Ok(());
@@ -139,8 +163,9 @@ fn cmd_open(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
     if let Some(head) = args.get("head") {
         let n: usize = head
             .parse()
-            .map_err(|_| CoreError::Encoding("--head must be a number".to_string()))?;
-        let mut doc = open_doc(args)?;
+            .map_err(|_| CliError::Usage("--head must be a number".to_string()))?;
+        // Reuse the already-opened doc — a second open_doc would rebuild the
+        // whole line index just to obtain a mutable handle for chunk_at.
         let chunk = doc.chunk_at(0, n)?;
         for line in chunk.text.split('\n').take(n) {
             writeln!(out, "{line}")?;
@@ -149,10 +174,10 @@ fn cmd_open(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn cmd_search(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
+fn cmd_search(args: &Args, out: &mut impl Write) -> Result<(), CliError> {
     let pattern_text = args
         .get("pattern")
-        .ok_or_else(|| CoreError::Encoding("missing --pattern".to_string()))?
+        .ok_or_else(|| CliError::Usage("missing --pattern".to_string()))?
         .to_string();
     let mut doc = open_doc(args)?;
     let encoding = doc.encoding();
@@ -165,7 +190,7 @@ fn cmd_search(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
     let max: Option<u64> = match args.get("max") {
         Some(v) => Some(
             v.parse()
-                .map_err(|_| CoreError::Encoding("--max must be a number".to_string()))?,
+                .map_err(|_| CliError::Usage("--max must be a number".to_string()))?,
         ),
         None => None,
     };
@@ -209,7 +234,7 @@ fn cmd_search(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
     Ok(())
 }
 
-fn cmd_save(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
+fn cmd_save(args: &Args, out: &mut impl Write) -> Result<(), CliError> {
     let mut text = String::new();
     std::io::stdin().read_to_string(&mut text)?;
     let mut doc = open_doc(args)?;
@@ -220,7 +245,7 @@ fn cmd_save(args: &Args, out: &mut impl Write) -> Result<(), CoreError> {
             "lf" => EolStyle::Lf,
             "crlf" => EolStyle::Crlf,
             other => {
-                return Err(CoreError::Encoding(format!("unknown --eol '{other}'")));
+                return Err(CliError::Usage(format!("unknown --eol '{other}'")));
             }
         },
         None => doc.eol_style(),

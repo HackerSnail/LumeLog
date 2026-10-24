@@ -13,6 +13,15 @@
 - 验证：`cargo test -p lumelog-core --test cli_smoke` → 7 passed（`open_prints_summary_json`/`open_line_count_flag_prints_only_count`/`search_counts_literal_gbk_hits`(20 命中)/`save_roundtrips_gbk_from_stdin`(GBK 重编码逐字节一致)/`no_args_exits_with_code_2`/`unknown_subcommand_exits_2`/`missing_file_is_error_code_1`）；全量 `cargo test -p lumelog-core` → 51 lib + 7 cli + 8 docfile + chunk/encoding proptest 全 passed；`cargo clippy -p lumelog-core --all-targets -D warnings` 无告警。
 - **P3 参考（`open_1gb_wall_time` --ignored）**：`lumelog open` 打开 971,234,620 字节（16,777,217 行）合成日志，含进程内整体行索引构建，wall **≈ 590 ms**（release）。CLI 路径首屏即返回摘要 JSON，索引一次性 build；UI 级流式首屏验收在 Task 11。
 
+### Task 7 CodeReview：Approved（无 Critical/Important）+ 应用 3 项 Minor polish
+
+首轮 CodeReview（区间 81dc22d..3be2040，含实测退码与夹具字节校验）裁定 **Approved**：规范全达标、无 Critical/Important、5 项 Minor。其中 3 项有实质价值，作为 post-approval polish（Rulings, not stalls）当场修复：
+- **Minor-2**（真实缺陷）：`cmd_open` 的 `--head` 分支二次 `open_doc` 重开文件、重建整个行索引只为拿 `&mut` 句柄 → 改为单次 `let mut doc` 复用同一句柄。
+- **Minor-3**（退码契约正确性）：缺 `--file`/`--pattern` 等必填 flag 与 `--head abc`/`--max x`/`--eol zzz`/未知 `--encoding` 这类坏值，原借 `CoreError::Encoding` 走 exit **1** 且报“encoding error: missing --file”误导 → bin 新增本地 `CliError{Usage→2, Engine→1}`（`From<CoreError>`/`From<io::Error>` 自动归 Engine），用法错误统一 exit **2** + 打印 usage。补两测 `missing_required_flag_is_usage_exit_2`/`bad_flag_value_is_usage_exit_2` 钉住。`missing_file_is_error_code_1`（文件不存在=运行时错）仍为 exit 1 不变。未改 crate 的 `CoreError`。
+- **Minor-4**（测试卫生）：`save_roundtrips_gbk_from_stdin` 子 stdout 继承泄漏一行 JSON 到 `cargo test` 输出 → `spawn` 前 `.stdout(Stdio::piped())`。
+- **Ruling**：Minor-1（`parse` 取下一非 `-` token 作值，值以 `-` 开头会误判为 flag）与 Minor-5（`--max` 超限继续扫描 / `let _ = writeln!` 吞 stdout 错）——plan Step1 明示手工启发式解析、且为冒烟 CLI，两者只导致干净报错不影响验收契约，接受不改。
+- 验证：`cargo test -p lumelog-core --test cli_smoke` → 9 passed（原 7 + 2）/ 1 ignored；全量 51 lib + 9 cli + 8 docfile + chunk/encoding proptest 全 passed；`cargo clippy -p lumelog-core --all-targets -D warnings` 无告警。commit `polish:lumelog-cli-review-minors`。
+
 ## 2026-10-24 — Task 6: 搜索（分块正则 + 重叠去重 + 取消）
 
 - 文件：新增 `src/search.rs`（Mode/SearchQuery/Match/SearchStats + `search_stream`/内部 `search_with_window`/`build_regex`/`make_snippet` + 8 单测）；`doc/file.rs` 加 `pub(crate)` `read_window`/`line_at_byte`/`line_byte_range`（供扫描器按原始字节窗口读 + 字节→行换算）；`lib.rs` 挂 `pub mod search`，并把 `tests_common` 从 `#[cfg(test)]` 改 `pub mod`（criterion bench 目标把本 crate 当外部依赖编译，`cfg(test)` 关闭，需 public 才能用 `gen_log`）；新增 `benches/search.rs` + `Cargo.toml` `[[bench]] name="search"`。
