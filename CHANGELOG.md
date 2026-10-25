@@ -21,6 +21,11 @@
 **Why:** spec §3；`Rotated` 不修改索引、交给前端 `doc_reload`；`NoChange` 返回当前行数。
 **验证:** `cargo test --workspace`（app 89 / core 88）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 4. 前端 IPC 桥 + ListView 滚动辅助
+**Files:** Modify `app/frontend/src/ipc.ts`（`TailAppend` 类型 + `docTailAppend`）；`listview.ts`（`isNearBottom` 纯函数、`scrollToBottom()/maxScrollTop()`、`ListViewOpts.onScrollTop` 在现有 `onScroll` 中回调）；Tests `ipc.test.ts`(+1)、`listview.test.ts`(+3)。
+**Why:** spec §4。`onScrollTop` 从现有滚动路径回调（不另加监听，避免双触发）；`isNearBottom` 兼容不可滚动视图（max≤0→真）。
+**验证:** `npm test` 86 pass（listview 10→13、ipc 14→15）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。

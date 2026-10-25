@@ -1,11 +1,27 @@
 import { describe, it, expect } from "vitest";
-import { visibleWindow, ROW_HEIGHT, OVERSCAN, sliceLineTextByRanges } from "./listview";
+import { visibleWindow, ROW_HEIGHT, OVERSCAN, sliceLineTextByRanges, isNearBottom } from "./listview";
 import type { Cu16Range } from "./ipc";
 
 const R = (cu16Start: number, cu16Len: number): Cu16Range => ({ cu16Start, cu16Len });
 
 // The virtual list's only headless-testable logic is the scroll→range math;
 // DOM rendering is exercised by `tauri dev` in Task 11.
+describe("isNearBottom (tail follow)", () => {
+  it("is true at the bottom and within the threshold", () => {
+    expect(isNearBottom(1452, 1500)).toBe(true); // exactly threshold
+    expect(isNearBottom(1500, 1500)).toBe(true);
+  });
+
+  it("is false when scrolled further up", () => {
+    expect(isNearBottom(1400, 1500)).toBe(false);
+    expect(isNearBottom(0, 1000)).toBe(false);
+  });
+
+  it("treats a non-scrollable view as at the bottom", () => {
+    expect(isNearBottom(0, 0)).toBe(true);
+    expect(isNearBottom(0, -10)).toBe(true);
+  });
+});
 describe("visibleWindow (spec §4.3 read-only list)", () => {
   it("top of file clamps first to 0 and adds the overscan block", () => {
     // 400px viewport = 20 lines visible; ±200 overscan.

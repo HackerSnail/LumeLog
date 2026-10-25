@@ -741,3 +741,18 @@ export function keymapSet(action: string, accel: string | null): Promise<void> {
 export function keymapReset(): Promise<void> {
   return call<void>("keymap_reset", {});
 }
+
+// ---- Tail follow (Roadmap: 监控 tail 与滚动截断) ----------------------------
+
+/** Result of a tail poll; `rotated` means reopen with `docReload`. */
+export interface TailAppend {
+  rotated: boolean;
+  linesAdded: number;
+  totalLines: number;
+  size: number;
+}
+
+/** Incrementally pick up bytes appended to an open document. */
+export function docTailAppend(docId: number): Promise<TailAppend> {
+  return call<TailAppend>("doc_tail_append", { docId });
+}

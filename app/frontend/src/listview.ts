@@ -43,6 +43,14 @@ export interface ListViewOpts {
   loadLines?: (indices: number[]) => Promise<{ lines: IndexedText[]; invalidCount: number }>;
   /** Report decoded-but-unmappable counts for the live window (spec §5.4). */
   onInvalidCount?: (count: number) => void;
+  /** Report scroll position (px) and max scroll after each scroll (tail follow). */
+  onScrollTop?: (top: number, maxScroll: number) => void;
+}
+
+/** True when the viewport is within `threshold` px of the bottom (0 max => true). */
+export function isNearBottom(scrollTop: number, maxScroll: number, threshold = 48): boolean {
+  const max = Math.max(0, maxScroll);
+  return max - scrollTop <= threshold;
 }
 
 /**
@@ -207,6 +215,17 @@ export class ListView implements TabView {
     this.root.scrollTop = Math.max(0, px);
   }
 
+  /** Highest scrollable offset (0 when the content fits). */
+  maxScrollTop(): number {
+    return Math.max(0, this.root.scrollHeight - this.root.clientHeight);
+  }
+
+  /** Pin the viewport to the newest lines (tail follow). */
+  scrollToBottom(): void {
+    this.root.scrollTop = this.maxScrollTop();
+    this.render(true);
+  }
+
   /** Bring a slot into view: subset mode uses the slot index, plain mode the
    *  line index. Used by F3/Shift+F3 (caller tracks which hit index is current). */
   scrollToHit(hitIndex: number): void {
@@ -284,6 +303,7 @@ export class ListView implements TabView {
   // ---- internals --------------------------------------------------------------
 
   private onScroll(): void {
+    this.opts.onScrollTop?.(this.root.scrollTop, this.maxScrollTop());
     if (this.scrollScheduled) return;
     this.scrollScheduled = true;
     requestAnimationFrame(() => {
