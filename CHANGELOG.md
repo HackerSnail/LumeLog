@@ -16,6 +16,11 @@
 **Why:** spec §3/§3.1。命令全以 `path` 为键（后端推 FNV）；config.toml 顶层 `recovery_enabled`（缺失/坏→true），set 保留其它键；写回前 `create_dir_all`；`recovery_save` 防御式再查开关。
 **验证:** `cargo test -p lumelog-app` 67 pass（recovery 11：含 4 配置/DTO）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（新 `toml` 依赖编译通过；Cargo.lock 随本次提交）。
 
+### Task 3. 前端 `recovery.ts`（Debouncer + 格式化）
+**Files:** Create `app/frontend/src/recovery.ts`（`Debouncer`（按 docId 合并/取消/cancelAll）+ `humanSize` + `formatSavedAt`）；Create `recovery.test.ts`（5 测）。
+**Why:** spec §4/§6。把 2s 节流的时序与展示格式抽为 DOM 无关纯模块，便于 fake-timers 单测；不依赖 locale 避免平台差异。
+**验证:** `npm --prefix app/frontend test` 60 pass（+5：合并只写一次/取消/多 id 隔离+cancelAll/humanSize 边界/时间格式形状）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
