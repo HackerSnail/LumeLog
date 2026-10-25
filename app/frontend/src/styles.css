@@ -236,6 +236,21 @@ html.has-custom-titlebar .win-btns {
   cursor: pointer;
   user-select: none;
 }
+.side-action {
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  border: 0;
+  border-top: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.side-action:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
 .side-option input {
   margin: 0;
 }

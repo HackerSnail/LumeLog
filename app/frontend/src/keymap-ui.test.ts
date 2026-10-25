@@ -29,13 +29,16 @@ function row(id: string): HTMLElement {
 
 describe("keymap modal", () => {
   it("records a valid key and rejects conflicts / bare keys", async () => {
-    const onSet = vi.fn().mockResolvedValue(undefined);
+    const onSet = vi.fn().mockImplementation(async (_id, accel) => ({
+      open: "Ctrl+O",
+      save: accel ?? "Ctrl+S",
+    }));
     const onClose = vi.fn();
     openKeymapModal({
       actions,
       bindings: { open: "Ctrl+O", save: "Ctrl+S" },
       onSet,
-      onResetAll: vi.fn().mockResolvedValue(undefined),
+      onResetAll: vi.fn().mockResolvedValue({ open: "Ctrl+O", save: "Ctrl+S" }),
       onClose,
     });
     (row("save").querySelector(".keymap-record") as HTMLButtonElement).click();
@@ -58,13 +61,13 @@ describe("keymap modal", () => {
   });
 
   it("Escape cancels recording without persisting", async () => {
-    const onSet = vi.fn().mockResolvedValue(undefined);
+    const onSet = vi.fn().mockResolvedValue({ open: "Ctrl+O" });
     const onClose = vi.fn();
     openKeymapModal({
       actions,
       bindings: { open: "Ctrl+O" },
       onSet,
-      onResetAll: vi.fn().mockResolvedValue(undefined),
+      onResetAll: vi.fn().mockResolvedValue({ open: "Ctrl+O" }),
       onClose,
     });
     (row("open").querySelector(".keymap-record") as HTMLButtonElement).click();

@@ -24,6 +24,7 @@ describe("eventToAccel", () => {
     expect(eventToAccel(ev("s", { meta: true }))).toBe("Ctrl+S");
     expect(eventToAccel(ev("F3", { alt: true, shift: true }))).toBe("Alt+Shift+F3");
     expect(eventToAccel(ev(" ", { ctrl: true }))).toBe("Ctrl+Space");
+    expect(eventToAccel(ev("+", { ctrl: true }))).toBe("Ctrl+Plus");
     expect(eventToAccel(ev("ArrowUp", { ctrl: true }))).toBe("Ctrl+ArrowUp");
   });
 
@@ -44,13 +45,18 @@ describe("parse/format/validate", () => {
     if (!("error" in p)) expect(formatAccel(p)).toBe("Alt+Shift+F3");
   });
 
-  it("rejects bindings that would hijack typing", () => {
+  it("rejects bindings that would hijack typing or shadow context keys", () => {
     expect(validate("S")).toEqual({ ok: false, reason: "需包含 Ctrl 或 Alt（或使用 F1–F24）" });
     expect(validate("Escape").ok).toBe(false);
     expect(validate("").ok).toBe(false);
-    expect(validate("F3")).toEqual({ ok: true });
+    // F3 (any mods) and plain Ctrl+F are fixed context keys.
+    expect(validate("F3").ok).toBe(false);
+    expect(validate("Shift+F3").ok).toBe(false);
+    expect(validate("Ctrl+F").ok).toBe(false);
+    expect(validate("F5")).toEqual({ ok: true });
     expect(validate("Ctrl+Shift+F")).toEqual({ ok: true });
     expect(validate("Alt+1")).toEqual({ ok: true });
+    expect(validate("Ctrl+Plus")).toEqual({ ok: true });
   });
 });
 
@@ -64,6 +70,28 @@ describe("mergeBindings", () => {
     expect(merged.accelToAction["Ctrl+Shift+P"]).toBe("palette");
     expect(merged.conflicts).toEqual([]);
     expect(merged.unknown).toEqual([]);
+    expect(merged.invalid).toEqual([]);
+  });
+
+  it("drops invalid file values and keeps the default", () => {
+    const bare = mergeBindings({ save: "S" });
+    expect(bare.invalid).toEqual(["save"]);
+    expect(bare.bindings.save).toBe("Ctrl+S"); // default survives
+    expect(bare.accelToAction["S"]).toBeUndefined();
+
+    const reserved = mergeBindings({ save: "F3" });
+    expect(reserved.invalid).toEqual(["save"]);
+    expect(reserved.bindings.save).toBe("Ctrl+S");
+  });
+
+  it("canonicalizes file values before claiming", () => {
+    const ok = mergeBindings({ save: "ctrl+k" });
+    expect(ok.bindings.save).toBe("Ctrl+K");
+    expect(ok.accelToAction["Ctrl+K"]).toBe("save");
+
+    const clash = mergeBindings({ save: "ctrl+o" });
+    expect(clash.conflicts).toEqual([{ action: "save", other: "open", accel: "Ctrl+O" }]);
+    expect(clash.bindings.save).toBeUndefined();
   });
 
   it("first binding wins on a duplicate (defaults first)", () => {

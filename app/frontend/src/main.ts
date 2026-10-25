@@ -205,7 +205,7 @@ function layout(): void {
   bar.append(
     appName,
     mkBtn("打开文件", "", () => void openFile()),
-    mkBtn("查询", "行过滤 / 高亮命中 (Ctrl+Shift+F)", () => openQueryPanel()),
+    mkBtn("查询", "行过滤 / 高亮命中", () => openQueryPanel()),
     mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
@@ -242,7 +242,10 @@ function layout(): void {
   recoveryChk.checked = true;
   recoveryChk.addEventListener("change", () => void onRecoveryToggle(recoveryChk!.checked));
   recoveryOption.append(recoveryChk, document.createTextNode("崩溃恢复"));
-  aside.append(asideTitle, sidebarListEl, recoveryOption);
+  // A shortcut-free entry: the palette itself may be unbound/cleared.
+  const keymapBtn = mkBtn("快捷键设置…", "自定义快捷键", () => openKeymapSettings());
+  keymapBtn.className = "side-action";
+  aside.append(asideTitle, sidebarListEl, recoveryOption, keymapBtn);
 
   // Right inspector: metadata for the active document + the ⚠ detail.
   const insp = document.createElement("aside");
@@ -2102,11 +2105,19 @@ function applyKeymapState(): void {
   if (keymapState.unknown.length) {
     notes.push(`配置文件含未知动作：${keymapState.unknown.join("、")}`);
   }
+  if (keymapState.invalid.length) {
+    notes.push(
+      `配置文件中的快捷键无效，已用默认：${keymapState.invalid.map(actionTitle).join("、")}`,
+    );
+  }
   if (notes.length) toastMsg(notes.join("；"));
 }
 
-/** Persist one binding and refresh the dispatch tables (modal calls this). */
-async function applyKeymap(action: ActionId, accel: string | null): Promise<void> {
+/** Persist one binding and return the freshly merged table (modal redraws). */
+async function applyKeymap(
+  action: ActionId,
+  accel: string | null,
+): Promise<Partial<Record<ActionId, string>>> {
   try {
     await keymapSet(action, accel);
   } catch (err) {
@@ -2116,10 +2127,11 @@ async function applyKeymap(action: ActionId, accel: string | null): Promise<void
   if (accel === null) delete keymapOverrides[action];
   else keymapOverrides[action] = accel;
   applyKeymapState();
+  return keymapState.bindings;
 }
 
 /** Drop every override (back to defaults). */
-async function resetKeymapAll(): Promise<void> {
+async function resetKeymapAll(): Promise<Partial<Record<ActionId, string>>> {
   try {
     await keymapReset();
   } catch (err) {
@@ -2128,6 +2140,7 @@ async function resetKeymapAll(): Promise<void> {
   }
   keymapOverrides = {};
   applyKeymapState();
+  return keymapState.bindings;
 }
 
 function openKeymapSettings(): void {

@@ -1,13 +1,15 @@
 //! Keyboard-shortcut settings modal (spec §5, M3 子项目 C). Owns the DOM and
 //! the recording state machine; persistence is delegated to the caller through
 //! `onSet`/`onResetAll` so this module never talks to IPC directly.
-import { DEFAULT_BINDINGS, conflictOf, eventToAccel, validate, type ActionId } from "./keymap";
+import { conflictOf, eventToAccel, validate, type ActionId } from "./keymap";
 
 export interface KeymapModalOpts {
   actions: { id: ActionId; title: string }[];
   bindings: Partial<Record<ActionId, string>>;
-  onSet: (id: ActionId, accel: string | null) => Promise<void>;
-  onResetAll: () => Promise<void>;
+  /** Persist one binding and return the freshly merged table. */
+  onSet: (id: ActionId, accel: string | null) => Promise<Partial<Record<ActionId, string>>>;
+  /** Reset everything and return the freshly merged table. */
+  onResetAll: () => Promise<Partial<Record<ActionId, string>>>;
   onClose: (changed: boolean) => void;
 }
 
@@ -38,28 +40,30 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
   const note = el(
     "div",
     "keymap-note",
-    "点击“录制”后按下新组合键（Esc 取消；需含 Ctrl/Alt，或使用 F1–F24）。F3 / Ctrl+F 等上下文键不可自定义。",
+    "点击“录制”后按下新组合键（Esc 取消；需含 Ctrl/Alt，或使用 F1–F24）。F3 / Ctrl+F 等上下文键不可自定义；绑定 Ctrl+W 等系统组合键可能被系统占用；带 Shift 的符号键可能随键盘布局差异。",
   );
   const rows = el("div", "keymap-rows");
   const status = el("div", "keymap-status", "");
   const foot = el("div", "keymap-foot");
 
+  const appRoot = document.getElementById("app");
   const close = (): void => {
     overlay.remove();
+    appRoot?.removeAttribute("inert");
     document.removeEventListener("keydown", onCapture, true);
     opts.onClose(changed);
   };
 
   const apply = async (id: ActionId, accel: string | null): Promise<void> => {
+    let next: Partial<Record<ActionId, string>>;
     try {
-      await opts.onSet(id, accel);
+      next = await opts.onSet(id, accel);
     } catch {
       errors[id] = "保存失败，请重试";
       render();
       return;
     }
-    if (accel === null) delete local[id];
-    else local[id] = accel;
+    local = { ...next }; // re-sync with the live merge (conflicts may shift)
     changed = true;
     delete errors[id];
     render();
@@ -138,12 +142,11 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
   resetAll.addEventListener("click", () => {
     void (async () => {
       try {
-        await opts.onResetAll();
+        local = { ...(await opts.onResetAll()) };
       } catch {
         status.textContent = "恢复默认失败，请重试";
         return;
       }
-      local = { ...DEFAULT_BINDINGS };
       for (const k of Object.keys(errors)) delete errors[k as ActionId];
       changed = true;
       status.textContent = "";
@@ -161,6 +164,8 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
   box.append(title, note, rows, status, foot);
   overlay.append(box);
   document.body.append(overlay);
+  appRoot?.setAttribute("inert", ""); // keep focus/typing out of the app behind
   document.addEventListener("keydown", onCapture, true);
   render();
+  closeBtn.focus();
 }

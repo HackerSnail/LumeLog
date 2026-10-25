@@ -35,8 +35,8 @@
 - 规范串：修饰键顺序 `Ctrl+Alt+Shift+Key`；`Ctrl` token **同时匹配 Ctrl/Cmd**（跨平台主修饰，显示统一 `Ctrl`）；字母大写；空格→`Space`；命名键保持（`F1..F24`/`Escape`/`ArrowUp`/`ArrowDown`/`ArrowLeft`/`ArrowRight`/`Backspace`/`Delete`/`Enter`/`Tab`/`Home`/`End`/`PageUp`/`PageDown`/`Insert`）。
 - `eventToAccel(e:{key,ctrlKey,altKey,shiftKey,metaKey}) -> string | null`：仅修饰键按下→`null`；其余按上述规范化。
 - `parseAccel(s) -> {ctrl,alt,shift,key} | {error}`；`formatAccel` 逆变换；`normalizeAccel`（排序/大小写归一）。
-- `validate(accel) -> {ok:true} | {ok:false,reason}`：**必须含 Ctrl 或 Alt，或 key 为 `F1..F24`**（拒绝裸字母/裸 Escape/Enter/Tab/Space/Backspace/Delete，避免劫持打字）；拒绝空串（空串在覆盖表中表示“解绑”，不参与校验）。
-- `mergeBindings(overrides: Record<string,string|undefined>) -> {bindings: Record<ActionId,string>, accelToAction: Record<string,ActionId>, conflicts: {action,other,accel}[], unknown: string[]}`：以默认表为基，`""`=解绑（从 accel 表移除），未知 action 记入 `unknown` 并忽略；**冲突先到先得**，后者从绑定中剔除并记 `conflicts`（UI 提示，不阻断启动）。`conflictOf(accel, bindings, selfId) -> ActionId | null` 供录制时查重（排除自身）。
+- `validate(accel) -> {ok:true} | {ok:false,reason}`：**必须含 Ctrl 或 Alt，或 key 为 `F1..F24`**（拒绝裸字母/裸 Escape/Enter/Tab/Space/Backspace/Delete，避免劫持打字）；**保留键**：`F3`（任意修饰）与 `Ctrl+F`（无 Alt/Shift）恒拒（上下文/CodeMirror 固定）；`+` 归一为 `Plus`（避免 `Ctrl++` 不可解析）；拒绝空串（空串在覆盖表中表示“解绑”，不参与校验）。
+- `mergeBindings(overrides) -> {bindings, accelToAction, conflicts, unknown, invalid}`：**先清洗覆盖值**（`normalizeAccel` + `validate`；非法值不遮挡默认、记入 `invalid`），再以默认表为基；`""`=解绑；未知 action 记入 `unknown`；**冲突先到先得**，后者从绑定中剔除并记 `conflicts`。`conflictOf(accel, bindings, selfId) -> ActionId | null` 供录制时查重（排除自身）。
 - 分发：`accelToAction` 由合并结果构建；`keydown` 时 `eventToAccel` → 查表 → 命中即 `preventDefault` 并执行。
 
 ## 4. 后端（`app/src-tauri/src/keymap.rs` + 命令）
@@ -56,10 +56,11 @@
 - 录制：`keydown` 捕获（`preventDefault/stopPropagation`），Esc→取消；`eventToAccel`→`validate`→`conflictOf(accel, bindings, selfId)`：重复→行内红字“已绑定给《保存》”并保持录制；成功→`onSet(id, accel)` 后更新行。
 - 清除→`onSet(id, "")`；恢复默认→`onSet(id, null)`（后端删键）；“全部恢复默认”→`onResetAll()`。
 - 模态打开时**独占键盘**：全局分发在 `keymap-ui` 打开期间短路（由一个 `keymapModalOpen` 标志）；Esc/遮罩关闭，`onClose(changed)` 触发一次应用刷新。
-- 命令面板新增 `{ id:"keymap", title:"快捷键设置…" }`，`hint` 用生效键；面板行提示“（F3 / Ctrl+F 等上下文键不可自定义）”。
+- 命令面板新增 `{ id:"keymap", title:"快捷键设置…" }`，`hint` 用生效键；面板行提示“（F3 / Ctrl+F 等上下文键不可自定义）”。**侧栏底部另有一个“快捷键设置…”按钮**（不依赖任何快捷键；即使 `palette` 被解绑也能进入）；模态打开时对 `#app` 设 `inert` 并初始聚焦“关闭”钮。
 
 ## 6. 错误 / 边界
-- 文件里未知 action / 非法 accel：忽略并在模态顶部提示一次（`conflicts`/`unknown`）；原值不删（等用户显式改）。
+- 文件里未知 action / 非法或非规范 accel：**规范化+校验后非法则该条失效、回退默认**，在模态/启动 toast 提示（`invalid`/`unknown`）；非规范但合法值自动归一后再比较冲突。
+- 配置读取：缺失文件视为空；真实 IO 错误（权限/非 UTF-8 等）**上浮 `io`**，不重建、不覆写整个 `config.toml`（`recovery_set_enabled` 同规则）。
 - 冲突：启动合并先到先得（后者失效并提示）；录制直接拒绝。
 - 系统保留键（Ctrl+W 等）：允许但模态注明“可能被系统占用”。
 - `accel=""`：解绑，动作仅能从命令面板触发。
@@ -70,8 +71,8 @@
 **可测（Rust）：** `read_keymap`（正常/缺表/坏值跳过）、`set_binding`（保留 `recovery_enabled`/`theme` 等其它键；`None` 删键；`Some("")` 解绑；坏文本重建）、`reset_keymap`（只删表、保留其它键）。
 **前端（headless；录制的 DOM 片段可选 jsdom）：**
 - `eventToAccel`：Ctrl/Cmd 等价、Alt/Shift 顺序、空格与命名键、仅修饰→null。
-- `validate`：裸字母/Escape 拒；`F3`、`Ctrl+Shift+F`、`Alt+1` 通过；空串单独处理（解绑）。
-- `mergeBindings`：默认/覆盖/`""` 解绑/冲突先到先得/未知 id；`conflictOf` 查重（排除自身）。
+- `validate`：裸字母/Escape 拒；`F3`/`Shift+F3`/`Ctrl+F` 拒；`F5`、`Ctrl+Shift+F`、`Alt+1`、`Ctrl+Plus` 通过；空串单独处理（解绑）。
+- `mergeBindings`：默认/覆盖/`""` 解绑/冲突先到先得/未知 id/非法值回退默认并记 `invalid`/非规范串归一后比冲突；`conflictOf` 查重（排除自身）。
 - `ipc` 三包装 typeof。
 **GUI 手工：** 改 Ctrl+S→Ctrl+Shift+S：新键生效、旧键失效；与保存冲突的录制被拒；清除后仅面板可触发；重启保留；全部重置回默认；模态打开时其他快捷键不触发。
 

@@ -73,6 +73,7 @@ export interface ParsedAccel {
 
 function normalizeKey(k: string): string {
   if (k === " ") return "Space";
+  if (k === "+") return "Plus"; // "Ctrl++" would be unparseable otherwise
   if (/^[a-z]$/i.test(k)) return k.toUpperCase();
   if (/^f([1-9]|1[0-9]|2[0-4])$/i.test(k)) return k.toUpperCase();
   const named = NAMED_KEYS.find((n) => n.toLowerCase() === k.toLowerCase());
@@ -135,12 +136,16 @@ export function normalizeAccel(s: string): string | null {
 }
 
 /**
- * Reject bindings that would hijack typing: a printable/control key needs Ctrl
- * or Alt; bare function keys are fine.
+ * Reject bindings that would hijack typing or shadow the fixed context keys:
+ * a printable/control key needs Ctrl or Alt; bare function keys are fine; F3
+ * (any modifiers) and Ctrl+F belong to the editor/query and stay fixed.
  */
 export function validate(accel: string): { ok: true } | { ok: false; reason: string } {
   const p = parseAccel(accel);
   if ("error" in p) return { ok: false, reason: p.error };
+  if (isReserved(p)) {
+    return { ok: false, reason: "F3 与 Ctrl+F 是固定上下文键，不可自定义" };
+  }
   const isFn = /^F([1-9]|1[0-9]|2[0-4])$/.test(p.key);
   if (!p.ctrl && !p.alt && !isFn) {
     return { ok: false, reason: "需包含 Ctrl 或 Alt（或使用 F1–F24）" };
@@ -148,37 +153,62 @@ export function validate(accel: string): { ok: true } | { ok: false; reason: str
   return { ok: true };
 }
 
+/** F3 (any modifiers) and plain Ctrl+F belong to the list/search context. */
+function isReserved(p: ParsedAccel): boolean {
+  if (p.key === "F3") return true;
+  return p.ctrl && !p.alt && !p.shift && p.key === "F";
+}
+
 export interface MergedBindings {
   bindings: Partial<Record<ActionId, string>>;
   accelToAction: Partial<Record<string, ActionId>>;
   conflicts: { action: ActionId; other: ActionId; accel: string }[];
   unknown: string[];
+  /** Action ids whose file value failed normalization/validation (defaults kept). */
+  invalid: string[];
 }
 
 /**
- * Defaults first, then overrides: `""` unbinds, unknown action ids are reported
- * and ignored, and a duplicate accelerator is claimed by whoever came first
- * (the later action stays unbound and lands in `conflicts`).
+ * Defaults first, then overrides: file values are normalized + validated first
+ * (an invalid override is dropped and the default applies), `""` unbinds,
+ * unknown action ids are reported, and a duplicate accelerator is claimed by
+ * whoever came first (the later action stays unbound and lands in `conflicts`).
  */
 export function mergeBindings(overrides: Record<string, string | undefined>): MergedBindings {
+  const clean: Record<string, string> = {};
+  const unknown: string[] = [];
+  const invalid: string[] = [];
+  for (const [rawId, raw] of Object.entries(overrides)) {
+    if (!(ACTION_IDS as string[]).includes(rawId)) {
+      unknown.push(rawId);
+      continue;
+    }
+    if (raw === undefined) continue;
+    if (raw === "") {
+      clean[rawId] = "";
+      continue;
+    }
+    const canon = normalizeAccel(raw);
+    if (canon === null || !validate(canon).ok) {
+      invalid.push(rawId);
+      continue; // keep the built-in default rather than a hijacking binding
+    }
+    clean[rawId] = canon;
+  }
+
   const bindings: Partial<Record<ActionId, string>> = {};
   const accelToAction: Partial<Record<string, ActionId>> = {};
   const conflicts: { action: ActionId; other: ActionId; accel: string }[] = [];
-  const unknown: string[] = [];
 
   for (const id of ACTION_IDS) {
-    if (overrides[id] !== undefined) continue; // handled below
+    if (clean[id] !== undefined) continue; // overridden or explicitly unbound
     const accel = DEFAULT_BINDINGS[id];
     if (!accel || accelToAction[accel]) continue;
     bindings[id] = accel;
     accelToAction[accel] = id;
   }
-  for (const [rawId, accel] of Object.entries(overrides)) {
-    if (!(ACTION_IDS as string[]).includes(rawId)) {
-      unknown.push(rawId);
-      continue;
-    }
-    if (accel === undefined || accel === "") continue; // default kept / unbound
+  for (const [rawId, accel] of Object.entries(clean)) {
+    if (accel === "") continue; // unbound
     const id = rawId as ActionId;
     const owner = accelToAction[accel];
     if (owner && owner !== id) {
@@ -188,7 +218,7 @@ export function mergeBindings(overrides: Record<string, string | undefined>): Me
     bindings[id] = accel;
     accelToAction[accel] = id;
   }
-  return { bindings, accelToAction, conflicts, unknown };
+  return { bindings, accelToAction, conflicts, unknown, invalid };
 }
 
 /** Which other action already owns `accel` (recording-time duplicate check). */
