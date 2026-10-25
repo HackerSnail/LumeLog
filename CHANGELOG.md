@@ -36,6 +36,11 @@
 **Why:** spec §4.2；两导出共用一个包装只发不同 cmd 名。filter 直接用 canfilter 的 `CanFilter`（与 Rust `CanFilterJson` camelCase 对齐）。
 **验证:** `npm --prefix app/frontend test` 55 pass（ipc 10→11）+ `run build`（tsc 通过）；Rust 未改。
 
+### Task 7. dock 导出按钮 + main.ts 流程
+**Files:** Modify `app/frontend/src/main.ts`（CAN 态加 `canExportBusy/canExportReqId/canExportStatus/canExportCancelBtn/canExportBtns`；dock 工具条加“导出 CSV”/“导出 JSONL”/“取消导出”（隐）+ 状态 span；新 `onCanExport(format)`（save 对话框默认 `<docname>.csv/.jsonl`，取 dock `sourceKind/regex/lastDbcId/canFilters.get(docId)` → `exportCsv/exportJsonl`，进度写状态、`onDone` 区分 cancelled/errored/成功 toast）/`cancelCanExport`/`updateCanExportUi`；`parseActive` 守卫改为 `canParsing||canExportBusy` 共享单飞）。
+**Why:** spec §4.1。导出与解析共用 dock 单任务互斥；filter 取当前面板组装值（与显示一致）。（tsc 修：`onDone` 参数标注 `CanExportStats`，对象字面量无上下文推导）
+**验证:** `npm --prefix app/frontend run build`（tsc 通过，42 modules）+ `npm test` 55 pass；无新单测（DOM/IPC 密集，GUI 手工留 Task 8）。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。
