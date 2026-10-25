@@ -9,6 +9,8 @@ import {
   filterRun,
   filterCancel,
   docLinesAt,
+  exportLines,
+  exportCancel,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -92,6 +94,12 @@ describe("CAN ipc bridge (spec §9)", () => {
 describe("M3 filter ipc bridge (spec §6.4)", () => {
   it("filter_wrappers_are_functions", () => {
     for (const fn of [filterRun, filterCancel, docLinesAt]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("export_wrappers_are_functions", () => {
+    for (const fn of [exportLines, exportCancel]) {
       expect(typeof fn).toBe("function");
     }
   });

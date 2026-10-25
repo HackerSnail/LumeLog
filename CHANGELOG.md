@@ -31,6 +31,11 @@
 **Why:** spec §3.3/§5：目标路径打开失败同步返 `io`（不空写）；worker 持 doc 锁整任务扫描（同 `can_parse`/`filter_run`，主线程不冻），读/写错吸收进 `errored`、取消保留前缀，`on_done` 必发。**Ruling：**worker 持 `doc` 锁期间若同时关文档，`doc_arc` 被任务持有→后端扫完已关文件（与增量1 同模），不阻塞交付（已记 out-of-scope，二增量可接 export 取消 worker）。
 **验证:** `cargo test -p lumelog-app` 30 pass（新 `open_export_target_bad_path_is_io`/`open_export_target_creates_file`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`use std::io::Write` 补入使 `flush` 可用。
 
+### Task 6. 前端 IPC 桥（时序/导出）
+**Files:** Modify `app/frontend/src/ipc.ts`（新 `TimeFormat`/`TimeSpec`/`ExportStats` 类型；`filterRun` args 加 `time?/lineFrom?/lineTo?` 并透传；新 `exportLines`（多 Channel、解为 req_id）/`exportCancel`）；Modify `app/frontend/src/ipc.test.ts`（+`export_wrappers_are_functions`）。
+**Why:** spec §4.2；镜像 Rust 命令参数（camelCase↔snake）；错误码全复用。
+**验证:** `npm --prefix app/frontend test` 47 pass（ipc 9→10）+ `run build`（tsc 通过，41 modules）；Rust 未改。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
