@@ -9,7 +9,7 @@
 ### Task 1. core `lumelog-can/src/blf.rs`
 **Files:** Create `crates/lumelog-can/src/blf.rs`（`BlfSource: FrameSource`；`LOGG` 头/`SYSTEMTIME`、`LOG_CONTAINER`（无压缩/zlib2、256MiB 上限）、v1/v2 对象、类型 1/86/100/101、跨容器 tail、`take_error`、Hinnant 日历、10µs/1ns）；Modify `lib.rs`（`pub mod blf` + `pub use BlfSource`）、`Cargo.toml`/`Cargo.lock`（`flate2 = "1"`）；spec 同步 FD64 data 偏移（payload@40，ext 边界 `ext-56`）。
 **Why:** 与项目自带 candump/ASC 解析一致、可行性可控；不依赖第三方 BLF crate。FD64 首版按参照实现 `cursor+40` 偏移会错 16B（测试捕获：数据从第 17 字节开始）→ 按真实 40B 结构改为 payload@40。
-**验证:** `cargo test -p lumelog-can blf::` 10 pass（经典字段/时间 1.5s、ext/RTR/channel、FD100 dlc 9→12 + edl/brs/esi、FD64 64B、zlib 等价、跨容器一帧、10µs、未知对象 skipped、坏 magic/截断）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
+**验证:** `cargo test -p lumelog-can blf::` 10 pass（经典字段/时间 1.5s、ext/RTR/channel、FD100 dlc 9→12 + edl/brs/esi、FD64 64B、zlib 等价、跨容器一帧、10µs、未知对象 skipped、坏 magic/截断）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。另加护栏：跨容器 partial tail > 64MiB 直接报错（不无界增长）。
 
 ### Task 2. 抽取 `export_frames`（行为不变）
 **Files:** Modify `app/src-tauri/src/can_export.rs`（新增 `export_frames(src:&mut dyn FrameSource, ...)`，把表头/列/循环/统计原样搬移；`export_can` 仅建 `DocLines`+`build_frame_source` 后调用它）。
