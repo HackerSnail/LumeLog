@@ -222,6 +222,9 @@ export class ListView implements TabView {
 
   /** Pin the viewport to the newest lines (tail follow). */
   scrollToBottom(): void {
+    // A hidden tab has no layout (clientHeight 0); scrolling it would clamp to 0
+    // and lose the pinned position when it becomes visible again.
+    if (this.root.clientHeight === 0) return;
     this.root.scrollTop = this.maxScrollTop();
     this.render(true);
   }

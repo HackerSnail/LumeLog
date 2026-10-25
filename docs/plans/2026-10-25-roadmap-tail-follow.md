@@ -49,8 +49,8 @@
 **Interfaces:**
 - 私有 `head_sig: u64`（FNV-1a64 over `head[..min(512,len)]`，`open` 与 `reload_after_save` 时设置；`set_encoding` 不动）
 - `pub enum AppendOutcome { NoChange, Appended { lines_added:u64, total_lines:u64 }, Rotated }`
-- `pub fn try_append(&mut self) -> Result<AppendOutcome, CoreError>`（§2 逻辑；`stat` 失败→`Io`，文件不存在也算 Io，由前端按 removed 处理）
-- [ ] **Step 1：测试**：`try_append_grows_and_chunks`（temp `"a\n"`→追加 `"b\nc"`：`Appended{lines_added:2,total:3}`、`chunk_at(2,1)` 得 `"c"`、`disk_meta().0`==磁盘）；`try_append_no_change`；`try_append_truncated_is_rotated`（先写长再截短）；`try_append_head_change_is_rotated`（等大小改写头 512B 内字节）；`try_append_after_trailing_lf`（见 §2）。
+- `pub fn try_append(&mut self) -> Result<AppendOutcome, CoreError>`（**路径新开探测句柄**判头签名/读追加并**成功重绑 `self.file`**；分块 `READ_CHUNK`；`new_size>u32::MAX`→`TooLarge`；§2 逻辑）
+- [ ] **Step 1：测试**：`try_append_grows_and_chunks`（temp `"a\n"`→追加 `"b\nc"`：`Appended{lines_added:1,total:3}`、`chunk_at(2,1)` 得 `"c"`、`disk_meta().0`==磁盘）；`try_append_no_change`；`try_append_truncated_is_rotated`；`try_append_head_change_is_rotated`（同 inode 等大小改写头）；`try_append_rename_growth_is_rotated`（删除+rename 更大的新文件）；`try_append_after_trailing_lf`。
 - [ ] **Step 2：** FAIL → **Step 3：实现** → **Step 4：** PASS + clippy 净 + `cargo test -p lumelog-core` 不回归。
 - [ ] **Step 5：** CHANGELOG；commit `feat:doc-try-append` + push。
 

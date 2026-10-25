@@ -68,7 +68,7 @@ impl DocFile {
         // Record the dominant line-ending style from the decoded leading window
         // (spec §4.4: on open we detect CRLF/LF and store it as document metadata).
         let eol_style = detect_eol(&encoding::decode_all(label, &head).text);
-        let sig_len = size.min(512) as usize;
+        let sig_len = (size.min(512) as usize).min(head.len());
         let sig = head_sig(&head[..sig_len]);
 
         let index = build_index(&mut file, size, label)?;
@@ -117,26 +117,41 @@ impl DocFile {
     /// `(size, mtime)` snapshot is refreshed so the external watcher does not
     /// re-report the same growth.
     pub fn try_append(&mut self) -> Result<AppendOutcome, CoreError> {
-        let meta = std::fs::metadata(&self.path)?;
+        // Probe through the PATH, not our old handle: after `mv new log` the old
+        // handle still points at the discarded inode. Rebinding on append keeps
+        // the index and the handle on the same file.
+        let mut probe = File::open(&self.path)?;
+        let meta = probe.metadata()?;
         let new_size = meta.len();
         if new_size < self.size {
             return Ok(AppendOutcome::Rotated);
         }
+        if new_size > u32::MAX as u64 {
+            return Err(CoreError::TooLarge);
+        }
         // Rotation fingerprint over the SAME prefix length used at open
         // (`head_len` frozen at open time): growth must not change the window.
         let head_len = self.head_len;
-        let head = read_at(&mut self.file, 0, head_len)?;
+        let head = read_at(&mut probe, 0, head_len)?;
         if head_sig(&head) != self.head_sig {
             return Ok(AppendOutcome::Rotated);
         }
         if new_size == self.size {
             return Ok(AppendOutcome::NoChange);
         }
-        let appended = read_at(&mut self.file, self.size, (new_size - self.size) as usize)?;
         let before = self.index.line_count();
-        let old_size = self.size;
-        self.index.extend(&appended, old_size)?;
-        self.size = old_size + appended.len() as u64;
+        let mut off = self.size;
+        while off < new_size {
+            let want = (new_size - off).min(READ_CHUNK) as usize;
+            let buf = read_at(&mut probe, off, want)?;
+            if buf.is_empty() {
+                break; // concurrent truncate: the next poll sees Rotated
+            }
+            self.index.extend(&buf, off)?;
+            off += buf.len() as u64;
+        }
+        self.file = probe;
+        self.size = off;
         self.mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         self.head_sig = head_sig(&head);
         Ok(AppendOutcome::Appended {
@@ -188,7 +203,7 @@ impl DocFile {
         self.file = file;
         self.size = size;
         self.mtime = mtime;
-        self.head_len = size.min(512) as usize;
+        self.head_len = (size.min(512) as usize).min(head.len());
         self.head_sig = head_sig(&head[..self.head_len]);
         self.label = encoding;
         self.eol_style = eol_style;
@@ -536,6 +551,19 @@ mod append_tests {
         let p = setup("head", b"aaaa\nbbbb\n");
         let mut doc = DocFile::open(&p, 1 << 20).unwrap();
         fs::write(&p, b"XXXX\nbbbb\n").unwrap(); // same size, different head
+        assert_eq!(doc.try_append().unwrap(), AppendOutcome::Rotated);
+        fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn try_append_rename_growth_is_rotated() {
+        let p = setup("rename", b"a\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let other = p.with_file_name("replacement.txt");
+        fs::write(&other, b"x\ny\nz\n").unwrap();
+        fs::remove_file(&p).unwrap(); // rotation by replace (works on Windows)
+        fs::rename(&other, &p).unwrap();
+        // The old handle still points at "a\n"; the probe must notice.
         assert_eq!(doc.try_append().unwrap(), AppendOutcome::Rotated);
         fs::remove_dir_all(p.parent().unwrap()).ok();
     }

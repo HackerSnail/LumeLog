@@ -6,6 +6,11 @@
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。
 
+### 终审修复波（CodeReview 全分支 0 Critical / 4 Important / 5 Minor，全修）
+**Files:** `file.rs`（**I1**：`try_append` 改用**路径新开探测句柄**读头/追加，成功后重绑 `self.file`（旧句柄在 rename 后指向旧 inode，导致更大新文件永远无法识别轮转）；新增 `try_append_rename_growth_is_rotated`；**I2**：`sig_len/head_len` 与实际 `head.len()` 取 min（stat 与读之间被截断不再 slice panic）；**M4**：按 `READ_CHUNK` 分块读+逐块 extend，避免巨型分配；预检 `new_size>u32::MAX`）；`line_index.rs`（**I3**：`extend` 先收集再一次性提交（失败不留部分偏移）+ 总大小越界拒绝）；`main.ts`（**I4**：chip 绑 owner docId、点击不再误操作活动文档；`syncStatus` 仅对活动文档刷 follow 并在切回 `on&&!paused` 时滚底；**M1**：追加后活动文档同步 `setReadonly/updateInspector`；**M2**：`tailSeenSize` 检测半行增长并 `invalidate/refresh`；**M3**：toast 改为按 docId 计数；关闭仅清自己的 chip/计数）；`listview.ts`（`scrollToBottom` 在 `clientHeight==0` 时返回，隐藏标签不再丢失跟随位置）；`statusbar.ts`（`clear()` 隐藏跟随按钮）；spec/plan 同步。
+**Why:** rename 轮转漏检会让跟随静默停在旧文件；短读 panic、扩展失败留下不一致索引均属正确性缺陷；chip 跨标签误操作/隐藏标签被夹到顶部是明显 UX 错误。
+**验证:** `cargo test --workspace`（app 89 / core 89，含 rename 新测）+ `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm test` 88 pass + `run build` tsc 通过。
+
 ### Task 1. core `LineIndex::extend`
 **Files:** Modify `crates/lumelog-core/src/doc/line_index.rs`（`extend(appended,base_offset)`：只扫追加字节 `0x0A`，推 `base+i+1`；越界→`TooLarge`；更新 `file_size`）+ 5 单测。
 **Why:** tail 追加不应重建全文；尾有/无 LF 两种旧状态均只需推 LF+1（不重复起点）。

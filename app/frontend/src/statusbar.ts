@@ -159,6 +159,7 @@ export class Statusbar {
   clear(): void {
     this.setDirty(false);
     this.setInvalidCount(0);
+    this.setFollowAvailable(false); // no document => no tail-follow toggle
     this.posEl.textContent = "";
   }
 

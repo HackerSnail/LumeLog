@@ -20,12 +20,12 @@
   - 新增私有 `head_sig: u64`：打开与 `reload_after_save` 时对前 `min(512, size)` 字节做 FNV-1a64；`set_encoding` 不动（字节未变）。
   - `pub enum AppendOutcome { NoChange, Appended { lines_added: u64, total_lines: u64 }, Rotated }`
   - `pub fn try_append(&mut self) -> Result<AppendOutcome, CoreError>`：
-    1. `stat(path)`；`new_size < self.size` → `Rotated`；
-    2. 读新头 `min(512,new_size)` 字节算签名，!= `head_sig` → `Rotated`（覆盖“等大或更大的 rename 轮转”）；
+    1. **从路径新开探测句柄**（`File::open(path)`）并 `stat`：旧句柄在 `mv` 轮转后仍指向旧 inode，不能用于判定；`new_size < self.size` → `Rotated`；`new_size > u32::MAX` → `TooLarge`（与 open 对齐）；
+    2. 用探测句柄读新头的前 `head_len` 字节（**打开时冻结的前缀长度**，±增长不改变哈希窗口），签名 != `head_sig` → `Rotated`（覆盖等大/更大的 rename 替换）；
     3. `new_size == self.size` → `NoChange`；
-    4. `read_at(file, old_size, new_size-old_size)` → `index.extend(appended, old_size)` → 更新 `size/mtime` 并**重算头 512B 签名**（追加通常不改头，但保持不变量）→ `Appended{lines_added,total}`。
+    4. 按 `READ_CHUNK`(8MB) 分块读 `[old_size,new_size)` 并逐块 `index.extend`；成功后将 `self.file` **重绑为探测句柄**（索引与新 inode 一致），更新 `size/mtime` 并重算头签名 → `Appended{lines_added,total}`。
   - 缓存不清（旧行偏移不变）；新行由 `chunk_at` 按需读。
-- 测试：`extend` 尾有/无 LF、空追加、多 LF、4GB 越界拒；`try_append` 追加后 `line_count`/`chunk_at` 新行、`NoChange`、截断→`Rotated`、头签名变（同大小改写头部）→`Rotated`、追加后 `disk_meta` 刷新。
+- 测试：`extend` 尾有/无 LF、空追加、多 LF、4GB 越界拒（**整块失败不留下部分偏移**）；`try_append` 追加后 `line_count`/`chunk_at` 新行、`NoChange`、截断→`Rotated`、同大小改写头部→`Rotated`、**rename 成更大新文件→`Rotated`**、追加后 `disk_meta` 刷新。
 
 ## 3. app（`app/src-tauri`）
 - DTO：`TailAppendJson { rotated: bool, lines_added: u64, total_lines: u64, size: u64 }`（camelCase）。
@@ -50,8 +50,8 @@
   - 外部 `changed` 且 `lists.has(docId)`：
     1. `const r = await docTailAppend(docId)`；
     2. `r.rotated` → 走现有 `reloadDocFromDisk(docId, path)`；完成后若 `follow.on` → `list.scrollToBottom()`；
-    3. 否则（含 `NoChange`/`Appended`）→ 更新 `ds.totalLines`（`r.totalLines`）与 `indexed`；`list.refresh()`；若 `follow.on && !paused` → `scrollToBottom()`，否则保持 `scrollTop`；`r.linesAdded>0` 时状态栏/ toast 节流提示（≥1s 合并一次“已追加 N 行”）。
-  - 非只读或未跟随：保持 B2 现有整档重载。
+    3. 否则（含 `NoChange`/`Appended`）→ 若 `size` 增长但 `linesAdded==0`（半行写入）→ `invalidate+refresh` 尾部；否则更新 `ds.totalLines`（`r.totalLines`）与 `indexed`、`list.refresh()`、活动文档同步 `status.setReadonly/updateInspector`；`follow.on&&!paused` → `scrollToBottom()`，否则保持 `scrollTop`；`r.linesAdded>0` 时按 **docId** 节流提示（≥1s，“已追加 N 行”）。
+  - **编辑模式**仍走 B2 整档重载；只读一律先增量，follow 仅决定是否滚底。
 - `styles.css`：`.status-follow`（active 高亮）、`.follow-resume`（复用 `.ext-bar` 风格，右下/底部居中）。
 
 ## 5. 错误 / 边界
@@ -60,6 +60,9 @@
 - 文件删除：现有 `removed` 路径；`doc_tail_append` 的 `io` 错误 toast 一次并停跟随。
 - 4GB：`extend` 越界 → `too_large`（同打开）。
 - 快照：`try_append` 成功后刷新 `(size,mtime)`，B2 watcher 的 `classify` 立即视为无变化（不重复触发）。
+- 隐藏标签：`scrollToBottom()` 在 `clientHeight==0` 时直接返回（否则会被夹到 0 丢失跟随位置）；切回时 `syncStatus` 若 `follow.on&&!paused` 再滚底。
+- 跟随 chip 绑定 owner docId（切换/关闭只影响自己的 chip）；`Statusbar.clear()` 隐藏跟随按钮。
+- 打开时为空（`head_len==0`）的文件：头指纹窗口为空，轮转退化为尺寸判断（缩小才识别）；首次增长按追加处理（tail 从空文件起可用）。
 - 尾部半行写入（无 LF）：`extend` 不新增行；下次追加继续同一行，正确。
 - 编辑模式：不显示开关、不跟随。
 
@@ -77,7 +80,8 @@
 
 ## 9. 关键取舍（已定案）
 - **增量扩展而非全量重载**（你选）；成本与追加字节成正比。
-- **头签名（FNV-1a64, 前 512B）检测轮转**：覆盖等大/更大的 rename 轮转，代价每事件一次 512B 读。
+- **头签名（FNV-1a64，`head_len` = 打开时的 `min(512,size)` 并冻结）检测轮转**：用路径新句柄读头，覆盖等大/更大的 rename 替换；打开时为空的文件窗口为空，轮转退化为尺寸判断。
+- **探测句柄成功即重绑**：`try_append` 用 `File::open(path)` 探测并在成功后替换 `self.file`，保证索引与 inode 一致（旧句柄在 `mv` 后指向已删除 inode）。
 - **快照即时刷新**：防止 B2 watcher 对同一次增长重复触发。
 - **只读 + 手动开关、滚离暂停**（你选）；follow 状态按 docId 记忆。
 - 跟随采用直接 `scrollTop`（虚拟列表逐帧渲染），不做平滑动画。
