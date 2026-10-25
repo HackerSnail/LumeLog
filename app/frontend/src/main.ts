@@ -54,7 +54,7 @@ import {
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
-import { eventToAccel, mergeBindings, type ActionId } from "./keymap";
+import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
 import { openKeymapModal } from "./keymap-ui";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
@@ -2106,9 +2106,12 @@ function applyKeymapState(): void {
     notes.push(`配置文件含未知动作：${keymapState.unknown.join("、")}`);
   }
   if (keymapState.invalid.length) {
-    notes.push(
-      `配置文件中的快捷键无效，已用默认：${keymapState.invalid.map(actionTitle).join("、")}`,
-    );
+    const hasDefault = keymapState.invalid.filter((id) => DEFAULT_BINDINGS[id as ActionId]);
+    const unbound = keymapState.invalid.filter((id) => !DEFAULT_BINDINGS[id as ActionId]);
+    const parts: string[] = [];
+    if (hasDefault.length) parts.push(`已用默认：${hasDefault.map(actionTitle).join("、")}`);
+    if (unbound.length) parts.push(`已置未绑定：${unbound.map(actionTitle).join("、")}`);
+    notes.push(`配置文件中的快捷键无效（${parts.join("；")}）`);
   }
   if (notes.length) toastMsg(notes.join("；"));
 }

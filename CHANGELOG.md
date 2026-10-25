@@ -10,6 +10,7 @@
 **Files:** `keymap.ts`（**Critical**：`mergeBindings` 先 `normalizeAccel`+`validate`，非法覆盖不遮挡默认并记 `invalid`；`validate` 拒绝保留键 F3（任意修饰）与 Ctrl+F；`+`→`Plus`）；`keymap.test.ts`（+2 用例/改断言）；`commands.rs`（`read_config_text→Result`：NotFound=空、真实 IO 错误上浮，避免读失败后整文件覆写；`recovery_set_enabled` 复用同一读写 helper；`keymap_*` 用 `?`）；`keymap-ui.ts`（`onSet/onResetAll` 返回新合并表、模态据此整表重绘；`#app` inert；初始聚焦关闭钮；说明补系统键/布局）；`keymap-ui.test.ts`（mock 返回合并表）；`main.ts`（`applyKeymapState` 上报 `invalid`；侧栏“快捷键设置…”免快捷键入口；移除查询按钮硬编码键提示；`applyKeymap/resetKeymapAll` 返回合并表）；`styles.css`（`.side-action`）；spec/plan 同步。
 **Why:** Critical 为真安全缺口（手写 `save="S"` 会变成全局裸字母键、劫持输入并反复保存）；Important：F3/Ctrl+F 明明不可自定义却可录制/持久化、读配置失败会静默覆写整个 `config.toml`、`palette` 解绑后设置面板不可达；Minor：无焦点陷阱、`Ctrl++` 不可解析、模态快照与 live 合并不一致、工具栏键提示陈旧、缺系统键提示。
 **验证:** `cargo test -p lumelog-app` 87 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm test` 82 pass（keymap 9→11）+ `npm run build` tsc 通过（45 modules）。
+**定向复审：** 9/9 ADDRESSED、无新增破坏；追加：`invalid` toast 区分“已用默认/已置未绑定”（无默认的 7 个动作不再误报）。
 
 ### Task 1. 后端 `keymap` 存储层
 **Files:** Create `app/src-tauri/src/keymap.rs`（`read_keymap`/`set_binding`/`reset_keymap` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod keymap;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
