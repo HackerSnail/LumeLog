@@ -31,6 +31,11 @@
 **Why:** spec §3。重载在 `docReload` 后重新拼装状态（encoding/eol/totalLines/invalid）并 `markSaved`；黄点/提示条在保存/关闭/成功重载时清除。
 **验证:** `run build`（tsc 通过）+ `npm test` 64 pass（无回归；DOM 路径留 GUI 手工）。
 
+### Task 6. 保存三选模态 + Save-As 监听迁移 + 样式
+**Files:** Modify `app/frontend/src/main.ts`（`confirmExternalConflict()` 自绘三键模态（重加载/强制覆盖/取消，Esc/遮罩=取消）；`saveActive` 冲突分支：`conflict`→三选（reload 走 `reloadDocFromDisk` 丢弃本地修改）、`unmappable` 仍两键 `ask`；`afterSave` 当 `target!==prevPath` 时 `watchRetarget`）；`styles.css`（`.ext-bar`/`.ext-label` + `.modal-3way*`）。
+**Why:** spec §3。仅 `conflict` 走三选，避免与编码门语义混淆；Save-As 后监听迁移到新路径（后端从 doc 取旧 path）。
+**验证:** `run build`（tsc 通过，43 modules）+ `npm test` 64 pass。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。

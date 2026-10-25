@@ -35,6 +35,7 @@ import {
   recoverySetEnabled,
   watchSubscribe,
   docReload,
+  watchRetarget,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -1160,6 +1161,48 @@ async function reloadDirtyFromDisk(docId: number, path: string): Promise<void> {
   await reloadDocFromDisk(docId, path);
 }
 
+/** Three-way save-conflict choice (spec §4.4; `ask` is only two buttons). */
+function confirmExternalConflict(): Promise<"reload" | "overwrite" | "cancel"> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-3way";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    const box = document.createElement("div");
+    box.className = "modal-3way-box";
+    const title = document.createElement("div");
+    title.className = "modal-3way-title";
+    title.textContent = "文件已被外部修改";
+    const msg = document.createElement("div");
+    msg.className = "modal-3way-msg";
+    msg.textContent =
+      "磁盘内容已变化。重新加载会丢弃你当前的修改；强制覆盖会写入你的版本。";
+    const row = document.createElement("div");
+    row.className = "modal-3way-actions";
+    const done = (choice: "reload" | "overwrite" | "cancel"): void => {
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(choice);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") done("cancel");
+    };
+    row.append(
+      mkBtn("重新加载", "丢弃我的修改，载入磁盘内容", () => done("reload")),
+      mkBtn("强制覆盖", "用我的修改覆盖磁盘", () => done("overwrite")),
+      mkBtn("取消", "返回编辑", () => done("cancel")),
+    );
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) done("cancel");
+    });
+    box.append(title, msg, row);
+    overlay.append(box);
+    document.body.append(overlay);
+    document.addEventListener("keydown", onKey);
+    (row.querySelector("button") as HTMLButtonElement | null)?.focus();
+  });
+}
+
 /** Reload a clean doc from disk, keeping cursor/scroll; dirty callers confirm first. */
 async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
   if (watchReloading.has(docId)) {
@@ -1346,42 +1389,51 @@ async function saveActive(saveAs = false): Promise<void> {
     });
     afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target, prevPath);
   } catch (err) {
-    if (
-      err instanceof IpcError &&
-      (err.payload.code === "conflict" || err.payload.code === "unmappable")
-    ) {
-      // Cross-platform async dialog (I4): window.confirm is unreliable on
-      // WKWebView / webkit2gtk. One *informed* confirmation folds both gates
-      // (final-review I-1): the shell's conflict detail already spells out the
-      // lossy-`?` consequence, so a single force prompt discloses everything.
-      setBusy(false);
-      const go = await ask(`${err.zh}\n\n确定要强制覆盖吗？`, {
-        title: err.payload.code === "conflict" ? "保存冲突" : "编码无法表示",
+    const ipcErr = err instanceof IpcError ? err : null;
+    const code = ipcErr?.payload.code ?? "";
+    if (code !== "conflict" && code !== "unmappable") {
+      reportError(err);
+      return;
+    }
+    // Cross-platform async dialog (I4): window.confirm is unreliable on
+    // WKWebView / webkit2gtk.
+    setBusy(false);
+    if (code === "conflict") {
+      // Three-way (spec §4.4): reload discards local edits, overwrite forces
+      // the write, cancel keeps editing. `ask` only has two buttons.
+      const choice = await confirmExternalConflict();
+      if (choice === "reload") {
+        await reloadDocFromDisk(a.info.docId, ds.path);
+        return;
+      }
+      if (choice === "cancel") return;
+    } else {
+      // Encoding gate keeps the two-button informed prompt (spec §5.4).
+      const go = await ask(`${ipcErr!.zh}\n\n确定要强制覆盖吗？`, {
+        title: "编码无法表示",
         kind: "warning",
         okLabel: "强制覆盖",
         cancelLabel: "取消",
       });
-      if (go) {
-        setBusy(true);
-        try {
-          const report = await docSave({
-            docId: a.info.docId,
-            text: handle.getText(),
-            path: target,
-            encoding: ds.encoding,
-            eol: ds.eol,
-            force: true,
-          });
-          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target, prevPath);
-        } catch (err2) {
-          reportError(err2);
-        } finally {
-          setBusy(false);
-        }
-      }
-      return;
+      if (!go) return;
     }
-    reportError(err);
+    setBusy(true);
+    try {
+      const report = await docSave({
+        docId: a.info.docId,
+        text: handle.getText(),
+        path: target,
+        encoding: ds.encoding,
+        eol: ds.eol,
+        force: true,
+      });
+      afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target, prevPath);
+    } catch (err2) {
+      reportError(err2);
+    } finally {
+      setBusy(false);
+    }
+    return;
   } finally {
     setBusy(false);
   }
@@ -1415,6 +1467,10 @@ function afterSave(
   // A successful write resolves any external-change warning.
   tabs.setExternalFlag(docId, false);
   hideExtBar(docId);
+  // Save-As moved the file: migrate its directory watch.
+  if (target !== prevPath) {
+    void watchRetarget(docId, target).catch(() => {});
+  }
 }
 
 /**
