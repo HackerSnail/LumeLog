@@ -20,18 +20,19 @@
 - 解析/文本编码：影子文本恒为 UTF-8（CodeMirror 内部 LF 归一）；`encoding`/`eol` 仅作恢复后保存用的元数据。
 
 ## 3. 后端命令（`lumelog-app`，`lib.rs` 注册）
+所有命令以 **`path`（原文件路径）** 为键，后端内部用 `doc_key(path)` 推导影子文件名；前端不接触 FNV。
 - `recovery_save(path:String, encoding:String, eol:String, text:String) -> Result<(),IpcError>`（写/覆盖）。
-- `recovery_list() -> Result<Vec<RecoveryEntry>,IpcError>`：`RecoveryEntry{doc_key, path, encoding, eol, saved_at_ms:u64, size_bytes:u64}`（camelCase `docKey/savedAtMs/sizeBytes`）；目录不存在→空 vec。
-- `recovery_load(doc_key:String) -> Result<RecoveryContent,IpcError>`：`RecoveryContent{path, encoding, eol, text:String}`；坏文件/缺失→`io`。
-- `recovery_discard(doc_key:String) -> Result<(),IpcError>`：删除；不存在视为成功（幂等）。
-- 纯逻辑（可测）：`fn fnv1a64(bytes:&[u8])->u64`、`fn doc_key(path:&str)->String`（16 位小写 hex）、`fn shadow_path(dir:&Path, path:&str)->PathBuf`、`fn write_shadow(dir:&Path, meta:&RecoveryMeta, text:&str)->io::Result<()>`、`fn read_shadow(dir:&Path, key:&str)->io::Result<(RecoveryMeta,String)>`、`fn list_shadows(dir:&Path)->Vec<RecoveryEntry>`（损坏跳过）、`fn discard_shadow(dir:&Path, key:&str)`（幂等）。命令薄壳用 `app.path().app_config_dir()` 拼 `LumeLog/recovery`。
+- `recovery_list() -> Result<Vec<RecoveryEntry>,IpcError>`：`RecoveryEntry{path, encoding, eol, saved_at_ms:u64, size_bytes:u64}`（camelCase `savedAtMs/sizeBytes`）；目录不存在→空 vec。
+- `recovery_load(path:String) -> Result<RecoveryContent,IpcError>`：`RecoveryContent{path, encoding, eol, text:String}`；坏文件/缺失→`io`。
+- `recovery_discard(path:String) -> Result<(),IpcError>`：删除；不存在视为成功（幂等）。
+- 纯逻辑（可测）：`fn fnv1a64(bytes:&[u8])->u64`、`fn doc_key(path:&str)->String`（16 位小写 hex）、`fn shadow_path(dir:&Path, path:&str)->PathBuf`、`fn write_shadow(dir:&Path, meta:&RecoveryMeta, text:&str)->io::Result<()>`、`fn read_shadow(dir:&Path, path:&str)->io::Result<(RecoveryMeta,String)>`、`fn list_shadows(dir:&Path)->Vec<RecoveryEntry>`（损坏跳过）、`fn discard_shadow(dir:&Path, path:&str)`（幂等）。命令薄壳用 `app.path().app_config_dir()` 拼 `LumeLog/recovery`。
 
 ## 4. 前端（`main.ts`）
 - **节流**：`const recoveryTimers = new Map<number, number>()`。在 `mountDoc` 的 `onDirty` 回调里：先 `tabs.refreshDirty(docId)`（保留），若 `editors.has(docId)` 且该 handle `isDirty()` → 清并重置 `setTimeout(2000)`；到点 `recovery_save(ds.path, ds.encoding, ds.eol, handle.getText()).catch(...)`（失败仅 `status`/toast 提示一次，不阻塞）。
-- **清理**：保存成功（`saveActive` 成功后）→ `recovery_discard(keyOf(ds.path))` + 清定时器；`handleClose` 用户选择丢弃/保存后关闭 → 同样清理；切换编码/不脏时也清定时器并 `recovery_discard`（内容与磁盘一致，无恢复价值）。
+- **清理**：保存成功（`afterSave` 内，Save-As 前后 path 都清）→ `recovery_discard(path)` + 清定时器；`handleClose` 用户选择丢弃/保存后关闭 → 同样清理；`changeEncoding` 丢弃脏改动重载后（内容回到磁盘态）也清定时器并 `recovery_discard`。
 - **启动**：`layout()` 完成、`appPing` 之后 `recovery_list()`；非空 → 右上/底部固定**横幅**：`发现 N 个未保存恢复项` + 展开列表（`path` 尾部 + `savedAtMs` 本地时间 + `sizeBytes` 人类可读）每行"恢复"/"丢弃"，另有"全部丢弃"。横幅用原生 DOM（复用现有 `.banner`/`toast` 样式或新增 `.recovery-banner`）；不阻塞交互。
-- **恢复**：点"恢复"→ `docOpen(entry.path)`（走既有打开流程；`unknown`/不存在→该项提示"原文件已缺失，无法恢复"，保留条目让用户显式丢弃）；成功→用 `recovery_load(entry.docKey)` 取文本→`editors.get(docId)!.replaceText(content.text)`→`docStates.encoding/eol = meta`→保证脏标记（`replaceText` 已触发 `onDirty`）→`recovery_discard(docKey)`→从横幅移除该项。
-- **丢弃**：`recovery_discard(docKey)` 后移除；全部丢弃清空横幅。
+- **恢复**：点“恢复”→ `docOpen(entry.path)`（走既有打开流程；`unknown`/不存在→该项提示“原文件已缺失，无法恢复”，保留条目让用户显式丢弃）；成功→用 `recovery_load(entry.path)` 取文本→`editors.get(docId)!.replaceText(content.text)`→`docStates.encoding/eol = meta`→保证脏标记（`replaceText` 已触发 `onDirty`）→`recovery_discard(entry.path)`→从横幅移除该项。
+- **丢弃**：`recovery_discard(entry.path)` 后移除；全部丢弃清空横幅。
 - 只读文档：`editors` 无该项 → 不排定时器、不写影子。
 
 ## 5. 错误 / 边界
@@ -50,7 +51,7 @@
 - `discard` 删除且幂等。
 **前端：**
 - 抽 `recovery.ts` 纯 helper（`humanSize(bytes)`、`formatSavedAt(ms)`、debounce 调度器）→ vitest。至少测 debounce 调度器（fake timers：连发只写一次、清定时器不写）与 `humanSize`/时间格式边界。
-- `ipc.ts` 四包装 typeof + 参数透传 camelCase。
+- `ipc.ts` 四包装 typeof + 参数透传 camelCase（均以 `path` 为键）。
 **GUI 手工（`tauri dev`）：**编辑脏文档→停 2s→`recovery/` 出现影子；`kill -9` 重启→横幅列出→恢复→文本回填且仍脏→保存后影子消失；丢弃→影子删；只读文档不产影子；坏影子被跳过。
 
 ## 7. 全局约束（沿用）
