@@ -44,7 +44,9 @@
 - [x] 导出筛选后的报文/日志片段
       ↳ 已全部交付：日志片段导出（Plan 5 `feat/m3-timeline-export` `export_lines`，按行号取原始字节流式写、保编码/行尾） + CAN 报文导出（Plan 6 `feat/m3-can-export` `export_csv` 宽表（meta+DBC 信号列、物理值）/`export_jsonl`（每帧对象），后端重解码并套用与 CanPanel 一致的 `frame_matches` 视图过滤，流式可取消）。
 - [x] 未保存编辑的崩溃恢复（影子文件 + 启动横幅恢复 + 侧栏开关）
-      ↳ M3 子项目 B1（Plan 7 `feat/m3-crash-recovery`）：编辑模式脏文档停输 2s 把全量文本+编码/行尾写入 `$APP_CONFIG/LumeLog/recovery/<FNV(path)>.lumelog`；启动以单列表横幅逐项“恢复/丢弃”（恢复后仍脏、保存才落盘）；保存/关闭/换编码后自动删影；侧栏“崩溃恢复”勾选开关持久化到 `config.toml` 的 `recovery_enabled`（默认开、禁用不删既有影子）。外部修改监听（`notify` debounce、干净文档自动重载）为后续 B2。
+      ↳ M3 子项目 B1（Plan 7 `feat/m3-crash-recovery`）：编辑模式脏文档停输 2s 把全量文本+编码/行尾写入 `$APP_CONFIG/LumeLog/recovery/<FNV(path)>.lumelog`；启动以单列表横幅逐项“恢复/丢弃”（恢复后仍脏、保存才落盘）；保存/关闭/换编码后自动删影；侧栏“崩溃恢复”勾选开关持久化到 `config.toml` 的 `recovery_enabled`（默认开、禁用不删既有影子）。
+- [x] 外部修改持续监听（干净自动重载 / 脏黄点+三选 / 删除与降级）
+      ↳ M3 子项目 B2（Plan 8 `feat/m3-external-watch`）：`notify` 监听文档父目录（抗 rename）+ 500ms 静默去抖 + `(size,mtime)` 快照抑制自我写入；干净文档自动重载（编辑保光标/滚动；只读保滚动并清查询结果），脏文档黄点 + 非阻断提示条（重新加载/保留），保存冲突**三选**（重新加载/强制覆盖/取消）；删除/改名提示；watcher 失败降级为保存前检查并在状态栏标注；Save-As 后后端重绑 `DocFile` 并迁移监听。
 - [x] 自定义主题（浅 / 暗 / Dracula 三主题 + 跟随系统 + localStorage 持久化；无边框自绘标题栏；Ctrl+Shift+P 命令面板）
       ↳ UI 重构 `feat/m-ui-notelume`（参考 NoteLume）已交付：主题 token 体系、三栏外壳（侧栏/检查器/可拖分栏）、命令面板、工具条即标题栏
 - [ ] 快捷键配置同步（当前内置固定快捷键；用户自定义与跨设备同步为后续）
