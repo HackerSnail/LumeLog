@@ -2089,6 +2089,7 @@ dependencies = [
 name = "lumelog-can"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "proptest",
  "regex",
  "thiserror 2.0.21",

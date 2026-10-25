@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+flate2 = "1"
 regex = { workspace = true }
 thiserror = { workspace = true }
 

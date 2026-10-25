@@ -21,7 +21,7 @@
 - 帧映射：
   - **1/86（classic）**：payload≥16：channel u16@0（BLF 从 1 计，`Frame.channel = saturating_sub(1)` 为 u8）、flags u8@2、dlc u8@3、id u32@4（`&0x1FFF_FFFF`，ext=bit31）、data 8B@8（取 `min(dlc,8)`，Frame.data 其余补 0）；RTR=flags&0x80、DIR→is_rx=false；is_fd=false。
   - **100（CAN FD）**：payload≥84：channel u16@0、flags u8@2、dlc_code u8@3、id u32@4、fd_flags u8@13、valid_bytes u8@14、data 64B@20；`Frame.dlc = dlc2len(dlc_code)`、data 取 `min(valid,64)`；is_fd=fd_flags&0x1、brs&0x2、esi&0x4；RTR 同 classic。
-  - **101（CAN FD 64）**：payload≥40：channel u8@0、dlc_code u8@1、valid u8@2、id u32@4、fd_flags u32@12、direction u8@34（0=Rx）、ext_data_offset u8@35、data@40；可用字节 = `ext_data_offset!=0 ? ext.saturating_sub(header_size+40) : payload.len()-40`，长度 `min(valid, 可用, 64)`；is_fd/brs/esi 用 fd_flags 位；RTR=fd_flags&0x10。
+  - **101（CAN FD 64）**：payload≥40：channel u8@0、dlc_code u8@1、valid u8@2、id u32@4、fd_flags u32@12、direction u8@34（0=Rx）、ext_data_offset u8@35、data@40（40B 结构后紧跟数据）；可用字节 = `ext_data_offset!=0 ? ext_data_offset.saturating_sub(56) : payload.len()-40`（payload 起点=对象偏移 16），长度 `min(valid, 可用, 64)`；is_fd/brs/esi 用 fd_flags 位；RTR=fd_flags&0x10。
   - 其它类型：`skipped += 1`；损坏对象→`SourceFormat` 并停止（记录 error）。
 - `Frame.line_number = 帧序号（1 起）`；`stats.decoded/skipped`；`pub fn take_error(&mut self)->Option<CanError>`；实现 `FrameSource`。
 - 测试夹具（自写 writer，仅供单测）：构造文件头（已知 SYSTEMTIME）、v1 对象、无压缩/zlib 容器、跨容器切分、未知对象；覆盖：classic 字段/时间（1.5s）、ext/RTR/channel、FD100（dlc 9→12、edl/brs/esi）、FD64（64B、direction/RTR）、压缩等价、跨容器只出一帧、10µs flag、未知对象计 skipped、坏 magic/截断/超限报错、帧序号递增。
