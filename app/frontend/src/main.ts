@@ -27,6 +27,8 @@ import {
   exportCsv,
   exportJsonl,
   exportCanCancel,
+  recoverySave,
+  recoveryDiscard,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -39,6 +41,7 @@ import {
   type CanExportStats,
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
+import { Debouncer } from "./recovery";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -81,6 +84,9 @@ const lists = new Map<number, ListView>();
 /** Lines indexed so far per doc; drives the list "待索引" placeholder (Task 11). */
 const indexed = new Map<number, number>();
 let busy = false;
+/** Crash-recovery schedule (spec §4.4): 2s idle → write the doc's shadow. */
+let recoveryOn = true; // refreshed from config.toml at startup (Task 6)
+const recoveryDebounce = new Debouncer(2000, (docId) => fireRecovery(docId));
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -865,6 +871,35 @@ function onIndexProgress(p: IndexProgress): void {
   lists.get(p.docId)?.refresh();
 }
 
+/** Write the dirty doc's shadow after the 2s idle debounce (best-effort). */
+function fireRecovery(docId: number): void {
+  const ds = docStates.get(docId);
+  const h = editors.get(docId);
+  if (!ds || !h || !h.isDirty()) return;
+  recoverySave({
+    path: ds.path,
+    encoding: ds.encoding,
+    eol: ds.eol,
+    text: h.getText(),
+  }).catch(() => {
+    // A shadow write failure must never interrupt editing; the next idle retries.
+  });
+}
+
+/** Arm the shadow timer for a dirty edit-mode doc (no-op when disabled). */
+function scheduleRecovery(docId: number): void {
+  if (!recoveryOn) return;
+  const h = editors.get(docId);
+  if (!h || !h.isDirty()) return;
+  recoveryDebounce.schedule(docId);
+}
+
+/** Drop a pending shadow write and delete the on-disk shadow for `path`. */
+function cancelRecovery(docId: number, path: string): void {
+  recoveryDebounce.cancel(docId);
+  recoveryDiscard(path).catch(() => {});
+}
+
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
   const total = info.totalLines ?? info.lineCountEstimate;
   indexed.set(info.docId, total);
@@ -880,7 +915,10 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
     parent: tabsEl,
     info,
     ext: extOf(path),
-    onDirty: () => tabs.refreshDirty(info.docId),
+    onDirty: () => {
+      tabs.refreshDirty(info.docId);
+      scheduleRecovery(info.docId);
+    },
     onInvalid: (n) => {
       // Persistent ⚠ beside the encoding (spec §5.4), not a transient toast —
       // a wrong-encoding file must stay discoverable while it is open.
@@ -953,6 +991,7 @@ async function saveActive(saveAs = false): Promise<void> {
   }
   const ds = docStates.get(a.info.docId);
   if (!ds) return;
+  const prevPath = ds.path; // shadow key before a possible Save-As rebind
 
   // Save-As (Ctrl+Shift+S): pick a destination first; cancelling aborts quietly.
   let target = ds.path;
@@ -975,7 +1014,7 @@ async function saveActive(saveAs = false): Promise<void> {
       eol: ds.eol,
       force: false,
     });
-    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target);
+    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target, prevPath);
   } catch (err) {
     if (
       err instanceof IpcError &&
@@ -1003,7 +1042,7 @@ async function saveActive(saveAs = false): Promise<void> {
             eol: ds.eol,
             force: true,
           });
-          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target);
+          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target, prevPath);
         } catch (err2) {
           reportError(err2);
         } finally {
@@ -1026,6 +1065,7 @@ function afterSave(
   conflict: boolean,
   forced: boolean,
   target: string,
+  prevPath: string,
 ): void {
   ds.path = target; // a Save-As rebinds the tab to its new file
   handle.markSaved();
@@ -1039,6 +1079,9 @@ function afterSave(
   } else {
     updatePos(handle);
   }
+  // Saved: the shadow is stale — clear both the pre-Save-As and the new path.
+  cancelRecovery(docId, prevPath);
+  cancelRecovery(docId, ds.path);
 }
 
 /**
@@ -1094,7 +1137,11 @@ async function changeEncoding(label: string): Promise<void> {
     ds.eol = updated.eol || ds.eol;
     status.setEncoding(updated.encoding);
     updateInspector(docId); // inspector shows the new encoding / ⚠ detail
-    if (handle) tabs.refreshDirty(docId);
+    if (handle) {
+      tabs.refreshDirty(docId);
+      // The dirty text was discarded by the re-decode; any shadow is stale.
+      cancelRecovery(docId, ds.path);
+    }
   } catch (err) {
     reportError(err);
     status.setEncoding(ds.encoding);
@@ -1123,6 +1170,8 @@ async function handleClose(docId: number): Promise<void> {
     });
     if (!go) return;
   }
+  const closing = docStates.get(docId);
+  if (closing) cancelRecovery(docId, closing.path);
   tabs.remove(docId);
   docStates.delete(docId);
   editors.delete(docId);

@@ -26,6 +26,11 @@
 **Why:** spec §3/§3.1；`RecoveryEntry` 字段与 Rust camelCase 对齐（`savedAtMs/sizeBytes`）；均以 `path` 为键。
 **验证:** `npm test` 61 pass（ipc 11→12）+ `run build` tsc 通过；Rust 未改。
 
+### Task 5. `main.ts` 排影 + 清理
+**Files:** Modify `app/frontend/src/main.ts`（导入 `Debouncer`/`recoverySave`/`recoveryDiscard`；`recoveryOn`/`recoveryDebounce`；`fireRecovery`/`scheduleRecovery`/`cancelRecovery`；`mountDoc.onDirty` 追加 schedule；`saveActive` 记 `prevPath` 并传给 `afterSave`（签名 +1 参）；`afterSave` 末尾清旧/新 path 影子；`handleClose` 关前清影；`changeEncoding` 丢弃重载后清影）。
+**Why:** spec §4。2s 节流只在“编辑模式 + 脏 + 开关开”时排影；保存（含 Save-As 前后两 path）/关闭/换编码丢弃后删影 + 清定时器；写影失败 best-effort 不拖断编辑。
+**验证:** `npm --prefix app/frontend run build`（tsc 通过，43 modules）+ `npm test` 61 pass（无回归；时序逻辑已由 T3 单测覆盖）。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
