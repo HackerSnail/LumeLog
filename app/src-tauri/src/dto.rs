@@ -342,7 +342,6 @@ pub struct LineContentPayload {
 /// group `ts` + a built-in format (`iso`/`epoch_s`/`epoch_ms`) + optional
 /// `[from,to]` bound strings parsed by that format, and whether lines whose `ts`
 /// is absent survive the window.
-#[allow(dead_code)] // consumed by `filter_run` (Task 4) + `export_lines` (Task 5)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TimeSpecJson {
@@ -355,7 +354,6 @@ pub struct TimeSpecJson {
     pub keep_when_no_ts: bool,
 }
 
-#[allow(dead_code)] // consumed by `filter_run` (Task 4)
 impl TimeSpecJson {
     pub fn to_core(&self) -> TimeSpec {
         TimeSpec {

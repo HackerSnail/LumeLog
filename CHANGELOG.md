@@ -21,6 +21,11 @@
 **Why:** spec §3.3，为 `filter_run`/`export_lines` 定契约；时间轴编译错误由 core `LineFilter::build`→`IpcError::from_core`→`invalid_pattern`（无新错误码）。
 **验证:** `cargo test -p lumelog-app` 26 pass（新 3：格式映射/驼峰导出/From core）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 4. `filter_run` 接时间轴/行号轴
+**Files:** Modify `app/src-tauri/src/commands.rs`（`filter_run` 入参加 `time: Option<TimeSpecJson>`/`line_from`/`line_to`；组装 `line_range=Some((from,to))`仅当两侧都给、`time_core=time.to_core()`；no-op 守卫改为“无任何轴”才短路；`LineFilter::build(specs,case,time_core,line_range)`；新 2 测）；Modify `dto.rs`（剥 TimeSpecJson+to_core 的 `#[allow(dead_code)]`）。
+**Why:** spec §3.3—时间/行号与文本 AND 同扫描一次完成（单一选中集），不二次 pass。
+**验证:** `cargo test -p lumelog-app` 28 pass（新 `scan_filter_line_range_degrade`、`scan_filter_time_axis_keeps_range`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端未改。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。

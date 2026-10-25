@@ -700,13 +700,16 @@ fn scan_filter<I: Iterator<Item = Line>>(
 /// main thread is never tied up. Only kept line numbers + cu16 ranges cross IPC;
 /// line TEXT is fetched on demand via `doc_lines_at` (spec §3, never resident).
 #[tauri::command]
-#[allow(clippy::too_many_arguments)] // IPC: doc + conditions + case + 2 channels + handles
+#[allow(clippy::too_many_arguments)] // IPC: doc + conditions + case + time/lines + 2 channels + handles
 pub fn filter_run(
     state: tauri::State<'_, AppDocs>,
     app: AppHandle,
     doc_id: u64,
     conditions: Vec<FilterCondition>,
     case_sensitive: bool,
+    time: Option<TimeSpecJson>,
+    line_from: Option<u64>,
+    line_to: Option<u64>,
     on_batch: Channel<Vec<LineHit>>,
     on_done: Channel<FilterStats>,
 ) -> Result<u64, IpcError> {
@@ -720,9 +723,14 @@ pub fn filter_run(
         None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
     };
     let specs: Vec<_> = conditions.iter().map(|c| c.to_core()).collect();
-    if specs.is_empty() {
-        // Defensive no-op: the panel guards against an empty query, but never
-        // fan out into a whole-file scan that keeps every line.
+    let line_range = match (line_from, line_to) {
+        (Some(a), Some(b)) => Some((a, b)),
+        _ => None,
+    };
+    let time_core = time.as_ref().map(|t| t.to_core());
+    if specs.is_empty() && time_core.is_none() && line_range.is_none() {
+        // No axis supplied: defensive no-op (the panel guards this), never fan
+        // out into a whole-file scan that keeps every line.
         let _ = on_done.send(FilterStats {
             kept: 0,
             scanned: 0,
@@ -731,8 +739,8 @@ pub fn filter_run(
         state.end_search(req_id);
         return Ok(req_id);
     }
-    let lf =
-        LineFilter::build(specs, case_sensitive, None, None).map_err(|e| fail(IpcError::from_core(e)))?;
+    let lf = LineFilter::build(specs, case_sensitive, time_core, line_range)
+        .map_err(|e| fail(IpcError::from_core(e)))?;
     tauri::async_runtime::spawn_blocking(move || {
         let lines = DocLines::new(doc_arc);
         let mut emit = |batch: Vec<LineHit>| {
@@ -764,7 +772,7 @@ pub fn filter_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Resul
 #[cfg(test)]
 mod filter_run_tests {
     use super::*;
-    use lumelog_core::filter::{CondKind, CondMode, CondSpec};
+    use lumelog_core::filter::{CondKind, CondMode, CondSpec, TimeFormat, TimeSpec};
 
     fn lines(text: &str) -> Vec<Line> {
         text.lines()
@@ -866,6 +874,51 @@ mod filter_run_tests {
         assert_eq!(got[0].ranges.len(), 1);
         assert_eq!(got[1].ranges.len(), 1);
         assert!(got[2].ranges.is_empty() && got[3].ranges.is_empty(), "later hits drop ranges");
+    }
+
+    #[test]
+    fn scan_filter_line_range_degrade() {
+        let lf = LineFilter::build(
+            vec![CondSpec { mode: CondMode::Include, kind: CondKind::Literal, text: "x".into() }],
+            true,
+            None,
+            Some((2, 3)),
+        )
+        .unwrap();
+        let mut got: Vec<LineHit> = Vec::new();
+        scan_filter(
+            lines("x\nx\nx\nx").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            usize::MAX,
+        );
+        assert_eq!(
+            got.iter().map(|h| h.line).collect::<Vec<_>>(),
+            vec![1, 2],
+            "only 1-based lines 2,3 survive (0-based 1,2)"
+        );
+    }
+
+    #[test]
+    fn scan_filter_time_axis_keeps_range() {
+        let t = TimeSpec {
+            extract: r"(?<ts>\d+)".to_string(),
+            format: TimeFormat::EpochMillis,
+            from: Some("2".into()),
+            to: Some("3".into()),
+            keep_when_no_ts: false,
+        };
+        let lf = LineFilter::build(vec![], true, Some(t), None).unwrap();
+        let mut got: Vec<LineHit> = Vec::new();
+        scan_filter(
+            lines("ts=1\nts=2\nts=3\nts=4").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            usize::MAX,
+        );
+        assert_eq!(got.iter().map(|h| h.line).collect::<Vec<_>>(), vec![1, 2]);
     }
 }
 
