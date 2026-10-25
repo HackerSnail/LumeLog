@@ -4,6 +4,7 @@
 pub mod doc;
 pub mod encoding;
 pub mod error;
+pub mod filter;
 pub mod search;
 
 // Deterministic log generator, shared by unit tests, integration tests and

@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
+
+**依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
+
+### Task 1. lumelog-core 行过滤求值器（纯函数）
+**Files:** Create `crates/lumelog-core/src/filter.rs`；Modify `crates/lumelog-core/src/lib.rs`（`pub mod filter;`）。
+**Why:** 提供 spec §2 的 AND-of-includes / NOT-of-excludes 谓词，产**行内 cu16 高亮区间**（`char_map` 不过 IPC），与渲染文本逐字符一致。`LineFilter::build` 编译各条件（字面走 `regex::escape`、大小写走 `RegexBuilder::case_insensitive`），`keep(line_text)->Option<Vec<Cu16Range>>`（Some=保留+包含命中的 cu16 区间升序去重；None=剔除；仅排除时 Some(空)）。字节→cu16 用前缀 `chars().map(len_utf16).sum()`。空条件文本/非法正则 → `CoreError::InvalidPattern`。
+**验证:** `cargo test -p lumelog-core filter::` 10 pass（AND 语义/排除否决/仅排除恒真/大小写/字面元字符/多字节 cu16 偏移 `错误 <emoji>`→start3 len2/空模式拒/非法正则拒/has_conditions 空假/含全真）；`cargo clippy -p lumelog-core --all-targets -- -D warnings` 净；core 其余 58 测不回归；前端无改动。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。
