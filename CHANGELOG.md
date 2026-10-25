@@ -31,6 +31,11 @@
 **Why:** spec §4.3—镜像 `canParse` 双 Channel 形状；`invalid_pattern`/`unknown_request`/`invalid_argument` 已在既有联合与中文表，无需新增错误码。
 **验证:** `npm --prefix app/frontend test` 41 pass（ipc 7→9）+ `run build`（tsc 通过，41 modules）。
 
+### Task 6. `listview.ts` 子集视图 + 高亮切分
+**Files:** Modify `app/frontend/src/listview.ts`（新增导出纯函数 `sliceLineTextByRanges(text, Cu16Range[])->TextSeg[]`；ListView 新增子集视图态 `hits/hideNon/hitMap` + `setView(hits,hideNon,highlight)` + `scrollToHit(i)` + `viewTotal()`；render 分支子集/连续，子集走 `opts.loadLines`(doc_lines_at) 按可见窗口稀疏取文本、缓存按原行号键共享；paint/paintSubset 用 `renderText` 叠加 `.line-hl` span）；Modify `app/frontend/src/listview.test.ts`（+5 `sliceLineTextByRanges_*`）。
+**Why:** spec §4.2。cu16 区间用 JS `String.slice` 直切（索引即 UTF-16 码元），重叠/相邻区间先合并去重、越界丢弃（不重复 emit、不在代理对中间切，后端区间按字符对齐）。模式切换重置 renderFirst/Last 强制新窗口（Review Focus 4）；连续快路径不变（仅命中行走切分）。
+**验证:** `npm --prefix app/frontend test` 46 pass（listview 5→10）+ `run build`（tsc 通过）；Rust 无改动。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。
