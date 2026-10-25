@@ -36,6 +36,12 @@
 **Why:** spec §4；模态保持纯净（仅回调），文档不存在时运行 reject；两模态不能同时抢键盘/inert。
 **验证:** `run build` tsc 通过（46 modules）+ `npm test` 94 pass。
 
+### 终审修复波（CodeReview 全分支 0 Critical / 5 Important / 10 Minor）
+**Files:** `script.rs`（**I1** 最终 `writer.flush()` 错误不再被吞 → 删 tmp 并报“写入输出文件失败”，避免静默丢尾；**I2** 新增 `RunStop::Cancelled`，`onLine` 调用失败时先判 `cancel()`/超时，避免“已取消/300s 超时”退化为 `interrupted` 错；**I3** `const/let onLine = () => …` 现代写法可用（global lexical binding 不在 globalThis，补一次求值）；**I5** `read_script_in` 1 MiB 上限 + 剥 UTF-8 BOM + `from_utf8_lossy`（外部编辑器存 ANSI/GBK 不再直接失败）；输出 tmp 名加纳秒防碰撞）；`commands.rs`（**I4** `run_script` 包 `catch_unwind(AssertUnwindSafe)`，panic 时仍发 `on_done` 并 `end_search`）；`script-ui.ts`（**M1** 删除重复 `box.append`；**M2** 列表补修改时间；**M3** Esc 关闭 + 初始聚焦关闭钮，监听器在 close 里摘除）；`main.ts`（**M10** `openScriptModal` 抛错时回滚 `scriptModalOpen`，否则全局快捷键永久失效）；新增 2 测（const 箭头函数、BOM/非 UTF-8 读取）。
+**Why:** I1/I2/I4 均为低概率但后果不可恢复（静默丢数据 / 取消语义丢失 / 模态永久锁死）；I3/I5 直接影响可用性（现代写法与中文 Windows 记事本）。
+**Parked（本次未修，已记录）：** M4 模态 `String(e)` 未全走 `.zh`；M5 测目录用 PID 命名（改用 tempfile）；M7 返回串内含 `\n` 不归一（文档语义：一行可拆多行）；M8 Windows 保留设备名黑名单；三平台 CI 矩阵需开 PR 验证 `rquickjs-sys` 在 macOS/Linux 的 cc 编译。
+**验证:** `cargo test -p lumelog-app script::` 14 pass、`cargo test --workspace`（app 103/core 89）、`cargo clippy --workspace --all-targets -- -D warnings` 净、`npm test` 94 pass、`run build` 通过。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。

@@ -55,6 +55,8 @@
       ↳ Plan 10 `feat/roadmap-tail-follow`：只读状态栏“跟随尾部”开关，新增字节**增量扩展行索引**（不重建、不整页重载）并自动滚底；上滚暂停 + “回到底部”；截断/轮转（缩小或头签名变化，含 rename 替换）回退全量重载；编辑模式不跟随。
 - [x] Roadmap：BLF（Vector 二进制日志）报文源（MF4 仍暂缓）
       ↳ Plan 11 `feat/roadmap-blf`：工具栏“打开 BLF…”直接进 CanPanel；解析 `LOGG` 容器（无压缩/zlib）+ 对象 1/86/100/101；跨容器切分、1ns/10µs 时间；复用过滤/DBC/停止；导出 CSV/JSONL 复用 `export_frames`；无源文本（`lineNumber`=帧序号）。
+- [x] 脚本引擎（QuickJS 逐行变换）
+      ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。
 - [ ] 插件接口，支持用户扩展解析器
 
 ## Git

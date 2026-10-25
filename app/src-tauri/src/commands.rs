@@ -1627,7 +1627,9 @@ pub fn script_run(
             "输出文件不能是源文档本身",
         )));
     }
-    tauri::async_runtime::spawn_blocking(move || {
+    // Tauri's JoinHandle has no synchronous result; the worker always answers
+    // via `on_done` + `end_search`, and panics are caught above.
+    let _handle = tauri::async_runtime::spawn_blocking(move || {
         let cancel_fn = Arc::new(move || cancel.load(Ordering::Relaxed));
         let mut console = |m| {
             let _ = on_console.send(m);
@@ -1635,7 +1637,15 @@ pub fn script_run(
         let mut prog = |p| {
             let _ = on_progress.send(p);
         };
-        let stats = run_script(doc_arc, &code, &target, &mut console, &mut prog, cancel_fn);
+        // A panic inside the runner must still release the cancel registration
+        // and answer the front end, or the modal stays locked forever.
+        let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_script(doc_arc, &code, &target, &mut console, &mut prog, cancel_fn)
+        }))
+        .unwrap_or_else(|_| ScriptStats {
+            error: Some("脚本运行器内部异常".into()),
+            ..Default::default()
+        });
         let _ = on_done.send(stats);
         app.state::<AppDocs>().end_search(req_id);
     });

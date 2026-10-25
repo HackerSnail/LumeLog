@@ -2413,7 +2413,8 @@ function openScriptManager(): void {
     return;
   }
   scriptModalOpen = true;
-  openScriptModal({
+  try {
+    openScriptModal({
     hasDocument: () => tabs.active() !== null,
     defaultOutputBase: () => {
       const a = tabs.active();
@@ -2448,7 +2449,11 @@ function openScriptManager(): void {
     onClose: () => {
       scriptModalOpen = false;
     },
-  });
+    });
+  } catch (err) {
+    scriptModalOpen = false; // never leave shortcuts disabled on a failed open
+    reportError(err);
+  }
 }
 
 /** The command set offered by the palette, rebuilt per open so it reflects

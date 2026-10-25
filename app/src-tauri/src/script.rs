@@ -9,7 +9,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lumelog_core::doc::DocFile;
 use rquickjs::function::Func;
@@ -22,6 +22,8 @@ use crate::dto::IpcError;
 
 pub(crate) const MAX_CONSOLE_MESSAGES: usize = 200;
 pub(crate) const MAX_CONSOLE_CHARS: usize = 4096;
+/// Scripts are source code, not logs: refuse to slurp anything oversized.
+pub(crate) const MAX_SCRIPT_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub(crate) const MAX_SECONDS: u64 = 300;
 pub(crate) const PROGRESS_EVERY: u64 = 100_000;
@@ -175,8 +177,16 @@ pub(crate) fn list_scripts_in(dir: &Path) -> Result<Vec<ScriptEntry>, IpcError> 
 
 pub(crate) fn read_script_in(dir: &Path, name: &str) -> Result<String, IpcError> {
     validate_name(name)?;
-    std::fs::read_to_string(dir.join(name))
-        .map_err(|e| IpcError::new("io", format!("read script: {e}")))
+    let path = dir.join(name);
+    let meta = std::fs::metadata(&path).map_err(|e| IpcError::new("io", format!("read script: {e}")))?;
+    if meta.len() > MAX_SCRIPT_BYTES {
+        return Err(IpcError::new("invalid_argument", "脚本过大（超过 1 MiB）"));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| IpcError::new("io", format!("read script: {e}")))?;
+    // Scripts may be saved by an external editor as UTF-8 (with or without BOM)
+    // or a legacy ANSI code page; decode leniently rather than failing.
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(&bytes);
+    Ok(String::from_utf8_lossy(body).into_owned())
 }
 
 /// Atomic write (tmp in the same dir → rename) so a failed save never leaves a
@@ -232,6 +242,8 @@ enum RunStop {
     Js(String),
     /// Output I/O failure: discard the tmp file.
     Io(String),
+    /// The user cancelled while JS was executing (not an error).
+    Cancelled,
 }
 
 fn catch_message(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
@@ -267,12 +279,16 @@ pub fn run_script(
 ) -> ScriptStats {
     let mut stats = ScriptStats::default();
     let tmp = target.with_file_name(format!(
-        ".{}.tmp-{}",
+        ".{}.tmp-{}-{}",
         target
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("script-out"),
-        std::process::id()
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
     ));
     let file = match File::create(&tmp) {
         Ok(f) => f,
@@ -347,9 +363,19 @@ pub fn run_script(
                 catch_message(&ctx, e)
             )));
         }
-        let on_line: Function = globals.get("onLine").map_err(|_| {
-            RunStop::Js("脚本必须定义 onLine(line, ctx)".into())
-        })?;
+        // A top-level `const/let onLine` lives in the global lexical scope, not
+        // on `globalThis`, so a property lookup alone would reject modern style.
+        let on_line: Function = match globals.get("onLine") {
+            Ok(f) => f,
+            Err(_) => {
+                let v: Value = ctx
+                    .eval("typeof onLine === 'function' ? onLine : undefined")
+                    .map_err(|e| RunStop::Js(catch_message(&ctx, e)))?;
+                Function::from_js(&ctx, v).map_err(|_| {
+                    RunStop::Js("脚本必须定义 onLine(line, ctx)".into())
+                })?
+            }
+        };
 
         let mut out_bytes: u64 = 0;
         for (line_number, text) in lines.by_ref() {
@@ -373,14 +399,18 @@ pub fn run_script(
             ctx_obj
                 .set("path", source_path.as_str())
                 .map_err(|e| RunStop::Js(format!("设置 ctx.path 失败：{e}")))?;
-            let value: Value = on_line
-                .call((text, ctx_obj))
-                .map_err(|e| {
+            let value: Value = on_line.call((text, ctx_obj)).map_err(|e| {
+                if cancel() {
+                    RunStop::Cancelled
+                } else if start.elapsed() > deadline {
+                    RunStop::Js(format!("脚本超时（{MAX_SECONDS}s）"))
+                } else {
                     RunStop::Js(format!(
                         "第 {line_number} 行：{}",
                         catch_message(&ctx, e)
                     ))
-                })?;
+                }
+            })?;
             if value.is_null() || value.is_undefined() {
                 stats.dropped += 1;
             } else if value.is_string() {
@@ -394,9 +424,13 @@ pub fn run_script(
                     script_error = Some("输出超过 4 GiB 上限".into());
                     break;
                 }
-                if writer.write_all(s.as_bytes()).and_then(|_| writer.write_all(b"\n")).is_err() {
-                    return Err(RunStop::Io("写入输出文件失败".into()));
-                }
+            if writer
+                .write_all(s.as_bytes())
+                .and_then(|_| writer.write_all(b"\n"))
+                .is_err()
+            {
+                return Err(RunStop::Io("写入输出文件失败".into()));
+            }
                 out_bytes += bytes;
                 stats.written += 1;
             } else {
@@ -433,6 +467,7 @@ pub fn run_script(
     if let Err(stop) = result {
         match stop {
             RunStop::Js(msg) => script_error = Some(msg),
+            RunStop::Cancelled => cancelled = true,
             RunStop::Io(msg) => {
                 let _ = std::fs::remove_file(&tmp);
                 stats.cancelled = cancelled;
@@ -442,7 +477,12 @@ pub fn run_script(
         }
     }
     stats.cancelled = cancelled;
-    let _ = writer.flush();
+    if let Err(e) = writer.flush() {
+        let _ = std::fs::remove_file(&tmp);
+        stats.cancelled = cancelled;
+        stats.error = Some(format!("写入输出文件失败：{e}"));
+        return stats;
+    }
     if let Err(e) = std::fs::rename(&tmp, target) {
         let _ = std::fs::remove_file(&tmp);
         stats.error = Some(format!("保存输出失败：{e}"));
@@ -564,6 +604,13 @@ mod run_tests {
     }
 
     #[test]
+    fn const_arrow_on_line_is_found() {
+        let (stats, out, _) = run_case("constfn", "a\nb", "const onLine = (l) => l.toUpperCase();");
+        assert_eq!(out, "A\nB\n");
+        assert!(stats.error.is_none());
+    }
+
+    #[test]
     fn successful_run_leaves_no_tmp() {
         let dir = std::env::temp_dir().join(format!(
             "lumelog-script-tmp-{}",
@@ -664,6 +711,22 @@ mod store_tests {
         assert_eq!(v["scanned"], 2);
         assert_eq!(v["truncatedConsole"], true);
         assert!(v["error"].is_null());
+    }
+
+    #[test]
+    fn read_strips_bom_and_survives_legacy_encoding() {
+        let dir = temp_dir("readenc");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("function onLine(){ return 1; }".as_bytes());
+        std::fs::write(dir.join("bom.js"), &bytes).unwrap();
+        assert!(read_script_in(&dir, "bom.js").unwrap().starts_with("function"));
+        std::fs::write(
+            dir.join("gbk.js"),
+            [0xC0, 0xCF, b'a'], // 非 UTF-8 字节（如 GBK 保存）
+        )
+        .unwrap();
+        assert!(read_script_in(&dir, "gbk.js").unwrap().contains('a'));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

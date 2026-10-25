@@ -153,7 +153,9 @@ export function openScriptModal(opts: ScriptModalOpts): void {
       row.dataset.name = s.name;
       if (s.name === current) row.classList.add("active");
       row.append(el("span", "script-name", s.name));
-      row.append(el("span", "script-meta", `${fmtSize(s.sizeBytes)}`));
+      row.append(
+        el("span", "script-meta", `${fmtSize(s.sizeBytes)} · ${new Date(s.modifiedMs).toLocaleString()}`),
+      );
       row.addEventListener("click", () => void selectScript(s.name));
       listEl.append(row);
     }
@@ -297,6 +299,13 @@ export function openScriptModal(opts: ScriptModalOpts): void {
     }
   });
 
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      void close();
+    }
+  };
+
   const close = (): void => {
     void (async () => {
       if (running) {
@@ -306,6 +315,7 @@ export function openScriptModal(opts: ScriptModalOpts): void {
       if (!(await confirmDiscard())) return;
       overlay.remove();
       appRoot?.removeAttribute("inert");
+      document.removeEventListener("keydown", onKey, true);
       opts.onClose();
     })();
   };
@@ -314,10 +324,11 @@ export function openScriptModal(opts: ScriptModalOpts): void {
     if (e.target === overlay) void close();
   });
 
-  box.append(head, body);
   document.body.append(overlay);
+  document.addEventListener("keydown", onKey, true);
   appRoot?.setAttribute("inert", "");
   renderList();
+  closeBtn.focus();
   setStatus("");
   void refreshScripts();
 }
