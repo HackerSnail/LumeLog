@@ -6,6 +6,10 @@
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。
 
+### 终审修复波（CodeReview 全分支 0 Critical / 0 Important / 3 Minor）
+**Files:** Modify `app/frontend/src/main.ts`（M1：导出默认名改为 `<docname>.filtered.log`（取 `docStates` 的 `basenameOf(path)`）；M2：`doExport` 开头加“仅只读视图”守卫（`lists.has`），避免对可编辑文档导出磁盘未保存旧字节）；Modify `app/src-tauri/src/commands.rs`（M3：导出 worker 注释改准——导出按整任务持 doc 锁，与 `filter_run`/`can_parse` 按块加解锁不同；`export_cancel` 走独立注册表仍即时、无死锁）。
+**Why:** 终审仅余 3 项非阻塞 Minor，均低代价且 M2 是真实一致性缺口→一并修。**验证:** `npm test` 54 pass + `run build`（tsc）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（本轮仅改 main.ts 逻辑 + 注释，Rust 行为无变）。
+
 ### Task 1. lumelog-core 行过滤器加时序 + 行号轴
 **Files:** Modify `Cargo.toml`（root `[workspace.dependencies]` 加 `chrono = { version="0.4", default-features=false, features=["std"] }`）；Modify `crates/lumelog-core/Cargo.toml`（`chrono = { workspace = true }`）；Modify `crates/lumelog-core/src/filter.rs`（新 `TimeFormat{Iso,EpochSec,EpochMillis}`/`TimeSpec`/`parse_time_ms`；`LineFilter` 加 `time`/`line_range` 字段，`build` 新增 `time: Option<TimeSpec>, line_range: Option<(u64,u64)>` 参（校验抽取正则含命名组 `ts`、预解 from/to，非法→`InvalidPattern`），`keep(line_no,text)` 新增 `line_no` 参并依次过行号区间→文本 AND→时间窗（无 ts 行按 `keep_when_no_ts`））；Modify `app/src-tauri/src/commands.rs`（新签名涟漪：`scan_filter` 的 `lf.keep(line1-1,&text)`、`filter_run` 与测试 `make_filter` 的 `build(.., None, None)`）。
 **Why:** spec §2/§3.1。行号与时间是两条独立 AND 轴；时间解析用内置格式集（chrono，无偏移当 UTC，支持 RFC3339/小数秒）；无抽取正则时行号区间为退化路径。**涟漪决策：**因 `build`/`keep` 签名变更，本 Task 一并适配 `commands.rs` 现有调用（传 `None,None` 保持旧行为），保证本提交 workspace 仍可编译（时间轴/行号轴的 **功能接入** 属 Task 4）。

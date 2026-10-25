@@ -817,9 +817,11 @@ pub fn export_lines(
         .map_err(|e| fail(IpcError::from_core(e)))?;
     let file = open_export_target(&target_path).map_err(fail)?;
     tauri::async_runtime::spawn_blocking(move || {
-        // Hold the doc lock for the whole scan on this worker thread (same model
-        // as `can_parse`/`filter_run`): the main thread stays free, cancel stops
-        // promptly, and an empty/partial file is left on `errored`/`cancelled`.
+        // Export holds the doc lock for the WHOLE run (coarser than filter_run /
+        // can_parse, which lock per chunk via DocLines): the main thread stays
+        // free and `export_cancel` — via the separate cancel registry — still stops
+        // it promptly; partial bytes remain on `errored`/`cancelled`. Concurrent
+        // reads of the SAME doc block until the export finishes.
         let mut doc = doc_arc.lock().unwrap_or_else(|p| p.into_inner());
         let mut writer = BufWriter::new(file);
         let mut prog = |written: u64| {

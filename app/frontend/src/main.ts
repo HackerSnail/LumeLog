@@ -1386,6 +1386,14 @@ function openQueryPanel(): void {
       toastMsg(sel.error);
       return;
     }
+    // Export reads the on-disk DocFile; editable docs' unsaved buffer isn't on
+    // disk, so the raw-byte export would silently emit pre-edit bytes. Guard to
+    // the read-only view (mirrors applyQuery's list check).
+    const cur = tabs.active();
+    if (!cur || !lists.has(cur.info.docId)) {
+      toastMsg("仅只读大文件视图支持导出");
+      return;
+    }
     const conditions = collectConditions(conds);
     const hasAxis =
       conditions.length > 0 || sel.time !== undefined || sel.lineFrom !== undefined || sel.lineTo !== undefined;
@@ -1398,7 +1406,9 @@ function openQueryPanel(): void {
       });
       if (!ok) return;
     }
-    const path = await save({ defaultPath: "filtered.log" });
+    const ds = docStates.get(cur.info.docId);
+    const base = ds ? basenameOf(ds.path) : "log";
+    const path = await save({ defaultPath: `${base}.filtered.log` });
     if (typeof path !== "string") return;
     void exportQuery(statusEl, stopBtn, conditions, caseBox.checked, sel, path);
   };
