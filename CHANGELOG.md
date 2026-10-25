@@ -2,6 +2,58 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
+
+**依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
+
+### 终审修复波（CodeReview 全分支 0 Critical / 5 Important / 6 Minor）
+**Files:** Modify `app/frontend/src/listview.ts`、`app/frontend/src/main.ts`。
+**Why（逐条）：**①F3 被 window 层无条件劫持、与编辑器 CodeMirror searchKeymap 双响应 → 改为仅当活动文档是只读列表（`lists.has`）才接管，否则放行编辑器；②`handleClose` 漏清 `queryHits/queryCursor` 且迟到的 `onDone` 会重填已闭文档（docId 单调不复用→永久泄漏）→ handleClose 补删两图 + onDone 首行 `docStates.has` 守卫；③子集模式下 `scrollToLine/revealLine` 未按 hits 重映射、CanPanel/Ctrl+G 跳转错位且 `paintSubset` 不读 `flashIndex` → 新增 `slotForLine` 二分映射 + 子集 `paintSubset` 闪烁判定；④换编码后沿用旧解码算出的 cu16 区间与旧命中行集（同“行文本一致”约束的编码维度）→ `changeEncoding` 列表分支 `setView(null)`+清 hits+提示；⑤扫描中重开面板丢弃“停止”入口并把流式计数写进已 detach 旧节点 → `openQueryPanel` 在 `queryBusy` 时复用现有 DOM不重建。另修 Minor：⑦子集取文回传 `invalidCount` 使 §5.4 ⚠ 不再冻结（loadLines 改为返回全 payload）；⑨`await filterRun` 后补 `if(!queryBusy) queryReqId=null` 防早完成写完已结束 id；⑳声明 `queryBusy` 为全局单扫描互斥的有意行为。**Ruling（park）：**⑥“整行淡色”截断退化本轮只留计数提示（区分“截断空区间”与“仅排除空区间”需额外标记，价值低）→ M3 第2增量；⑪命中行以 JS 对象数组驻留（百万级约 100MB而非 spec 估的“数 MB”），典型命中稀少可接受，建议二增量改 `Int32Array`+稀疏区间 Map。Minor⑧（`setView(null)` 无调用方）由修复④自然获得调用。
+**验证:** `npm --prefix app/frontend test` 46 pass + `run build`（tsc 通过）；Rust 本轮无改动（上轮 workspace 测试+clippy 已净）。待定向复审（fix range）后 merge main。
+
+**定向复审（CodeReview，fix range 73573f4..a924da5）：** 8 项待验证 finding（1/2/3/4/5/7/9/10）全部 ADDRESSED，Minor 8 的 `setView(null,...)` 调用方已确认落地；无新 Critical/Important。修复波自引入两条非阻塞 Minor——**Ruling（park）**：A 子集模式 ⚠ 改为“增量批次计数”与连续模式口径不一（较修复前“完全冻结”已改善，完整累计待二增量）；B 复用面板在“跨文档切换+扫描中”时归属不明（全局单扫描互斥下的 UX 代价）；均不阻塞 merge。Out-of-scope 遗留（非本轮回归）：扫描中切编码后迟到 onDone 会用旧解码 hits 重填、handleClose 不取消在途 worker（Rust 侧会跑完已关文档）——记入后续。
+
+### Task 1. lumelog-core 行过滤求值器（纯函数）
+**Files:** Create `crates/lumelog-core/src/filter.rs`；Modify `crates/lumelog-core/src/lib.rs`（`pub mod filter;`）。
+**Why:** 提供 spec §2 的 AND-of-includes / NOT-of-excludes 谓词，产**行内 cu16 高亮区间**（`char_map` 不过 IPC），与渲染文本逐字符一致。`LineFilter::build` 编译各条件（字面走 `regex::escape`、大小写走 `RegexBuilder::case_insensitive`），`keep(line_text)->Option<Vec<Cu16Range>>`（Some=保留+包含命中的 cu16 区间升序去重；None=剔除；仅排除时 Some(空)）。字节→cu16 用前缀 `chars().map(len_utf16).sum()`。空条件文本/非法正则 → `CoreError::InvalidPattern`。
+**验证:** `cargo test -p lumelog-core filter::` 10 pass（AND 语义/排除否决/仅排除恒真/大小写/字面元字符/多字节 cu16 偏移 `错误 <emoji>`→start3 len2/空模式拒/非法正则拒/has_conditions 空假/含全真）；`cargo clippy -p lumelog-core --all-targets -- -D warnings` 净；core 其余 58 测不回归；前端无改动。
+
+### Task 2. 过滤 DTO（`lumelog-app`）
+**Files:** Modify `app/src-tauri/src/dto.rs`（新增 `FilterCondition`(+`to_core`)、`Cu16RangeJson`(+`From<Cu16Range>`)、`LineHit`、`FilterStats{kept,scanned,truncated}`、`IndexedText`、`LineContentPayload`，均 camelCase；+`filter_dto_tests`）。未接入命令前对 6 结构体/`to_core`/`From` impl 加带注释 `#[allow(dead_code)]`（Task 3/4 接入后剥除）。
+**Why:** 为 `filter_run`/`doc_lines_at` 定IPC 契约。**Ruling：**过滤模式编译错误（空条件/非法正则）由 `LineFilter::build` 返 `CoreError::InvalidPattern`，`IpcError::from_core` 已映射为 `"invalid_pattern"`（ipc.ts 已有中文表）——不再另设 `bad_regex`（那个码专属于 CAN 正则源），与 M1 搜索一致、零分叉。
+**验证:** `cargo test -p lumelog-app` 16 pass（新 4 个 `filter_dto_tests`）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 3. `filter_run` 异步流式过滤 + `filter_cancel`
+**Files:** Modify `app/src-tauri/src/commands.rs`（新增纯函数 `scan_filter<I: Iterator<Item=Line>>` + `#[tauri::command] filter_run`（异步 prologue 校验/编译条件 → `spawn_blocking` 后台扫全文件、立即 `Ok(req_id)`）+ `filter_cancel`；新常量 `HIT_RANGE_CAP=50_000`；+`filter_run_tests`）；Modify `app/src-tauri/src/lib.rs`（注册两命令）；Modify `dto.rs`（剥除 Task3 六处 `#[allow(dead_code)]`，保留 IndexedText/LineContentPayload 到 Task4）。
+**Why:** spec §3.1 只回命中行号+cu16 区间（文本不过 IPC，守 §3），`scan_filter` 走 `DocLines` 惰性逐行、每行判取消、`PARSE_BATCH` 聚合；区间驻留超 `HIT_RANGE_CAP` 降级空区间 + `truncated`。异步化同 `can_parse`：取消可用、不冻结主线程、流式实时渲染。**Ruling：**`scan_filter` 设设泛型迭代器（而非计划的 `&mut DocFile`）以便无 `DocFile` 进单测；空条件不扇出全文件扫描（prologue 直发 `on_done{0,0,false}`）。
+**验证:** `cargo test -p lumelog-app` 20 pass（新 4 个 `scan_filter_*`：AND 保留行集/升序、cu16 区间、取消早停、超 cap 截断）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端无改动。
+
+### Task 4. `doc_lines_at` 按需取子集行文本
+**Files:** Modify `app/src-tauri/src/commands.rs`（新增纯函数 `gather_lines(&mut DocFile, &[u32])` + `#[tauri::command] doc_lines_at` + `doc_lines_at_tests`）；Modify `app/src-tauri/src/lib.rs`（注册）；Modify `dto.rs`（剥除 IndexedText/LineContentPayload 最后两处 `#[allow(dead_code)]`，已全部消除）。
+**Why:** 过滤子集视图只渲染命中行，需按稀疏原始行号批量取文本（守 §3，不驻留全文）。`gather_lines` 逐行 `chunk_at(i,1)` 并按 `loadWindow` 同法去尾换行（`\n` 然 `\r`），与 `filter_run` 的 cu16 区间逐字符对齐；`indices.len()>MAX_CHUNK_LINES` → `invalid_argument`。
+**验证:** `cargo test -p lumelog-app` 23 pass（新 3 个 `gather_lines_*`：子集取回、CRLF 去尾、超 cap 拒）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端无改动。
+
+### Task 5. 前端 IPC 桥接（`ipc.ts`）
+**Files:** Modify `app/frontend/src/ipc.ts`（新增 5 个类型 `FilterCondition`/`Cu16Range`/`LineHit`/`FilterStats`/`IndexedText` + 3 个包装 `filterRun`（双 Channel、解为 req_id）/`filterCancel`/`docLinesAt`，均 camelCase 对齐 dto.rs）；Modify `app/frontend/src/ipc.test.ts`（+2 例：包装为函数、三复用错误码有中文）。
+**Why:** spec §4.3—镜像 `canParse` 双 Channel 形状；`invalid_pattern`/`unknown_request`/`invalid_argument` 已在既有联合与中文表，无需新增错误码。
+**验证:** `npm --prefix app/frontend test` 41 pass（ipc 7→9）+ `run build`（tsc 通过，41 modules）。
+
+### Task 6. `listview.ts` 子集视图 + 高亮切分
+**Files:** Modify `app/frontend/src/listview.ts`（新增导出纯函数 `sliceLineTextByRanges(text, Cu16Range[])->TextSeg[]`；ListView 新增子集视图态 `hits/hideNon/hitMap` + `setView(hits,hideNon,highlight)` + `scrollToHit(i)` + `viewTotal()`；render 分支子集/连续，子集走 `opts.loadLines`(doc_lines_at) 按可见窗口稀疏取文本、缓存按原行号键共享；paint/paintSubset 用 `renderText` 叠加 `.line-hl` span）；Modify `app/frontend/src/listview.test.ts`（+5 `sliceLineTextByRanges_*`）。
+**Why:** spec §4.2。cu16 区间用 JS `String.slice` 直切（索引即 UTF-16 码元），重叠/相邻区间先合并去重、越界丢弃（不重复 emit、不在代理对中间切，后端区间按字符对齐）。模式切换重置 renderFirst/Last 强制新窗口（Review Focus 4）；连续快路径不变（仅命中行走切分）。
+**验证:** `npm --prefix app/frontend test` 46 pass（listview 5→10）+ `run build`（tsc 通过）；Rust 无改动。
+
+### Task 7. `main.ts` 查询面板（取代旧单框搜索）
+**Files:** Modify `app/frontend/src/main.ts`（删 `openSearchFlow/renderSearchShell/runSearch/appendHits` 与 `searchRun`/`MatchJson` 导入；新增查询面板 `openQueryPanel`（多条件行 `addCondRow`/`collectConditions` + “过滤到命中行”/“高亮命中”/“区分大小写” + 应用/上一个/下一个/停止/关闭 + 状态）、`applyQuery`（`filterRun` 流式收集 hits→`onDone` 单点 `list.setView(hits,hide,hl)`、重入守卫、`queryReqId` 接 `filterCancel`）、`cycleHit`、`fetchLines`（`docLinesAt` Promise 包装）；`mountList` 注入 `loadLines`；appbar/命令面板/快捷键 `Ctrl+Shift+F` 改指 `openQueryPanel`；`registerShortcuts` 新增 F3/Shift+F3（无 mod））。
+**Why:** spec §4.1。面板统一走 `filter_run`（单条包含=原单模式搜索+高亮），**Ruling：旧 `search_run` 保留注册但退出前端主路径**（不重复异步化，避免两套正则链路）；`queryBusy` 仅在 `onDone`/catch 置否（filterRun 提前解 id）；hits 每 doc 缓存供 F3 循环（`queryHits`/`queryCursor`）。视图切换保留各 doc 的 list 实例，子集态自然持久。
+**验证:** `npm --prefix app/frontend run build`（tsc 通过，41 modules，openQueryPanel 已接）+ `npm test` 46 pass；grep 确认 `openSearchFlow/runSearch/renderSearchShell/appendHits/searchBusy` 已清除、`jumpToLine` 仍被 Ctrl+G 复用；无新单测（DOM/IPC 密集，GUI 手工验收留 Task 8）。
+
+### Task 8. 样式 + 全量验收
+**Files:** Modify `app/frontend/src/styles.css`（查询面板 `.query-conds`/`.query-cond`/`.query-chk` 与高亮 `.line-hl`（半透明琥珀色，三主题通用无需 per-theme token）；旧 `.search-head input` flex 仅作用文本框，新增 `.query-chk input{flex:0 0 auto}` 防勾选框拉伸）。
+**Why:** spec §7。面板复用 `#search-panel`（未改 index.html）；条件行走 `.query-conds` 独立滚动列，行多不顶走动作栏。
+**手工验收清单（需 `tauri dev`，headless 以单测+tsc 为门）：**① 打开 >200MB 只读日志→Ctrl+Shift+F 查询面板→加 1 条包含正则→勾“过滤到命中行”→只显命中行、行号原值；② 叠加排除字面→AND 生效、计数对；③ “高亮命中”开→命中区间背景色 + F3/Shift+F3 循环；④ 扫描中点“停止”→及时中止保留已得、按钮复位；⑤ 切标签回原 doc→子集视图保留。
+**验证（全量四门）:** `cargo test --workspace` 全绿（lumelog-app 23含 scan_filter 4+gather_lines 3、lumelog-core 68含 filter 10、lumelog-can 集成套件、cli_smoke 9/1 ignored、docfile/proptest）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 46 pass + `run build`（tsc 通过）。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。

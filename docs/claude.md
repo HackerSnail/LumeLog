@@ -40,6 +40,7 @@
 - [x] DBC 文件导入，CAN 报文翻译、信号查看
       ↳ M2 引擎已交付（Plan 2 `feat/m2-can-engine`，纯 Rust `lumelog-can`）：DBC 子集解析 + Intel/Motorola 信号位序解码（cantools golden 对拍）+ candump/ASC/正则三源 + 解码 CLI（10 万帧验收）。Plan 3 `feat/m2-can-panel` 已交付 IPC 命令层与 CanPanel 报文表格 UI：`can_parse` 后台流式解码（`spawn_blocking` + 惰性分块，边解边填、可中途 `can_cancel`）+ `dbc_import` 宽容导入 + `can_decode_snippet` 选中识别；前端 TanStack table-core 虚拟表格 + ID/消息/信号条件/时间窗视图过滤 + 行号双向跳转（列表闪烁 / 编辑器定位）
 - [ ] 日志行过滤、高亮标记、时序筛选
+      ↳ M3 子项目 A 增量1已交付（Plan 4 `feat/m3-filter-highlight`）：只读视图多条件 AND 行过滤（包含/排除 × 字面/正则 × 大小写）+ 命中区 cu16 背景高亮 + F3/Shift+F3 跳转 + 实时取消（`filter_run` 异步流式、`doc_lines_at` 按需取子集文本）；统一“查询面板”取代旧单框搜索。**时序筛选** 与 **导出筛选结果**（`export_lines`）属 M3 子项目 A 增量2，尚未实现。
 - [ ] 导出筛选后的报文/日志片段
 - [x] 自定义主题（浅 / 暗 / Dracula 三主题 + 跟随系统 + localStorage 持久化；无边框自绘标题栏；Ctrl+Shift+P 命令面板）
       ↳ UI 重构 `feat/m-ui-notelume`（参考 NoteLume）已交付：主题 token 体系、三栏外壳（侧栏/检查器/可拖分栏）、命令面板、工具条即标题栏

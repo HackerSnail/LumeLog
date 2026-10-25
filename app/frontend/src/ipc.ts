@@ -116,6 +116,40 @@ export interface CanStatsJson {
   skipped: number;
 }
 
+// ---- M3 filter DTOs (spec §6.4 / §9). camelCase to match dto.rs -------------
+
+/** One query-panel condition (`filter_run`). */
+export interface FilterCondition {
+  mode: "include" | "exclude";
+  kind: "literal" | "regex";
+  text: string;
+}
+
+/** A highlight span in UTF-16 code units within a line (JS `String.slice`). */
+export interface Cu16Range {
+  cu16Start: number;
+  cu16Len: number;
+}
+
+/** One kept line + its include-match highlight ranges, batched by `filterRun`. */
+export interface LineHit {
+  line: number;
+  ranges: Cu16Range[];
+}
+
+/** Terminal `filterRun` tally. `truncated` = range output was capped. */
+export interface FilterStats {
+  kept: number;
+  scanned: number;
+  truncated: boolean;
+}
+
+/** One requested line's decoded text (Rust `IndexedText`, from `doc_lines_at`). */
+export interface IndexedText {
+  index: number;
+  text: string;
+}
+
 /** Structured IPC error shape as it crosses the boundary (Rust `IpcError`). */
 export interface IpcErrorPayload {
   code: string;
@@ -432,4 +466,50 @@ export function canDecodeSnippet(args: {
     dbcId: args.dbcId ?? null,
     sourceKind: args.sourceKind ?? null,
   });
+}
+
+/**
+ * Stream a multi-condition AND line filter (spec §3.1). Kept lines arrive in
+ * batches on `onBatch` (line number + cu16 highlight ranges only — never line
+ * text); the tally arrives once on `onDone`. Resolves with the job id for
+ * `filterCancel`. Mirrors `canParse`'s dual-channel shape.
+ */
+export function filterRun(args: {
+  docId: number;
+  conditions: FilterCondition[];
+  caseSensitive: boolean;
+  onBatch: (h: LineHit[]) => void;
+  onDone: (s: FilterStats) => void;
+}): Promise<number> {
+  const batchCh = new Channel<LineHit[]>();
+  batchCh.onmessage = args.onBatch;
+  const doneCh = new Channel<FilterStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("filter_run", {
+    docId: args.docId,
+    conditions: args.conditions,
+    caseSensitive: args.caseSensitive,
+    onBatch: batchCh,
+    onDone: doneCh,
+  });
+}
+
+/** Ask an in-flight `filterRun` to stop. */
+export function filterCancel(requestId: number): Promise<void> {
+  return call<void>("filter_cancel", { requestId });
+}
+
+/**
+ * Fetch decoded text for a sparse set of original line indices (spec §3.2) —
+ * the filtered read-only list's on-demand window loader. Text flows back over
+ * a channel like `docChunk`.
+ */
+export function docLinesAt(args: {
+  docId: number;
+  indices: number[];
+  onData: (p: { lines: IndexedText[]; invalidCount: number }) => void;
+}): Promise<void> {
+  const ch = new Channel<{ lines: IndexedText[]; invalidCount: number }>();
+  ch.onmessage = args.onData;
+  return call<void>("doc_lines_at", { docId: args.docId, indices: args.indices, onData: ch });
 }

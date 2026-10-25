@@ -14,18 +14,22 @@ import {
   docSetEncoding,
   loadAllText,
   loadWindow,
-  searchRun,
   appPing,
   dbcImport,
   canParse,
   canCancel,
   canDecodeSnippet,
+  filterRun,
+  filterCancel,
+  docLinesAt,
   IpcError,
   type DocInfo,
   type IndexProgress,
-  type MatchJson,
   type FrameJson,
   type DbcInfo,
+  type FilterCondition,
+  type LineHit,
+  type IndexedText,
 } from "./ipc";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
@@ -153,7 +157,7 @@ function layout(): void {
   bar.append(
     appName,
     mkBtn("打开文件", "", () => void openFile()),
-    mkBtn("搜索", "在当前文档中搜索 (Ctrl+Shift+F)", () => openSearchFlow()),
+    mkBtn("查询", "行过滤 / 高亮命中 (Ctrl+Shift+F)", () => openQueryPanel()),
     mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
@@ -817,6 +821,7 @@ function mountList(info: DocInfo, path: string): void {
     totalLines: () => docStates.get(info.docId)?.totalLines ?? 0,
     indexedLines: () => indexed.get(info.docId) ?? docStates.get(info.docId)?.totalLines ?? 0,
     loadWindow: (start, count) => loadWindow(info.docId, start, count),
+    loadLines: (indices) => fetchLines(info.docId, indices),
     onInvalidCount: (n) => {
       // §5.4: every fetched window reports its unmappable count; keep the
       // status-bar ⚠ in sync (only repaint if this doc is the shown one).
@@ -987,6 +992,12 @@ async function changeEncoding(label: string): Promise<void> {
       status.setInvalidCount(invalidCount);
     } else if (list) {
       list.invalidate(); // drop stale-decoded windows; refetch on next paint
+      // cu16 ranges + the kept-row set were computed against the OLD decoding, so
+      // a filter/highlight result is meaningless now — drop it (review #4).
+      list.setView(null, false, false);
+      queryHits.delete(docId);
+      queryCursor.delete(docId);
+      toastMsg("编码已变更，请重新应用查询");
     }
     ds.encoding = updated.encoding;
     ds.eol = updated.eol || ds.eol;
@@ -1028,6 +1039,8 @@ async function handleClose(docId: number): Promise<void> {
   indexed.delete(docId);
   canStores.delete(docId);
   canFilters.delete(docId); // a closed doc drops its table; the panel is rebuilt on demand
+  queryHits.delete(docId); // drop the doc's filter hits/cursor (spec §4.1) — else a
+  queryCursor.delete(docId); // late `filter_run` onDone repopulates a closed, never-reused id
   refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
 }
@@ -1045,130 +1058,236 @@ function syncStatus(docId: number): void {
   else status.setReadonly(ds.totalLines);
 }
 
-// ---- Search (spec §6.2 read-only hit list; Ctrl+Shift+F). Task 9 scope is
-// `search_run` + hit list + snippet + click-to-locate (plan: "仅展示命中列表与
-// snippet"). A live cancel needs the async search (Task 10) — `search_run` is a
-// synchronous command that runs to completion, so no dead cancel control is
-// shown here. See CHANGELOG Ruling, consistent with Task 8 F2.
+// ---- Query panel: multi-condition line filter + highlight (M3 spec §4.1).
+// This replaces the M1 single-box read-only search (Ctrl+Shift+F). The panel
+// drives `filter_run` (AND of include/exclude × literal/regex, case toggle);
+// "过滤到命中行" toggles subset rendering, "高亮命中" overlays cu16 ranges, and
+// F3/Shift+F3 cycle hits. `search_run` stays registered on the shell but is no
+// longer the front-end path (plan Ruling: a single filter_run include-condition
+// subsumes it).
 
-const SEARCH_RENDER_CAP = 1000; // rows actually kept in the DOM
-let searchRendered = 0; // rows appended so far
-let searchTotal = 0; // hits seen so far (a counter, never a retained array)
-let searchBusy = false;
+const queryHits = new Map<number, LineHit[]>();
+const queryCursor = new Map<number, number>();
+// One scan at a time across all docs — an intentional v1 global mutex (a second
+// concurrent scan would fight over the single Stop/`queryReqId` affordance).
+let queryBusy = false;
+let queryReqId: number | null = null;
 
-function openSearchFlow(): void {
+/** Promise wrapper over the channel-based `doc_lines_at` (the subset view's loader). */
+function fetchLines(
+  docId: number,
+  indices: number[],
+): Promise<{ lines: IndexedText[]; invalidCount: number }> {
+  return new Promise((resolve, reject) => {
+    if (indices.length === 0) {
+      resolve({ lines: [], invalidCount: 0 });
+      return;
+    }
+    docLinesAt({ docId, indices, onData: (p) => resolve(p) }).catch(reject);
+  });
+}
+
+function addCondRow(conds: HTMLElement, onEnter: () => void): void {
+  const row = document.createElement("div");
+  row.className = "query-cond";
+  const mk = (opts: [string, string][], role: string): HTMLSelectElement => {
+    const s = document.createElement("select");
+    s.dataset.role = role;
+    for (const [v, t] of opts) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = t;
+      s.append(o);
+    }
+    return s;
+  };
+  const mode = mk([["include", "包含"], ["exclude", "排除"]], "mode");
+  const kind = mk([["literal", "字面"], ["regex", "正则"]], "kind");
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.placeholder = "文本 / 正则";
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.isComposing) onEnter();
+  });
+  const del = document.createElement("button");
+  del.type = "button";
+  del.textContent = "×";
+  del.addEventListener("click", () => row.remove());
+  row.append(mode, kind, inp, del);
+  conds.append(row);
+}
+
+function collectConditions(conds: HTMLElement): FilterCondition[] {
+  const out: FilterCondition[] = [];
+  for (const child of Array.from(conds.children) as HTMLElement[]) {
+    const mode = child.querySelector('[data-role="mode"]') as HTMLSelectElement | null;
+    const kind = child.querySelector('[data-role="kind"]') as HTMLSelectElement | null;
+    const inp = child.querySelector("input") as HTMLInputElement | null;
+    const text = (inp?.value ?? "").trim();
+    if (text === "") continue;
+    out.push({
+      mode: mode?.value === "exclude" ? "exclude" : "include",
+      kind: kind?.value === "regex" ? "regex" : "literal",
+      text,
+    });
+  }
+  return out;
+}
+
+async function applyQuery(
+  statusEl: HTMLElement,
+  stopBtn: HTMLButtonElement,
+  conditions: FilterCondition[],
+  caseSensitive: boolean,
+  hideNon: boolean,
+  highlight: boolean,
+): Promise<void> {
+  const a = tabs.active();
+  if (!a) return;
+  const docId = a.info.docId;
+  const list = lists.get(docId);
+  if (conditions.length === 0) {
+    toastMsg("请至少添加一条条件");
+    return;
+  }
+  if (!list) {
+    toastMsg("仅只读大文件视图支持行过滤");
+    return;
+  }
+  if (queryBusy) {
+    toastMsg("查询进行中，请稍候…");
+    return;
+  }
+  queryBusy = true;
+  queryReqId = null;
+  stopBtn.disabled = false;
+  statusEl.textContent = "扫描中…";
+  const hits: LineHit[] = [];
+  const finish = (text: string) => {
+    queryBusy = false;
+    queryReqId = null;
+    stopBtn.disabled = true;
+    statusEl.textContent = text;
+  };
+  try {
+    // Resolves as soon as the shell has validated + spawned the worker; batches
+    // keep streaming on the channels afterward (gives us the id for Stop).
+    queryReqId = await filterRun({
+      docId,
+      conditions,
+      caseSensitive,
+      onBatch: (b) => {
+        hits.push(...b);
+        statusEl.textContent = `已命中 ${hits.length} 行…`;
+      },
+      onDone: (s) => {
+        if (!docStates.has(docId)) {
+          finish("查询已取消"); // doc closed mid-scan: don't repopulate leaked state
+          return;
+        }
+        queryHits.set(docId, hits);
+        queryCursor.set(docId, hits.length ? 0 : -1);
+        list.setView(hits, hideNon, highlight);
+        finish(`命中 ${s.kept}/${s.scanned} 行` + (s.truncated ? "（高亮已截断）" : ""));
+      },
+    });
+    if (!queryBusy) queryReqId = null; // onDone already ran (empty/tiny scan beat the resolve)
+  } catch (err) {
+    reportError(err);
+    finish("查询失败");
+  }
+}
+
+function cycleHit(dir: number): void {
+  const a = tabs.active();
+  if (!a) return;
+  const hits = queryHits.get(a.info.docId);
+  if (!hits || hits.length === 0) {
+    toastMsg("尚无命中，请先应用查询");
+    return;
+  }
+  const list = lists.get(a.info.docId);
+  if (!list) {
+    toastMsg("仅只读大文件视图支持跳转");
+    return;
+  }
+  let c = (queryCursor.get(a.info.docId) ?? -1) + dir;
+  if (c < 0) c = hits.length - 1;
+  if (c >= hits.length) c = 0;
+  queryCursor.set(a.info.docId, c);
+  list.scrollToHit(c);
+}
+
+function openQueryPanel(): void {
   const a = tabs.active();
   if (!a) {
     toastMsg("请先打开一个文档");
     return;
   }
-  if (searchBusy) {
-    toastMsg("搜索进行中，请稍候…");
-    return;
-  }
-  renderSearchShell();
-}
-
-function renderSearchShell(): void {
   const panel = document.getElementById("search-panel");
   if (!panel) return;
-  panel.style.display = "";
-  panel.textContent = "";
-
-  const bar = document.createElement("div");
-  bar.className = "search-head";
-  // Inline input, not `window.prompt` (unreliable on WKWebView / webkit2gtk —
-  // the same reason I4 dropped `window.confirm`).
-  const input = document.createElement("input");
-  input.type = "text";
-  input.placeholder = "搜索内容（按当前编码的字面量匹配）";
-  const go = document.createElement("button");
-  go.textContent = "搜索";
-  const statusLine = document.createElement("span");
-  statusLine.className = "search-status";
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "关闭";
-  closeBtn.addEventListener("click", hideSearchPanel);
-  const list = document.createElement("div");
-  list.className = "search-list";
-
-  // Re-resolve the active doc on every submit: the panel persists across tab
-  // switches, so a frozen docId would scan the wrong document (round-2 fix).
-  const submit = () => {
-    const pattern = input.value;
-    const a = tabs.active();
-    if (!pattern || !a) return;
-    if (searchBusy) {
-      statusLine.textContent = "搜索进行中，请稍候…";
-      return;
-    }
-    void runSearch(a.info.docId, pattern, statusLine, list);
-  };
-  go.addEventListener("click", submit);
-  input.addEventListener("keydown", (e) => {
-    // Skip Enter while an IME is composing, else confirming a Chinese candidate
-    // word fires a search on a half-typed pattern.
-    if (e.key === "Enter" && !e.isComposing) submit();
-  });
-
-  bar.append(input, go, statusLine, closeBtn);
-  panel.append(bar, list);
-  input.focus();
-}
-
-async function runSearch(
-  docId: number,
-  pattern: string,
-  statusLine: HTMLElement,
-  list: HTMLElement,
-): Promise<void> {
-  if (searchBusy) return;
-  if (!docStates.get(docId)) {
-    statusLine.textContent = "文档已关闭";
+  if (queryBusy && panel.childElementCount > 0) {
+    // A scan is running: re-show the live panel so its Stop/status stay bound
+    // rather than rebuilding and orphaning the in-flight run (review #5).
+    panel.style.display = "";
+    (panel.querySelector(".query-cond input") as HTMLInputElement | null)?.focus();
     return;
   }
-  searchBusy = true;
-  searchRendered = 0;
-  searchTotal = 0;
-  list.textContent = "";
-  statusLine.textContent = "搜索中…";
-  try {
-    await searchRun({
-      docId,
-      pattern,
-      mode: "literal",
-      caseSensitive: true,
-      onBatch: (m) => appendHits(list, m, statusLine),
-      onDone: (s) => {
-        statusLine.textContent =
-          `命中 ${s.matches} 处，扫描 ${s.scannedBytes} 字节` +
-          (s.matches > SEARCH_RENDER_CAP ? `（仅显示前 ${SEARCH_RENDER_CAP}）` : "");
-      },
-    });
-  } catch (err) {
-    reportError(err);
-    statusLine.textContent = "搜索失败";
-  } finally {
-    searchBusy = false;
-  }
-}
+  panel.textContent = "";
+  panel.style.display = "";
 
-/** Append only new rows, bounded to `SEARCH_RENDER_CAP`; never retain hits. */
-function appendHits(list: HTMLElement, batch: MatchJson[], statusLine: HTMLElement): void {
-  searchTotal += batch.length;
-  for (const h of batch) {
-    if (searchRendered >= SEARCH_RENDER_CAP) break;
-    const row = document.createElement("div");
-    row.className = "search-row";
-    row.textContent = `第 ${h.line + 1} 行：${h.snippet}`;
-    row.addEventListener("click", () => jumpToLine(h.line));
-    list.append(row);
-    searchRendered += 1;
-  }
-  statusLine.textContent =
-    searchTotal > SEARCH_RENDER_CAP
-      ? `搜索中… 已发现 ${searchTotal} 处（仅显示前 ${SEARCH_RENDER_CAP}）`
-      : `搜索中… 已发现 ${searchTotal} 处`;
+  const head = document.createElement("div");
+  head.className = "search-head";
+  const conds = document.createElement("div");
+  conds.className = "query-conds";
+  const statusEl = document.createElement("span");
+  statusEl.className = "search-status";
+
+  const chk = (label: string, on: boolean): HTMLInputElement => {
+    const wrap = document.createElement("label");
+    wrap.className = "query-chk";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = on;
+    wrap.append(box, document.createTextNode(label));
+    head.append(wrap);
+    return box;
+  };
+  const hideBox = chk("过滤到命中行", true);
+  const hlBox = chk("高亮命中", true);
+  const caseBox = chk("区分大小写", false);
+
+  let stopBtn: HTMLButtonElement; // assigned before any handler runs
+  const btn = (label: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    head.append(b);
+    return b;
+  };
+  const apply = () =>
+    void applyQuery(
+      statusEl,
+      stopBtn,
+      collectConditions(conds),
+      caseBox.checked,
+      hideBox.checked,
+      hlBox.checked,
+    );
+  btn("＋条件", () => addCondRow(conds, apply));
+  btn("应用", apply);
+  btn("上一个", () => cycleHit(-1));
+  btn("下一个", () => cycleHit(1));
+  stopBtn = btn("停止", () => {
+    if (queryReqId !== null) void filterCancel(queryReqId).catch(reportError);
+  });
+  stopBtn.disabled = true;
+  btn("关闭", hideSearchPanel);
+
+  panel.append(head, conds, statusEl);
+  addCondRow(conds, apply);
+  (conds.querySelector("input") as HTMLInputElement | null)?.focus();
 }
 
 function hideSearchPanel(): void {
@@ -1240,7 +1359,7 @@ function buildCommands(): Command[] {
     { id: "open", title: "打开文件…", hint: "Ctrl+O", run: () => void openFile() },
     { id: "save", title: "保存", hint: "Ctrl+S", run: () => void saveActive(false) },
     { id: "save-as", title: "另存为…", hint: "Ctrl+Shift+S", run: () => void saveActive(true) },
-    { id: "search", title: "在文档中搜索…", hint: "Ctrl+Shift+F", run: () => openSearchFlow() },
+    { id: "query", title: "行过滤 / 高亮命中…", hint: "Ctrl+Shift+F", run: () => openQueryPanel() },
     { id: "jump", title: "跳转到行…", hint: "Ctrl+G", run: () => openJumpPrompt() },
     {
       id: "close",
@@ -1377,6 +1496,16 @@ function setBusy(b: boolean): void {
 
 function registerShortcuts(): void {
   window.addEventListener("keydown", (e) => {
+    if (e.key === "F3") {
+      // Only the read-only list view cycles query hits; in an editor let
+      // CodeMirror's own searchKeymap handle F3 (avoids a double response).
+      const a = tabs.active();
+      if (a && lists.has(a.info.docId)) {
+        e.preventDefault();
+        cycleHit(e.shiftKey ? -1 : 1);
+      }
+      return;
+    }
     const mod = e.ctrlKey || e.metaKey;
     if (!mod) return;
     const key = e.key.toLowerCase();
@@ -1391,7 +1520,7 @@ function registerShortcuts(): void {
       openJumpPrompt(); // Ctrl+G jump-to-line (spec §8)
     } else if (key === "f" && e.shiftKey) {
       e.preventDefault();
-      openSearchFlow();
+      openQueryPanel();
     } else if (key === "p" && e.shiftKey) {
       e.preventDefault();
       openPalette(); // Ctrl+Shift+P command palette (UI reference: NoteLume)

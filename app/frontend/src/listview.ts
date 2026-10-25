@@ -4,11 +4,19 @@
 //! absolutely positioned against a full-height spacer, so a 1 GiB log scrolls
 //! smoothly while only a few thousand line strings exist at a time.
 //!
+//! Two view modes (M3 spec §4.2):
+//!   * **contiguous** (default) — row slot k === original line k; text fetched
+//!     by a windowed `loadWindow`; optionally overlays `filter_run` highlight
+//!     ranges on matched lines (`highlight` on, `hideNon` off).
+//!   * **subset** (filtered) — the list shows only the query's kept lines; slot
+//!     k maps to `hits[k].line` (original number preserved in the gutter); text
+//!     fetched per visible window via `loadLines` (never the whole match set).
+//!
 //! This is a *view*, not an editor: `isDirty()` is always false, there is no
-//! cursor, and the only interaction is scroll + `scrollToLine`. Encoding switches
-//! re-decode by clearing the cache and refetching the live window (`invalidate`).
+//! cursor, and the only interaction is scroll + `scrollToLine`/`scrollToHit`.
 
 import type { TabView } from "./tabs";
+import type { Cu16Range, IndexedText, LineHit } from "./ipc";
 
 /** Fixed row height in px — the scroll↔line mapping is arithmetic, not binary. */
 export const ROW_HEIGHT = 20;
@@ -23,20 +31,24 @@ export interface ListViewOpts {
    *  renders as a "待索引" placeholder and is never fetched. Equals `totalLines`
    *  while indexing is synchronous (v1), streams ahead of it in Task 11. */
   indexedLines: () => number;
-  /** Fetch one window of decoded lines. Injected so the view has no IPC import. */
+  /** Fetch one window of decoded lines (contiguous mode). Injected so the view
+   *  has no IPC import. */
   loadWindow: (
     start: number,
     count: number,
   ) => Promise<{ first: number; lines: string[]; invalidCount: number }>;
-  /** Report decoded-but-unmappable counts for the live window (spec §5.4: the
-   *  status bar shows a persistent ⚠ so a wrong encoding is discoverable). */
+  /** Fetch decoded text for a sparse set of original line indices (subset mode,
+   *  `doc_lines_at`). Absent → subset mode is unavailable. Reports the batch's
+   *  unmappable count so the ⚠ (spec §5.4) stays live in the filtered view. */
+  loadLines?: (indices: number[]) => Promise<{ lines: IndexedText[]; invalidCount: number }>;
+  /** Report decoded-but-unmappable counts for the live window (spec §5.4). */
   onInvalidCount?: (count: number) => void;
 }
 
 /**
  * Pure window math (unit-tested in `listview.test.ts`, no DOM). Returns the
- * half-open line range `[first, last)` to render for a given scroll position,
- * clamped to `[0, totalLines)`.
+ * half-open range `[first, last)` of *slots* to render for a given scroll
+ * position, clamped to `[0, totalSlots)`.
  */
 export function visibleWindow(
   scrollTop: number,
@@ -52,6 +64,45 @@ export function visibleWindow(
   return { first, last };
 }
 
+/** A styled text segment: `hl` → wrap in a highlight span when painting. */
+export interface TextSeg {
+  text: string;
+  hl: boolean;
+}
+
+/**
+ * Pure (no DOM, unit-tested): split a line into styled segments by its UTF-16
+ * highlight ranges. Ranges are cu16 (JS `String.slice` indices), so this is a
+ * direct slice. Out-of-range/empty spans are dropped; overlapping/adjacent
+ * spans are merged so no character is emitted twice and highlight never splits
+ * a surrogate pair (backend ranges are char-aligned).
+ */
+export function sliceLineTextByRanges(text: string, ranges: Cu16Range[]): TextSeg[] {
+  const segs: Array<[number, number]> = [];
+  for (const r of ranges) {
+    const s = Math.max(0, Math.min(r.cu16Start, text.length));
+    const e = Math.max(0, Math.min(r.cu16Start + r.cu16Len, text.length));
+    if (e > s) segs.push([s, e]);
+  }
+  if (segs.length === 0) return [{ text, hl: false }];
+  segs.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const merged: Array<[number, number]> = [];
+  for (const [s, e] of segs) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+  const out: TextSeg[] = [];
+  let cursor = 0;
+  for (const [s, e] of merged) {
+    if (s > cursor) out.push({ text: text.slice(cursor, s), hl: false });
+    out.push({ text: text.slice(s, e), hl: true });
+    cursor = e;
+  }
+  if (cursor < text.length) out.push({ text: text.slice(cursor), hl: false });
+  return out;
+}
+
 export class ListView implements TabView {
   readonly docId: number;
   readonly root: HTMLElement;
@@ -60,11 +111,12 @@ export class ListView implements TabView {
   private readonly rows: HTMLElement;
   private readonly opts: ListViewOpts;
 
-  /** Cache of `[cacheStart, cacheEnd)` line index → text; replaced per fetch. */
+  /** Cache of original line index → text; shared by both view modes. */
   private cache = new Map<number, string>();
+  /** Contiguous-mode cached span `[cacheStart, cacheEnd)`. */
   private cacheStart = -1;
   private cacheEnd = -1;
-  /** Last `[first, last)` actually rendered — skip work when it hasn't moved. */
+  /** Last `[first, last)` slots actually rendered — skip work when unmoved. */
   private renderFirst = -1;
   private renderLast = -1;
   /** Guards against overlapping async fetches racing a fast scroll. */
@@ -73,6 +125,11 @@ export class ListView implements TabView {
   private scrollScheduled = false;
   private flashIndex = -1;
   private flashTimer = 0;
+
+  // ---- filter/subset view state (M3) ----
+  private hits: LineHit[] | null = null;
+  private hideNon = false;
+  private hitMap: Map<number, Cu16Range[]> | null = null;
 
   constructor(opts: ListViewOpts) {
     this.opts = opts;
@@ -103,9 +160,15 @@ export class ListView implements TabView {
     this.refresh();
   }
 
+  /** Number of slots in the current view (subset length, or full line count). */
+  private viewTotal(): number {
+    if (this.hits && this.hideNon) return this.hits.length;
+    return this.opts.totalLines();
+  }
+
   /** Re-measure total height and (re)render — call after open + on index progress. */
   refresh(): void {
-    const total = this.opts.totalLines();
+    const total = this.viewTotal();
     this.spacer.style.height = `${Math.max(total, 1) * ROW_HEIGHT}px`;
     this.render(true);
   }
@@ -118,12 +181,60 @@ export class ListView implements TabView {
     this.render(true);
   }
 
-  /** Bring an absolute (0-based) line into view; keeps it near the top. */
+  /**
+   * Apply a `filter_run` result. `hits=null` clears the query (plain list).
+   * Otherwise: `hideNon` → render only kept lines (subset mode); `highlight` →
+   * overlay match ranges on the visible lines (both modes). The hit array is
+   * retained for F3/Shift+F3 cycling regardless of `hideNon`.
+   */
+  setView(hits: LineHit[] | null, hideNon: boolean, highlight: boolean): void {
+    this.hits = hits;
+    this.hideNon = hits !== null && hideNon;
+    this.hitMap = hits && highlight ? new Map(hits.map((h) => [h.line, h.ranges])) : null;
+    // Switching mode changes total + slot↔line mapping; force a fresh window.
+    this.renderFirst = -1;
+    this.renderLast = -1;
+    this.refresh();
+  }
+
+  /** Bring a slot into view: subset mode uses the slot index, plain mode the
+   *  line index. Used by F3/Shift+F3 (caller tracks which hit index is current). */
+  scrollToHit(hitIndex: number): void {
+    if (!this.hits) return;
+    const slot = this.hideNon
+      ? Math.min(Math.max(0, hitIndex), this.hits.length - 1)
+      : this.hits[Math.min(Math.max(0, hitIndex), this.hits.length - 1)].line;
+    this.root.scrollTop = slot * ROW_HEIGHT;
+    this.render(true);
+  }
+
+  /** Bring an absolute (0-based) line into view; keeps it near the top. In
+   *  subset mode the original line maps to its nearest visible slot (spec §4.2:
+   *  jump/F3 locate by `hits`, not raw line count). */
   scrollToLine(zeroBasedLine: number): void {
+    if (this.hits && this.hideNon && this.hits.length) {
+      this.root.scrollTop = this.slotForLine(zeroBasedLine) * ROW_HEIGHT;
+      this.render(true);
+      return;
+    }
     const total = this.opts.totalLines();
     const line = Math.min(Math.max(0, zeroBasedLine), Math.max(0, total - 1));
     this.root.scrollTop = line * ROW_HEIGHT;
     this.render(true);
+  }
+
+  /** Subset mode: first slot whose original line is >= `line` (clamped); hits
+   *  are ascending by original line, so a binary search is exact. */
+  private slotForLine(line: number): number {
+    const hits = this.hits as LineHit[];
+    let lo = 0;
+    let hi = hits.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (hits[mid].line < line) lo = mid + 1;
+      else hi = mid;
+    }
+    return Math.min(lo, hits.length - 1);
   }
 
   /**
@@ -172,31 +283,62 @@ export class ListView implements TabView {
   }
 
   /**
-   * Render the visible window. `force` re-renders even when the range is
-   * unchanged (after a height/encoding change). Fetches only when the requested
-   * range falls outside the cached one, and never past `indexedLines`.
+   * Render the visible window of slots. `force` re-renders even when the range
+   * is unchanged (after a height/encoding/mode change). Subset mode fetches per
+   * sparse window via `loadLines`; contiguous mode via a windowed `loadWindow`.
    */
   private render(force: boolean): void {
-    const total = this.opts.totalLines();
-    const indexed = Math.min(this.opts.indexedLines(), total);
-    const { first, last } = visibleWindow(
-      this.root.scrollTop,
-      this.root.clientHeight,
-      total,
-    );
+    const subset = this.hits !== null && this.hideNon;
+    const total = this.viewTotal();
+    const { first, last } = visibleWindow(this.root.scrollTop, this.root.clientHeight, total);
     if (!force && first === this.renderFirst && last === this.renderLast) return;
     this.renderFirst = first;
     this.renderLast = last;
 
-    // Fetch only if the visible window leaves the cached block — but never
-    // past `indexed`: a window entirely ahead of the index is pure placeholder,
-    // and painting it keeps the "（待索引…）" rows on screen (Task 11 path).
+    if (subset) {
+      const hits = this.hits as LineHit[];
+      const need: number[] = [];
+      for (let k = first; k < last; k++) {
+        const line = hits[k].line;
+        if (!this.cache.has(line)) need.push(line);
+      }
+      if (need.length && this.opts.loadLines) {
+        void this.fetchSubsetAndRender(need);
+        return;
+      }
+      this.paintSubset(first, last, hits);
+      return;
+    }
+
+    const indexed = Math.min(this.opts.indexedLines(), total);
     const needEnd = Math.min(last, indexed);
     if (needEnd > first && (first < this.cacheStart || needEnd > this.cacheEnd)) {
       void this.fetchAndRender(first, needEnd);
-      return; // paint after the fetch resolves
+      return;
     }
     this.paint(first, last, indexed);
+  }
+
+  private async fetchSubsetAndRender(indices: number[]): Promise<void> {
+    const mySeq = ++this.seq;
+    const load = this.opts.loadLines;
+    if (!load) return;
+    let res: { lines: IndexedText[]; invalidCount: number };
+    try {
+      res = await load(indices);
+    } catch {
+      this.renderFirst = -1;
+      this.renderLast = -1;
+      return;
+    }
+    if (this.destroyed || mySeq !== this.seq) return;
+    this.opts.onInvalidCount?.(res.invalidCount); // spec §5.4 persistent ⚠ in filtered view
+    for (const it of res.lines) this.cache.set(it.index, it.text);
+    const total = this.viewTotal();
+    const w = visibleWindow(this.root.scrollTop, this.root.clientHeight, total);
+    this.renderFirst = w.first;
+    this.renderLast = w.last;
+    if (this.hits && this.hideNon) this.paintSubset(w.first, w.last, this.hits);
   }
 
   private async fetchAndRender(first: number, needEnd: number): Promise<void> {
@@ -217,23 +359,62 @@ export class ListView implements TabView {
     this.opts.onInvalidCount?.(res.invalidCount); // spec §5.4 persistent ⚠
     this.cache = new Map();
     for (let i = 0; i < res.lines.length; i++) this.cache.set(res.first + i, res.lines[i]);
-    // Derive the cached span from what actually arrived, not from what we
-    // asked for: the core clamps a window that runs past EOF, and claiming the
-    // requested range would serve phantom cache hits on the next scroll. Use
-    // `res.first` (the core's echoed start) as the left bound so a start that
-    // differs from our request cannot open a `[first, res.first)` phantom hole.
     const gotEnd = res.first + res.lines.length;
     this.cacheStart = res.first;
     this.cacheEnd = gotEnd;
-    // The window may have moved while awaiting; re-derive from current scroll.
-    const total = this.opts.totalLines();
+    const total = this.viewTotal();
     const w = visibleWindow(this.root.scrollTop, this.root.clientHeight, total);
     this.renderFirst = w.first;
     this.renderLast = w.last;
     this.paint(w.first, w.last, Math.min(this.opts.indexedLines(), total));
   }
 
-  /** Build the DOM rows for `[first, last)`, placeholders beyond `indexed`. */
+  /** Build a `.list-text` span's children, honouring highlight ranges when set. */
+  private renderText(textEl: HTMLElement, text: string, ranges: Cu16Range[] | null): void {
+    if (!ranges || ranges.length === 0) {
+      textEl.textContent = text;
+      return;
+    }
+    textEl.textContent = "";
+    for (const seg of sliceLineTextByRanges(text, ranges)) {
+      if (seg.hl) {
+        const s = document.createElement("span");
+        s.className = "line-hl";
+        s.textContent = seg.text;
+        textEl.append(s);
+      } else {
+        textEl.append(seg.text);
+      }
+    }
+  }
+
+  /** Build the DOM rows for slots `[first, last)` in subset mode. */
+  private paintSubset(first: number, last: number, hits: LineHit[]): void {
+    this.rows.style.transform = `translateY(${first * ROW_HEIGHT}px)`;
+    this.rows.textContent = "";
+    const frag = document.createDocumentFragment();
+    for (let k = first; k < last; k++) {
+      const hit = hits[k];
+      const row = document.createElement("div");
+      row.className = "list-row";
+      if (hit.line === this.flashIndex) row.className += " list-flash";
+      row.style.position = "absolute";
+      row.style.top = `${(k - first) * ROW_HEIGHT}px`;
+      row.style.height = `${ROW_HEIGHT}px`;
+      row.style.whiteSpace = "pre";
+      const gutter = document.createElement("span");
+      gutter.className = "list-gutter";
+      gutter.textContent = String(hit.line + 1); // original 1-based line number
+      const text = document.createElement("span");
+      text.className = "list-text";
+      this.renderText(text, this.cache.get(hit.line) ?? "", this.hitMap?.get(hit.line) ?? null);
+      row.append(gutter, text);
+      frag.append(row);
+    }
+    this.rows.append(frag);
+  }
+
+  /** Build the DOM rows for `[first, last)` in contiguous mode. */
   private paint(first: number, last: number, indexed: number): void {
     this.rows.style.transform = `translateY(${first * ROW_HEIGHT}px)`;
     this.rows.textContent = "";
@@ -255,7 +436,7 @@ export class ListView implements TabView {
         text.className += " list-pending";
         text.textContent = "（待索引…）";
       } else {
-        text.textContent = this.cache.get(line) ?? "";
+        this.renderText(text, this.cache.get(line) ?? "", this.hitMap?.get(line) ?? null);
       }
       row.append(gutter, text);
       frag.append(row);

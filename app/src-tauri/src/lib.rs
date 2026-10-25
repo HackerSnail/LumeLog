@@ -26,6 +26,9 @@ pub fn run() {
             commands::can_parse,
             commands::can_cancel,
             commands::can_decode_snippet,
+            commands::filter_run,
+            commands::filter_cancel,
+            commands::doc_lines_at,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");

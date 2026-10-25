@@ -14,6 +14,7 @@ use lumelog_can::source::{AscSource, CandumpSource, FrameSource, Line, RegexSour
 use lumelog_core::doc::{save_text, DocFile, EolStyle, OverwritePolicy, SaveOptions};
 use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::search::{search_stream, Mode, SearchQuery};
+use lumelog_core::filter::LineFilter;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
@@ -398,6 +399,11 @@ pub fn dbc_import(
 /// Frames flushed to the front end per `can_parse` `on_batch` message (spec §9
 /// "每 ≤2ms 或 4096 条聚合" — bounded well under a storm; tuned for smooth table fill).
 const PARSE_BATCH: usize = 512;
+/// Cap on how many kept lines carry cu16 highlight ranges over one `filter_run`
+/// (spec §3.1). Beyond it, kept lines still count and stream but with empty
+/// `ranges` and `truncated=true`, so a pathological "matches almost everything"
+/// scan degrades the highlight instead of ballooning memory.
+const HIT_RANGE_CAP: usize = 50_000;
 
 /// Split one `chunk_at` window into `(1-based line number, text)` pairs, dropping
 /// the window's trailing terminator so the split yields `count` lines, not a
@@ -640,6 +646,325 @@ pub fn can_decode_snippet(
             "source_format",
             "无法从选中文本解析报文行",
         )),
+    }
+}
+
+/// Drain decoded `(1-based line, text)` pairs through `lf`, emitting kept lines
+/// (include-match cu16 ranges, capped at `cap` lines) in `PARSE_BATCH` groups.
+/// `cancelled` is checked per line so a huge scan stops promptly. Pure over the
+/// iterator so it is unit-testable with a `Vec` (the command feeds `DocLines`).
+fn scan_filter<I: Iterator<Item = Line>>(
+    lines: I,
+    lf: &LineFilter,
+    emit: &mut dyn FnMut(Vec<LineHit>),
+    cancelled: &dyn Fn() -> bool,
+    cap: usize,
+) -> FilterStats {
+    let mut batch: Vec<LineHit> = Vec::new();
+    let (mut kept, mut scanned) = (0u64, 0u64);
+    let mut ranges_emitted = 0usize;
+    let mut truncated = false;
+    for (line1, text) in lines {
+        if cancelled() {
+            break;
+        }
+        scanned += 1;
+        if let Some(ranges) = lf.keep(&text) {
+            kept += 1;
+            let out = if ranges.is_empty() {
+                Vec::new()
+            } else if ranges_emitted < cap {
+                ranges_emitted += 1;
+                ranges.into_iter().map(Cu16RangeJson::from).collect()
+            } else {
+                truncated = true;
+                Vec::new()
+            };
+            batch.push(LineHit { line: line1 - 1, ranges: out });
+            if batch.len() >= PARSE_BATCH {
+                emit(std::mem::take(&mut batch));
+            }
+        }
+    }
+    if !batch.is_empty() {
+        emit(batch);
+    }
+    FilterStats { kept, scanned, truncated }
+}
+
+/// Stream a multi-condition AND line filter (spec §6.4). Async-off-main-thread
+/// like `can_parse`: the synchronous prologue validates the doc and compiles the
+/// conditions (a bad pattern rejects with `invalid_pattern` before any stream),
+/// then a blocking task scans the whole file while the command returns `req_id`
+/// immediately — so Stop works mid-flight, batches render as they arrive, and the
+/// main thread is never tied up. Only kept line numbers + cu16 ranges cross IPC;
+/// line TEXT is fetched on demand via `doc_lines_at` (spec §3, never resident).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC: doc + conditions + case + 2 channels + handles
+pub fn filter_run(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    conditions: Vec<FilterCondition>,
+    case_sensitive: bool,
+    on_batch: Channel<Vec<LineHit>>,
+    on_done: Channel<FilterStats>,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    let specs: Vec<_> = conditions.iter().map(|c| c.to_core()).collect();
+    if specs.is_empty() {
+        // Defensive no-op: the panel guards against an empty query, but never
+        // fan out into a whole-file scan that keeps every line.
+        let _ = on_done.send(FilterStats {
+            kept: 0,
+            scanned: 0,
+            truncated: false,
+        });
+        state.end_search(req_id);
+        return Ok(req_id);
+    }
+    let lf = LineFilter::build(specs, case_sensitive).map_err(|e| fail(IpcError::from_core(e)))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let lines = DocLines::new(doc_arc);
+        let mut emit = |batch: Vec<LineHit>| {
+            // A send error means the front end detached; the per-line `cancelled`
+            // check drains the remainder rather than aborting the task.
+            let _ = on_batch.send(batch);
+        };
+        let cancelled = || cancel.load(Ordering::Relaxed);
+        let stats = scan_filter(lines, &lf, &mut emit, &cancelled, HIT_RANGE_CAP);
+        let _ = on_done.send(stats);
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+/// Ask an in-flight `filter_run` to stop (shares the generic cancel registry).
+#[tauri::command]
+pub fn filter_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod filter_run_tests {
+    use super::*;
+    use lumelog_core::filter::{CondKind, CondMode, CondSpec};
+
+    fn lines(text: &str) -> Vec<Line> {
+        text.lines()
+            .enumerate()
+            .map(|(i, l)| ((i as u64) + 1, l.to_string()))
+            .collect()
+    }
+    fn make_filter(includes: &[(&str, bool)], excludes: &[&str], case: bool) -> LineFilter {
+        let mut specs: Vec<CondSpec> = Vec::new();
+        for (t, rx) in includes {
+            specs.push(CondSpec {
+                mode: CondMode::Include,
+                kind: if *rx { CondKind::Regex } else { CondKind::Literal },
+                text: (*t).to_string(),
+            });
+        }
+        for t in excludes {
+            specs.push(CondSpec {
+                mode: CondMode::Exclude,
+                kind: CondKind::Literal,
+                text: (*t).to_string(),
+            });
+        }
+        LineFilter::build(specs, case).unwrap()
+    }
+
+    #[test]
+    fn scan_filter_and_keeps_correct_lines() {
+        let lf = make_filter(&[("ERROR", false)], &["debug"], true);
+        let mut got: Vec<LineHit> = Vec::new();
+        let stats = scan_filter(
+            lines("ERROR a\ndebug b\nERROR c").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            usize::MAX,
+        );
+        assert_eq!(stats.kept, 2);
+        assert_eq!(stats.scanned, 3);
+        assert_eq!(
+            got.iter().map(|h| h.line).collect::<Vec<_>>(),
+            vec![0, 2],
+            "0-based, debug-excluded"
+        );
+    }
+
+    #[test]
+    fn scan_filter_emits_cu16_ranges() {
+        let lf = make_filter(&[("a", false)], &[], true);
+        let mut got: Vec<LineHit> = Vec::new();
+        scan_filter(
+            lines("ba\n").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            usize::MAX,
+        );
+        assert_eq!(got[0].ranges[0].cu16_start, 1);
+        assert_eq!(got[0].ranges[0].cu16_len, 1);
+    }
+
+    #[test]
+    fn scan_filter_cancel_stops_early() {
+        let lf = make_filter(&[("ERROR", false)], &[], true);
+        let mut text = String::new();
+        for _ in 0..10 {
+            text.push_str("ERROR x\n");
+        }
+        let seen = std::cell::Cell::new(0u32);
+        let mut got: Vec<LineHit> = Vec::new();
+        let stats = scan_filter(
+            lines(&text).into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| {
+                let c = seen.get();
+                seen.set(c + 1);
+                c >= 3
+            },
+            usize::MAX,
+        );
+        assert!(stats.kept < 10, "cancel stops early (kept {})", stats.kept);
+        assert!(!got.is_empty(), "some hits emitted before cancel");
+    }
+
+    #[test]
+    fn scan_filter_truncates_over_cap() {
+        let lf = make_filter(&[("x", false)], &[], true);
+        let mut got: Vec<LineHit> = Vec::new();
+        let stats = scan_filter(
+            lines("x\nx\nx\nx\n").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            2,
+        );
+        assert_eq!(stats.kept, 4);
+        assert!(stats.truncated, "cap 2 over 4 range-bearing hits truncates");
+        assert_eq!(got[0].ranges.len(), 1);
+        assert_eq!(got[1].ranges.len(), 1);
+        assert!(got[2].ranges.is_empty() && got[3].ranges.is_empty(), "later hits drop ranges");
+    }
+}
+
+/// Gather decoded text for a sparse, ascending set of 0-based line indices.
+/// Each line is fetched with `chunk_at(i, 1)` and stripped of its trailing
+/// terminator exactly like the front end's `loadWindow` (`\n` then `\r`), so the
+/// cu16 highlight ranges `filter_run` produced line up with this text
+/// character-for-character. Only the requested lines are resident — never the
+/// whole file (spec §3). Bounded by `MAX_CHUNK_LINES` per call.
+fn gather_lines(doc: &mut DocFile, indices: &[u32]) -> Result<LineContentPayload, IpcError> {
+    if indices.len() > MAX_CHUNK_LINES as usize {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!(
+                "too many lines requested ({} > {MAX_CHUNK_LINES})",
+                indices.len()
+            ),
+        ));
+    }
+    let mut lines = Vec::with_capacity(indices.len());
+    let mut invalid = 0usize;
+    for &idx in indices {
+        let chunk = doc.chunk_at(idx as usize, 1).map_err(IpcError::from_core)?;
+        invalid += chunk.invalid_count;
+        let mut text = chunk.text;
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        if text.ends_with('\r') {
+            text.pop();
+        }
+        lines.push(IndexedText { index: idx, text });
+    }
+    Ok(LineContentPayload {
+        lines,
+        invalid_count: invalid as u64,
+    })
+}
+
+/// Fetch the decoded text for the visible window of a filtered read-only list
+/// (spec §3.2). The whole file is never resident: the front end requests only
+/// the original line numbers currently shown, and text flows back over a
+/// channel like `doc_chunk`.
+#[tauri::command]
+pub fn doc_lines_at(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+    indices: Vec<u32>,
+    on_data: Channel<LineContentPayload>,
+) -> Result<(), IpcError> {
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(IpcError::new("unknown_doc", format!("no document {doc_id}"))),
+    };
+    let mut doc = doc_arc
+        .lock()
+        .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+    let payload = gather_lines(&mut doc, &indices)?;
+    let _ = on_data.send(payload);
+    Ok(())
+}
+
+#[cfg(test)]
+mod doc_lines_at_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn doc_of(content: &str) -> (NamedTempFile, DocFile) {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let doc = DocFile::open(f.path(), SIZE_LIMIT).unwrap();
+        (f, doc)
+    }
+
+    #[test]
+    fn gather_lines_returns_requested_subset() {
+        let (_k, mut doc) = doc_of("a\nbb\nccc\n");
+        let p = gather_lines(&mut doc, &[0, 2]).unwrap();
+        assert_eq!(p.lines.len(), 2);
+        assert_eq!(p.lines[0].index, 0);
+        assert_eq!(p.lines[0].text, "a");
+        assert_eq!(p.lines[1].index, 2);
+        assert_eq!(p.lines[1].text, "ccc", "terminator stripped, original index kept");
+    }
+
+    #[test]
+    fn gather_lines_strips_crlf() {
+        let (_k, mut doc) = doc_of("one\r\ntwo\r\n");
+        let p = gather_lines(&mut doc, &[1]).unwrap();
+        assert_eq!(p.lines[0].text, "two", "no trailing CR");
+    }
+
+    #[test]
+    fn gather_lines_over_cap_rejects() {
+        let (_k, mut doc) = doc_of("x\n");
+        let idx: Vec<u32> = (0..=MAX_CHUNK_LINES).collect();
+        let err = gather_lines(&mut doc, &idx).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
     }
 }
 
