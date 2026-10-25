@@ -992,6 +992,12 @@ async function changeEncoding(label: string): Promise<void> {
       status.setInvalidCount(invalidCount);
     } else if (list) {
       list.invalidate(); // drop stale-decoded windows; refetch on next paint
+      // cu16 ranges + the kept-row set were computed against the OLD decoding, so
+      // a filter/highlight result is meaningless now — drop it (review #4).
+      list.setView(null, false, false);
+      queryHits.delete(docId);
+      queryCursor.delete(docId);
+      toastMsg("编码已变更，请重新应用查询");
     }
     ds.encoding = updated.encoding;
     ds.eol = updated.eol || ds.eol;
@@ -1033,6 +1039,8 @@ async function handleClose(docId: number): Promise<void> {
   indexed.delete(docId);
   canStores.delete(docId);
   canFilters.delete(docId); // a closed doc drops its table; the panel is rebuilt on demand
+  queryHits.delete(docId); // drop the doc's filter hits/cursor (spec §4.1) — else a
+  queryCursor.delete(docId); // late `filter_run` onDone repopulates a closed, never-reused id
   refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
 }
@@ -1060,17 +1068,22 @@ function syncStatus(docId: number): void {
 
 const queryHits = new Map<number, LineHit[]>();
 const queryCursor = new Map<number, number>();
+// One scan at a time across all docs — an intentional v1 global mutex (a second
+// concurrent scan would fight over the single Stop/`queryReqId` affordance).
 let queryBusy = false;
 let queryReqId: number | null = null;
 
 /** Promise wrapper over the channel-based `doc_lines_at` (the subset view's loader). */
-function fetchLines(docId: number, indices: number[]): Promise<IndexedText[]> {
+function fetchLines(
+  docId: number,
+  indices: number[],
+): Promise<{ lines: IndexedText[]; invalidCount: number }> {
   return new Promise((resolve, reject) => {
     if (indices.length === 0) {
-      resolve([]);
+      resolve({ lines: [], invalidCount: 0 });
       return;
     }
-    docLinesAt({ docId, indices, onData: (p) => resolve(p.lines) }).catch(reject);
+    docLinesAt({ docId, indices, onData: (p) => resolve(p) }).catch(reject);
   });
 }
 
@@ -1168,12 +1181,17 @@ async function applyQuery(
         statusEl.textContent = `已命中 ${hits.length} 行…`;
       },
       onDone: (s) => {
+        if (!docStates.has(docId)) {
+          finish("查询已取消"); // doc closed mid-scan: don't repopulate leaked state
+          return;
+        }
         queryHits.set(docId, hits);
         queryCursor.set(docId, hits.length ? 0 : -1);
         list.setView(hits, hideNon, highlight);
         finish(`命中 ${s.kept}/${s.scanned} 行` + (s.truncated ? "（高亮已截断）" : ""));
       },
     });
+    if (!queryBusy) queryReqId = null; // onDone already ran (empty/tiny scan beat the resolve)
   } catch (err) {
     reportError(err);
     finish("查询失败");
@@ -1208,6 +1226,13 @@ function openQueryPanel(): void {
   }
   const panel = document.getElementById("search-panel");
   if (!panel) return;
+  if (queryBusy && panel.childElementCount > 0) {
+    // A scan is running: re-show the live panel so its Stop/status stay bound
+    // rather than rebuilding and orphaning the in-flight run (review #5).
+    panel.style.display = "";
+    (panel.querySelector(".query-cond input") as HTMLInputElement | null)?.focus();
+    return;
+  }
   panel.textContent = "";
   panel.style.display = "";
 
@@ -1472,8 +1497,13 @@ function setBusy(b: boolean): void {
 function registerShortcuts(): void {
   window.addEventListener("keydown", (e) => {
     if (e.key === "F3") {
-      e.preventDefault();
-      cycleHit(e.shiftKey ? -1 : 1); // hit-to-hit navigation (spec §4.1)
+      // Only the read-only list view cycles query hits; in an editor let
+      // CodeMirror's own searchKeymap handle F3 (avoids a double response).
+      const a = tabs.active();
+      if (a && lists.has(a.info.docId)) {
+        e.preventDefault();
+        cycleHit(e.shiftKey ? -1 : 1);
+      }
       return;
     }
     const mod = e.ctrlKey || e.metaKey;

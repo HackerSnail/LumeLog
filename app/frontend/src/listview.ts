@@ -38,8 +38,9 @@ export interface ListViewOpts {
     count: number,
   ) => Promise<{ first: number; lines: string[]; invalidCount: number }>;
   /** Fetch decoded text for a sparse set of original line indices (subset mode,
-   *  `doc_lines_at`). Absent → subset mode is unavailable. */
-  loadLines?: (indices: number[]) => Promise<IndexedText[]>;
+   *  `doc_lines_at`). Absent → subset mode is unavailable. Reports the batch's
+   *  unmappable count so the ⚠ (spec §5.4) stays live in the filtered view. */
+  loadLines?: (indices: number[]) => Promise<{ lines: IndexedText[]; invalidCount: number }>;
   /** Report decoded-but-unmappable counts for the live window (spec §5.4). */
   onInvalidCount?: (count: number) => void;
 }
@@ -207,12 +208,33 @@ export class ListView implements TabView {
     this.render(true);
   }
 
-  /** Bring an absolute (0-based) line into view; keeps it near the top. */
+  /** Bring an absolute (0-based) line into view; keeps it near the top. In
+   *  subset mode the original line maps to its nearest visible slot (spec §4.2:
+   *  jump/F3 locate by `hits`, not raw line count). */
   scrollToLine(zeroBasedLine: number): void {
+    if (this.hits && this.hideNon && this.hits.length) {
+      this.root.scrollTop = this.slotForLine(zeroBasedLine) * ROW_HEIGHT;
+      this.render(true);
+      return;
+    }
     const total = this.opts.totalLines();
     const line = Math.min(Math.max(0, zeroBasedLine), Math.max(0, total - 1));
     this.root.scrollTop = line * ROW_HEIGHT;
     this.render(true);
+  }
+
+  /** Subset mode: first slot whose original line is >= `line` (clamped); hits
+   *  are ascending by original line, so a binary search is exact. */
+  private slotForLine(line: number): number {
+    const hits = this.hits as LineHit[];
+    let lo = 0;
+    let hi = hits.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (hits[mid].line < line) lo = mid + 1;
+      else hi = mid;
+    }
+    return Math.min(lo, hits.length - 1);
   }
 
   /**
@@ -301,16 +323,17 @@ export class ListView implements TabView {
     const mySeq = ++this.seq;
     const load = this.opts.loadLines;
     if (!load) return;
-    let lines: IndexedText[];
+    let res: { lines: IndexedText[]; invalidCount: number };
     try {
-      lines = await load(indices);
+      res = await load(indices);
     } catch {
       this.renderFirst = -1;
       this.renderLast = -1;
       return;
     }
     if (this.destroyed || mySeq !== this.seq) return;
-    for (const it of lines) this.cache.set(it.index, it.text);
+    this.opts.onInvalidCount?.(res.invalidCount); // spec §5.4 persistent ⚠ in filtered view
+    for (const it of res.lines) this.cache.set(it.index, it.text);
     const total = this.viewTotal();
     const w = visibleWindow(this.root.scrollTop, this.root.clientHeight, total);
     this.renderFirst = w.first;
@@ -374,6 +397,7 @@ export class ListView implements TabView {
       const hit = hits[k];
       const row = document.createElement("div");
       row.className = "list-row";
+      if (hit.line === this.flashIndex) row.className += " list-flash";
       row.style.position = "absolute";
       row.style.top = `${(k - first) * ROW_HEIGHT}px`;
       row.style.height = `${ROW_HEIGHT}px`;
