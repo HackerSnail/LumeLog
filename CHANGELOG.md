@@ -21,6 +21,11 @@
 **Why:** 目标与源同路径会覆盖正在读的文档，prologue 拒绝；取消复用通用 registry；DTO camelCase 直接由 script 类型序列化。
 **验证:** `cargo test -p lumelog-app script` 13 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 4. 前端 IPC（脚本）
+**Files:** Modify `app/frontend/src/ipc.ts`（`ScriptEntry/Console/Progress/Stats` + `scriptList/Read/Write/Delete/Run/Cancel`，Run 三 Channel）；`ipc.test.ts`（+1 typeof 6 个）。
+**Why:** `script-ui` 不直接依赖 ipc，由 main 注入回调；与现有双/三 Channel 包装形状一致。
+**验证:** `npm test` 90 pass（ipc 16→17）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。

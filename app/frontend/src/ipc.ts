@@ -699,6 +699,78 @@ export function exportBlfJsonl(args: Omit<Parameters<typeof exportBlf>[0], "cmd"
   return exportBlf({ ...args, cmd: "can_export_blf_jsonl" });
 }
 
+// ---- User scripts (Roadmap-3: QuickJS) --------------------------------------
+
+export interface ScriptEntry {
+  name: string;
+  sizeBytes: number;
+  modifiedMs: number;
+}
+
+export interface ScriptConsole {
+  level: "log" | "info" | "warn" | "error";
+  text: string;
+}
+
+export interface ScriptProgress {
+  scanned: number;
+  written: number;
+}
+
+export interface ScriptStats {
+  scanned: number;
+  written: number;
+  dropped: number;
+  cancelled: boolean;
+  truncatedConsole: boolean;
+  error: string | null;
+}
+
+export function scriptList(): Promise<ScriptEntry[]> {
+  return call<ScriptEntry[]>("script_list", {});
+}
+
+export function scriptRead(name: string): Promise<string> {
+  return call<string>("script_read", { name });
+}
+
+export function scriptWrite(name: string, text: string): Promise<void> {
+  return call<void>("script_write", { name, text });
+}
+
+export function scriptDelete(name: string): Promise<void> {
+  return call<void>("script_delete", { name });
+}
+
+/** Run `code` over a document's lines; cancel via `scriptCancel`. */
+export function scriptRun(args: {
+  docId: number;
+  code: string;
+  targetPath: string;
+  onConsole: (m: ScriptConsole) => void;
+  onProgress: (p: ScriptProgress) => void;
+  onDone: (s: ScriptStats) => void;
+}): Promise<number> {
+  const consoleCh = new Channel<ScriptConsole>();
+  consoleCh.onmessage = args.onConsole;
+  const progCh = new Channel<ScriptProgress>();
+  progCh.onmessage = args.onProgress;
+  const doneCh = new Channel<ScriptStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("script_run", {
+    docId: args.docId,
+    code: args.code,
+    targetPath: args.targetPath,
+    onConsole: consoleCh,
+    onProgress: progCh,
+    onDone: doneCh,
+  });
+}
+
+export function scriptCancel(requestId: number): Promise<void> {
+  return call<void>("script_cancel", { requestId });
+}
+
 // ---- Crash recovery (spec §4.4/§10, M3 子项目 B1) --------------------------
 
 /** One recoverable shadow (`recovery_list` row). */
