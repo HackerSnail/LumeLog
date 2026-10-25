@@ -11,6 +11,11 @@
 **Why:** spec §2—影子 `<doc_key>.lumelog` = 首行 JSON meta + `\n` + 原始 UTF-8 文本（大文本免 JSON 转义）；`doc_key=FNV-1a64(path)` 16hex（零依赖、稳定）；写入 `.lumelogtmp`→rename；list 按 `saved_at_ms` 降序、坏文件跳过、缺失目录→空。
 **验证:** `cargo test -p lumelog-app recovery::` 7 pass（FNV 标准向量、key 稳定/区分、meta+文本往返含中文/emoji/CRLF、同 key 覆盖、排序+坏文件跳过、缺目录、discard 幂等）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 2. 存储命令 + 最小配置命令 + 注册
+**Files:** Modify `app/src-tauri/src/recovery.rs`（`read_recovery_enabled`/`set_recovery_enabled` + 4 配置/DTO 测，剥模块 allow）；Modify `app/src-tauri/src/commands.rs`（`recovery_root/dir/config_path/recovery_enabled_now` + 6 命令 `recovery_save/list/load/discard/enabled/set_enabled`；禁用时 save no-op、list 空）；Modify `app/src-tauri/Cargo.toml`（`toml="0.8"`）+ `Cargo.lock`；Modify `lib.rs`（注册 6 命令）。
+**Why:** spec §3/§3.1。命令全以 `path` 为键（后端推 FNV）；config.toml 顶层 `recovery_enabled`（缺失/坏→true），set 保留其它键；写回前 `create_dir_all`；`recovery_save` 防御式再查开关。
+**验证:** `cargo test -p lumelog-app` 67 pass（recovery 11：含 4 配置/DTO）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（新 `toml` 依赖编译通过；Cargo.lock 随本次提交）。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。

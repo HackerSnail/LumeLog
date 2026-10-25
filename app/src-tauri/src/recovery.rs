@@ -2,7 +2,6 @@
 //! edit-mode doc gets one shadow file under `<app_config>/LumeLog/recovery`:
 //! a single JSON metadata line + `\n` + the raw UTF-8 text (so a large document
 //! needs no JSON escaping). `doc_key = FNV-1a64(path)` keeps one shadow per file.
-#![allow(dead_code)] // consumed by the recovery commands (Task 2)
 
 use std::fs;
 use std::io;
@@ -136,6 +135,29 @@ pub fn discard_shadow(dir: &Path, path: &str) {
     let _ = fs::remove_file(shadow_path(dir, path));
 }
 
+// ---- minimal config switch (config.toml `recovery_enabled`) ----------------
+
+/// Parse `recovery_enabled` from a `config.toml` body. Missing, non-bool, or an
+/// unparseable file all mean "enabled" (the default is on).
+pub fn read_recovery_enabled(text: &str) -> bool {
+    toml::from_str::<toml::Table>(text)
+        .ok()
+        .and_then(|t| t.get("recovery_enabled").and_then(|v| v.as_bool()))
+        .unwrap_or(true)
+}
+
+/// Rewrite a `config.toml` body with `recovery_enabled = enabled`, preserving
+/// other keys. Unparseable input is replaced by a minimal one-key file.
+pub fn set_recovery_enabled(text: &str, enabled: bool) -> String {
+    let mut table: toml::Table = toml::from_str(text).unwrap_or_default();
+    table.insert(
+        "recovery_enabled".to_string(),
+        toml::Value::Boolean(enabled),
+    );
+    toml::to_string_pretty(&table)
+        .unwrap_or_else(|_| format!("recovery_enabled = {enabled}\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +240,55 @@ mod tests {
         assert!(read_shadow(d.path(), "C:/a.log").is_err());
         discard_shadow(d.path(), "C:/a.log"); // no panic / no error
         assert!(list_shadows(d.path()).is_empty());
+    }
+
+    #[test]
+    fn cfg_default_true_when_missing_or_bad() {
+        assert!(read_recovery_enabled(""));
+        assert!(read_recovery_enabled("bad [ toml"));
+        assert!(read_recovery_enabled("theme = \"dark\"\n"));
+        assert!(!read_recovery_enabled("recovery_enabled = false\n"));
+        assert!(read_recovery_enabled("recovery_enabled = true\n"));
+    }
+
+    #[test]
+    fn cfg_set_preserves_other_keys() {
+        let out = set_recovery_enabled("theme = \"dark\"\n", false);
+        assert!(out.contains("theme = \"dark\""), "{out}");
+        assert!(!read_recovery_enabled(&out));
+        let back = set_recovery_enabled(&out, true);
+        assert!(read_recovery_enabled(&back));
+        assert!(back.contains("theme = \"dark\""));
+    }
+
+    #[test]
+    fn cfg_set_on_bad_text_rewrites() {
+        let out = set_recovery_enabled("bad [ toml", false);
+        assert!(!read_recovery_enabled(&out));
+    }
+
+    #[test]
+    fn entry_and_content_camel_case() {
+        let e = RecoveryEntry {
+            path: "C:/a.log".into(),
+            encoding: "UTF-8".into(),
+            eol: "LF".into(),
+            saved_at_ms: 7,
+            size_bytes: 9,
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["savedAtMs"], 7);
+        assert_eq!(v["sizeBytes"], 9);
+        assert_eq!(v["path"], "C:/a.log");
+
+        let c = RecoveryContent {
+            path: "C:/a.log".into(),
+            encoding: "GBK".into(),
+            eol: "CRLF".into(),
+            text: "x".into(),
+        };
+        let vc = serde_json::to_value(&c).unwrap();
+        assert_eq!(vc["text"], "x");
+        assert_eq!(vc["eol"], "CRLF");
     }
 }
