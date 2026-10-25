@@ -37,6 +37,8 @@ import {
   docReload,
   watchStatus,
   keymapGet,
+  keymapSet,
+  keymapReset,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -53,6 +55,7 @@ import {
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, mergeBindings, type ActionId } from "./keymap";
+import { openKeymapModal } from "./keymap-ui";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -2102,6 +2105,45 @@ function applyKeymapState(): void {
   if (notes.length) toastMsg(notes.join("；"));
 }
 
+/** Persist one binding and refresh the dispatch tables (modal calls this). */
+async function applyKeymap(action: ActionId, accel: string | null): Promise<void> {
+  try {
+    await keymapSet(action, accel);
+  } catch (err) {
+    reportError(err);
+    throw err; // the modal keeps showing the old value
+  }
+  if (accel === null) delete keymapOverrides[action];
+  else keymapOverrides[action] = accel;
+  applyKeymapState();
+}
+
+/** Drop every override (back to defaults). */
+async function resetKeymapAll(): Promise<void> {
+  try {
+    await keymapReset();
+  } catch (err) {
+    reportError(err);
+    throw err;
+  }
+  keymapOverrides = {};
+  applyKeymapState();
+}
+
+function openKeymapSettings(): void {
+  if (document.querySelector(".keymap-modal")) return;
+  keymapModalOpen = true;
+  openKeymapModal({
+    actions: ACTION_DEFS.map((d) => ({ id: d.id, title: d.title })),
+    bindings: keymapState.bindings,
+    onSet: applyKeymap,
+    onResetAll: resetKeymapAll,
+    onClose: () => {
+      keymapModalOpen = false;
+    },
+  });
+}
+
 /** The command set offered by the palette, rebuilt per open so it reflects
  *  live state (e.g. hints). Titles are what `fuzzyScore` matches. */
 function buildCommands(): Command[] {
@@ -2113,6 +2155,7 @@ function buildCommands(): Command[] {
   }));
   return [
     ...bound,
+    { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
     { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },

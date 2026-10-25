@@ -31,6 +31,11 @@
 **Why:** spec §2/§3/§5—面板、分发、模态共用一套动作；旧硬编码 Ctrl+S/O/G/Shift+F/Shift+P 全部退出，生效键完全由 `keymapState` 决定。
 **验证:** `run build`（tsc 通过，44 modules）+ `npm test` 78 pass。
 
+### Task 6. 录制模态 + 样式 + 接线
+**Files:** Create `app/frontend/src/keymap-ui.ts`（`openKeymapModal`：行=标题/当前键/录制/清除/默认 + 错误行；录制独占 keydown（capture）+ Esc 取消 + `validate` + `conflictOf` 红字；“全部恢复默认”后本地重置为空默认集）；Create `keymap-ui.test.ts`（2 个 jsdom 用例：冲突拒/裸键拒/Alt+K 落盘/close changed、Esc 取消不落盘）；Modify `main.ts`（`applyKeymap`/`resetKeymapAll`/`openKeymapSettings` + 面板“快捷键设置…”）；`styles.css`（`.keymap-*`）。
+**Why:** spec §5。写盘失败时模态保留旧值并提示；模态打开时 `registerShortcuts` 短路；确认关闭回调只负责落 `keymapModalOpen`。
+**验证:** `npm test` 80 pass（13 文件，+2）+ `run build` tsc 通过（45 modules）。
+
 ## 2026-10-25 — 测试基建：jsdom DOM 单测
 
 **Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。

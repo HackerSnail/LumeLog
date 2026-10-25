@@ -307,6 +307,92 @@ html.has-custom-titlebar .win-btns {
   gap: 8px;
   justify-content: flex-end;
 }
+/* Keyboard-shortcut settings (spec §5, M3 子项目 C). */
+.keymap-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 85;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+.keymap-box {
+  width: min(680px, 94vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px var(--shadow);
+}
+.keymap-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.keymap-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.keymap-rows {
+  flex: 1 1 auto;
+  overflow: auto;
+  border-top: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+.keymap-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+}
+.keymap-name {
+  flex: 1 1 180px;
+  min-width: 120px;
+}
+.keymap-accel {
+  min-width: 110px;
+  color: var(--accent);
+  font-family: ui-monospace, monospace;
+}
+.keymap-error {
+  flex: 1 1 120px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--danger);
+}
+.keymap-record,
+.keymap-clear,
+.keymap-default,
+.keymap-reset-all,
+.keymap-close {
+  padding: 2px 8px;
+}
+.keymap-record:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.keymap-status {
+  min-height: 16px;
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 12px;
+}
+.keymap-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
 .side-item {
   padding: 6px 10px;
   cursor: pointer;
