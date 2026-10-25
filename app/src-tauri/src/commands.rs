@@ -669,7 +669,7 @@ fn scan_filter<I: Iterator<Item = Line>>(
             break;
         }
         scanned += 1;
-        if let Some(ranges) = lf.keep(&text) {
+        if let Some(ranges) = lf.keep(line1 - 1, &text) {
             kept += 1;
             let out = if ranges.is_empty() {
                 Vec::new()
@@ -731,7 +731,8 @@ pub fn filter_run(
         state.end_search(req_id);
         return Ok(req_id);
     }
-    let lf = LineFilter::build(specs, case_sensitive).map_err(|e| fail(IpcError::from_core(e)))?;
+    let lf =
+        LineFilter::build(specs, case_sensitive, None, None).map_err(|e| fail(IpcError::from_core(e)))?;
     tauri::async_runtime::spawn_blocking(move || {
         let lines = DocLines::new(doc_arc);
         let mut emit = |batch: Vec<LineHit>| {
@@ -787,7 +788,7 @@ mod filter_run_tests {
                 text: (*t).to_string(),
             });
         }
-        LineFilter::build(specs, case).unwrap()
+        LineFilter::build(specs, case, None, None).unwrap()
     }
 
     #[test]

@@ -10,6 +10,7 @@ encoding_rs = { workspace = true }
 chardetng = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

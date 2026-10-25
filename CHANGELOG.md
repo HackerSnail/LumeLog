@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
+
+**依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。
+
+### Task 1. lumelog-core 行过滤器加时序 + 行号轴
+**Files:** Modify `Cargo.toml`（root `[workspace.dependencies]` 加 `chrono = { version="0.4", default-features=false, features=["std"] }`）；Modify `crates/lumelog-core/Cargo.toml`（`chrono = { workspace = true }`）；Modify `crates/lumelog-core/src/filter.rs`（新 `TimeFormat{Iso,EpochSec,EpochMillis}`/`TimeSpec`/`parse_time_ms`；`LineFilter` 加 `time`/`line_range` 字段，`build` 新增 `time: Option<TimeSpec>, line_range: Option<(u64,u64)>` 参（校验抽取正则含命名组 `ts`、预解 from/to，非法→`InvalidPattern`），`keep(line_no,text)` 新增 `line_no` 参并依次过行号区间→文本 AND→时间窗（无 ts 行按 `keep_when_no_ts`））；Modify `app/src-tauri/src/commands.rs`（新签名涟漪：`scan_filter` 的 `lf.keep(line1-1,&text)`、`filter_run` 与测试 `make_filter` 的 `build(.., None, None)`）。
+**Why:** spec §2/§3.1。行号与时间是两条独立 AND 轴；时间解析用内置格式集（chrono，无偏移当 UTC，支持 RFC3339/小数秒）；无抽取正则时行号区间为退化路径。**涟漪决策：**因 `build`/`keep` 签名变更，本 Task 一并适配 `commands.rs` 现有调用（传 `None,None` 保持旧行为），保证本提交 workspace 仍可编译（时间轴/行号轴的 **功能接入** 属 Task 4）。
+**验证:** `cargo test -p lumelog-core filter::` 16 pass（旧 10 适配新签名 + 新 6：行号区间/ISO 窗/epoch 秒/无 ts 保留标记/缺 ts 组报错/ISO 偏移与小数秒）；`cargo test -p lumelog-app` 23 pass（旧 filter_run 测试适配）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
