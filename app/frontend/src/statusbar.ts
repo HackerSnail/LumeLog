@@ -22,6 +22,7 @@ export class Statusbar {
   private readonly dirtyEl: HTMLElement;
   private readonly posEl: HTMLElement;
   private readonly invalidEl: HTMLElement;
+  private readonly watchEl: HTMLElement;
 
   constructor(root: HTMLElement, cb: StatusbarCallbacks = {}) {
     this.root = root;
@@ -50,12 +51,24 @@ export class Statusbar {
     this.invalidEl.title = "当前编码无法映射部分字符（以 ? 显示），可能是编码选错了";
     this.invalidEl.style.display = "none";
 
+    // External-watch degradation (spec §4.4): hidden while watching works.
+    this.watchEl = mkSpan("status-watch", "");
+    this.watchEl.style.display = "none";
+
     root.append(
       mkLabel("编码"), this.encSel, this.invalidEl,
       mkLabel("行尾"), this.eolSel,
       mkLabel("语法"), this.modeSel,
-      this.dirtyEl, this.posEl,
+      this.watchEl, this.dirtyEl, this.posEl,
     );
+  }
+
+  /** Report external-watch health; `degraded` shows a warn chip + tooltip. */
+  setWatch(state: "ok" | "degraded", reason?: string): void {
+    const bad = state === "degraded";
+    this.watchEl.textContent = bad ? "外部监听已降级" : "";
+    this.watchEl.title = bad ? (reason ?? "") : "";
+    this.watchEl.style.display = bad ? "" : "none";
   }
 
   setEncoding(label: string): void {

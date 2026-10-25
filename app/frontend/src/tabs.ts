@@ -24,11 +24,21 @@ export interface TabsCallbacks {
   onDirtyChanged?: (docId: number, dirty: boolean) => void;
 }
 
+/** Presentation of the yellow "externally changed" dot (headless-testable). */
+export function externalDot(on: boolean): { text: string; warn: boolean; title: string } {
+  return {
+    text: on ? "●" : "",
+    warn: on,
+    title: on ? "文件已被外部修改" : "",
+  };
+}
+
 interface TabEntry {
   info: TabInfo;
   view: TabView;
   el: HTMLElement;
   dot: HTMLElement;
+  ext: HTMLElement;
 }
 
 /** A horizontal tab strip over a shared content host element. */
@@ -55,16 +65,19 @@ export class TabStrip {
     el.title = info.path;
     const dot = document.createElement("span");
     dot.className = "dirty-dot";
+    // Yellow marker for "changed on disk" (spec §4.4), independent of dirty.
+    const ext = document.createElement("span");
+    ext.className = "ext-dot";
     const label = document.createElement("span");
     label.className = "tab-label";
     label.textContent = basename(info.path);
-    el.append(dot, label);
+    el.append(dot, ext, label);
     el.addEventListener("click", () => this.activate(info.docId));
     el.addEventListener("auxclick", (e) => {
       if ((e as MouseEvent).button === 1) this.requestClose(info.docId);
     });
 
-    const entry: TabEntry = { info, view, el, dot };
+    const entry: TabEntry = { info, view, el, dot, ext };
     this.entries.set(info.docId, entry);
     this.order.push(info.docId);
     this.strip.append(el);
@@ -109,6 +122,16 @@ export class TabStrip {
     e.dot.textContent = dirty ? "●" : ""; // no CSS dependency (I1)
     e.dot.classList.toggle("visible", dirty);
     this.cb.onDirtyChanged?.(docId, dirty);
+  }
+
+  /** Mark a tab as externally modified (yellow dot; independent of dirty). */
+  setExternalFlag(docId: number, on: boolean): void {
+    const e = this.entries.get(docId);
+    if (!e) return;
+    const dot = externalDot(on);
+    e.ext.textContent = dot.text;
+    e.ext.classList.toggle("warn", dot.warn);
+    e.ext.title = dot.title;
   }
 
   get(docId: number): TabView | undefined {

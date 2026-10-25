@@ -21,6 +21,11 @@
 **Why:** spec §3。原地替换保 Arc 一致（`DocLines`/导出持有的 Arc 立即看到新文件）；`DocFile::open` 重建索引/刷新 `(size,mtime)`。测试夹具采用无尾换行（核心行语义：尾 `\n` 会多一空行）。
 **验证:** `cargo test -p lumelog-app` 79 pass（+3：replace 同 id 新 doc/未知 id；reload 外部改 3→5 行、`chunk_at` 新文本、`disk_meta` 刷新；未知 doc 码）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 4. 前端基础件（ipc / tabs / listview / statusbar）
+**Files:** Modify `ipc.ts`（`ExternalEvent`/`WatchStatus`/`watchSubscribe`/`docReload`/`watchRetarget`）；`tabs.ts`（`TabEntry.ext` `.ext-dot` + 可测纯函数 `externalDot(on)` + `setExternalFlag`）；`listview.ts`（`scrollTop()`/`setScrollTop()`）；`statusbar.ts`（`.status-watch` + `setWatch("ok"|"degraded", reason)`）；`styles.css`（`.ext-dot/.warn`、`.status-watch`）；Tests `ipc.test.ts`(+1)、Create `tabs.test.ts`(2)。
+**Why:** spec §3。项目无 jsdom，TabStrip 本体不可无依赖测——把黄点表现抽为 `externalDot` 纯函数单测；`.ext-dot` 独立于 `.dirty-dot`。
+**验证:** `npm test` 64 pass（10 文件，+3）+ `run build` tsc 通过（43 modules）。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。

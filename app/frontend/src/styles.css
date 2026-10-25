@@ -239,6 +239,18 @@ html.has-custom-titlebar .win-btns {
 .side-option input {
   margin: 0;
 }
+/* Yellow "changed on disk" dot beside the dirty dot (spec §4.4). */
+.ext-dot {
+  font-size: 9px;
+  line-height: 1;
+  color: transparent;
+}
+.ext-dot.warn {
+  color: var(--warn);
+}
+.status-watch {
+  color: var(--warn);
+}
 .side-item {
   padding: 6px 10px;
   cursor: pointer;
