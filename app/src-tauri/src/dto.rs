@@ -260,8 +260,7 @@ pub struct CanStatsJson {
 /// One filter condition as it arrives from the query panel. `mode` is
 /// `"include"`/`"exclude"`, `kind` is `"literal"`/`"regex"`; unknown strings
 /// degrade to include/literal rather than erroring (the panel only emits the
-// four known values, and a typo must not abort the whole scan.
-#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+/// four known values, and a typo must not abort the whole scan).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterCondition {
@@ -270,7 +269,6 @@ pub struct FilterCondition {
     pub text: String,
 }
 
-#[allow(dead_code)] // consumed by `filter_run` (Task 3)
 impl FilterCondition {
     pub fn to_core(&self) -> CondSpec {
         CondSpec {
@@ -290,7 +288,6 @@ impl FilterCondition {
 }
 
 /// A highlight span in UTF-16 code units within a line (front-end `String.slice`).
-#[allow(dead_code)] // consumed by `filter_run` (Task 3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cu16RangeJson {
@@ -298,7 +295,6 @@ pub struct Cu16RangeJson {
     pub cu16_len: u32,
 }
 
-#[allow(dead_code)] // consumed by `filter_run` (Task 3)
 impl From<Cu16Range> for Cu16RangeJson {
     fn from(r: Cu16Range) -> Self {
         Cu16RangeJson { cu16_start: r.start, cu16_len: r.len }
@@ -306,7 +302,6 @@ impl From<Cu16Range> for Cu16RangeJson {
 }
 
 /// One kept line + its include-match highlight ranges, batched (`on_batch`).
-#[allow(dead_code)] // consumed by `filter_run` (Task 3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineHit {
@@ -316,7 +311,6 @@ pub struct LineHit {
 
 /// Terminal `filter_run` tally (`on_done`). `truncated` is set when range output
 /// was capped at `HIT_RANGE_CAP` (later kept lines carry empty `ranges`).
-#[allow(dead_code)] // consumed by `filter_run` (Task 3)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterStats {

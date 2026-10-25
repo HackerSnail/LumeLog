@@ -16,6 +16,11 @@
 **Why:** 为 `filter_run`/`doc_lines_at` 定IPC 契约。**Ruling：**过滤模式编译错误（空条件/非法正则）由 `LineFilter::build` 返 `CoreError::InvalidPattern`，`IpcError::from_core` 已映射为 `"invalid_pattern"`（ipc.ts 已有中文表）——不再另设 `bad_regex`（那个码专属于 CAN 正则源），与 M1 搜索一致、零分叉。
 **验证:** `cargo test -p lumelog-app` 16 pass（新 4 个 `filter_dto_tests`）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 3. `filter_run` 异步流式过滤 + `filter_cancel`
+**Files:** Modify `app/src-tauri/src/commands.rs`（新增纯函数 `scan_filter<I: Iterator<Item=Line>>` + `#[tauri::command] filter_run`（异步 prologue 校验/编译条件 → `spawn_blocking` 后台扫全文件、立即 `Ok(req_id)`）+ `filter_cancel`；新常量 `HIT_RANGE_CAP=50_000`；+`filter_run_tests`）；Modify `app/src-tauri/src/lib.rs`（注册两命令）；Modify `dto.rs`（剥除 Task3 六处 `#[allow(dead_code)]`，保留 IndexedText/LineContentPayload 到 Task4）。
+**Why:** spec §3.1 只回命中行号+cu16 区间（文本不过 IPC，守 §3），`scan_filter` 走 `DocLines` 惰性逐行、每行判取消、`PARSE_BATCH` 聚合；区间驻留超 `HIT_RANGE_CAP` 降级空区间 + `truncated`。异步化同 `can_parse`：取消可用、不冻结主线程、流式实时渲染。**Ruling：**`scan_filter` 设设泛型迭代器（而非计划的 `&mut DocFile`）以便无 `DocFile` 进单测；空条件不扇出全文件扫描（prologue 直发 `on_done{0,0,false}`）。
+**验证:** `cargo test -p lumelog-app` 20 pass（新 4 个 `scan_filter_*`：AND 保留行集/升序、cu16 区间、取消早停、超 cap 截断）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端无改动。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。
