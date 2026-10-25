@@ -1392,7 +1392,7 @@ fn recovery_dir(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
     Ok(recovery_root(app)?.join("recovery"))
 }
 
-fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
+pub(crate) fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
     Ok(recovery_root(app)?.join("config.toml"))
 }
 

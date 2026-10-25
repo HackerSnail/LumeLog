@@ -8,6 +8,7 @@ mod commands;
 mod dto;
 mod keymap;
 mod recovery;
+mod script;
 mod state;
 mod watch;
 

@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
+
+**依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。
+
+### Task 1. MSRV 1.87 + `rquickjs` + 脚本存储/工具
+**Files:** Modify `Cargo.toml`/`app/src-tauri/Cargo.toml`（`rust-version 1.79→1.87`、`rquickjs = "0.14"`；QuickJS C 经 cc 编译成功）、`Cargo.lock`；Create `app/src-tauri/src/script.rs`（`ScriptEntry/Console/Progress/Stats`、名字校验 `^[A-Za-z0-9_-]{1,64}\.js$`、`scripts/` list/read/write/delete（tmp→rename）、有界控制台 200×4096）；Modify `lib.rs`（`mod script`）、`commands.rs`（`config_path` 提升 `pub(crate)`）、`crates/lumelog-can/src/source/mod.rs`（MSRV 1.87 使 clippy 新增 `manual_is_multiple_of` → `is_multiple_of`）。
+**Why:** 沙箱引擎与脚本存储都在 app 侧，不污染 core；脚本名只允许安全字符防目录穿越；保存原子化。MSRV 提升是 rquickjs 0.14 的硬要求（当前工具链 1.99）。
+**验证:** `cargo test -p lumelog-app script::` 3 pass（名字 8 类非法/合法、存储 roundtrip+无 tmp 残留、控制台单条截断+200 条后仅一条“已截断”）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
