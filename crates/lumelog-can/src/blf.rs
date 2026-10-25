@@ -94,7 +94,8 @@ impl BlfSource {
         }
         if header_size as usize > FILE_HEADER_MIN {
             let mut skip = vec![0u8; header_size as usize - FILE_HEADER_MIN];
-            file.read_exact(&mut skip)?;
+            file.read_exact(&mut skip)
+                .map_err(|e| io_to_format(e, "truncated file header"))?;
         }
         let start_epoch = systemtime_epoch(&head[40..56]);
         Ok(Self {
@@ -752,13 +753,11 @@ mod tests {
 
     #[test]
     fn inner_padding_at_eof_is_not_truncation() {
-        // FD64 with valid=3 => object size 75 => one byte of inner padding at EOF.
-        let obj = object(
-            CAN_FD_MESSAGE_64,
-            &fd64_payload(3, 0x11, 3, FD64_EDL, &[7, 8, 9]),
-            0,
-            TIME_ONE_NANS,
-        );
+        // 43B payload => 75B object => 3B of inner padding at EOF.
+        let mut p = fd64_payload(3, 0x11, 3, FD64_EDL, &[7, 8, 9]);
+        p.truncate(40 + 3);
+        let obj = object(CAN_FD_MESSAGE_64, &p, 0, TIME_ONE_NANS);
+        assert_eq!(obj.len(), 75 + 3, "fixture must actually carry padding");
         let path = write_temp("pad", &file(&[container(&obj, false)]));
         let mut src = BlfSource::open(&path).unwrap();
         let frames = drain(&mut src);
@@ -792,10 +791,12 @@ mod tests {
 
     #[test]
     fn fd64_ext_offset_bounds_data() {
-        // v1 header (32B) + 40B struct + 3 data bytes => ext points just past data.
+        // The bound ends after 3 real bytes; only `valid` beyond it would tempt the
+        // reader to consume the 0xEE extension bytes as payload.
+        let data = [1u8, 2, 3, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE];
         let obj = object(
             CAN_FD_MESSAGE_64,
-            &fd64_payload_with_ext(3, 0x22, 3, FD64_EDL, &[1, 2, 3], 75, &[0xEE; 8]),
+            &fd64_payload_with_ext(3, 0x22, 8, FD64_EDL, &data, 75, &[]),
             0,
             TIME_ONE_NANS,
         );
@@ -803,7 +804,7 @@ mod tests {
         let mut src = BlfSource::open(&path).unwrap();
         let f = src.next_frame().unwrap();
         assert_eq!(&f.data[..3], &[1, 2, 3]);
-        assert_eq!(f.data[3], 0, "extension bytes are not payload");
+        assert_eq!(f.data[3], 0, "extension bytes beyond ext_data_offset are not payload");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
