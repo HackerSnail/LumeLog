@@ -505,7 +505,7 @@ fn signal_value_json(s: SignalValue) -> SignalValueJson {
 /// a DBC message matches by id — its decoded signals. Never panics; a frame with
 /// no matching message just carries its raw hex (`signals: []`, `msg_name: None`).
 pub fn frame_json(f: &Frame, db: Option<&Database>) -> FrameJson {
-    let n = f.dlc as usize;
+    let n = (f.dlc as usize).min(f.data.len());
     let data_hex = f.data[..n]
         .iter()
         .map(|b| format!("{b:02X}"))

@@ -6,8 +6,14 @@
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
 
+### 终审修复波（CodeReview 全分支 1 Critical / 4 Important / 6 Minor）
+**Files:** `blf.rs`（**C1**：classic `dlc` 钳到 8（未信任输入不得穿透到 `frame_json` 的 `data[..dlc]`）；**I2**：容器末尾 1–3 字节零填充不再当作残缺对象（EOF 误报截断）；**I3**：FD64 `ext_data_offset` 边界补回 `ext_len`（v1/v2 各差 16/24B，会误读扩展数据）；**I4**：`pending` 先出队再报错（容器内出错前的帧保留，spec §5）；**I5**：tail 上限只检查残留本身（不再误拒 >64MiB 合法容器）；**M1**：EOF/损坏 zlib → `source_format`；**M2**：channel u16→u8 钳位；**M3**：SYSTEMTIME 月日/闰秒校验；新增 9 测（dlc 钳位、86、v2 头、padding EOF、错误前帧、FD64 ext、无基准时间、坏 zlib、非法日期））；`dto.rs`（**C1 防御**：`frame_json` 的 `n = min(dlc, data.len())`）；spec 同步（FD64 边界、DIR 丢弃说明、`lineNumber`=帧序号）。
+**Why:** Critical 使一个字节即可 panic 并让解析/导出 UI 永久卡死；I2/I3/I4 分别影响合法文件判定、FD64 数据正确性与“已解析帧丢失”；I5 与解压上限设计自相矛盾。
+**验证:** `cargo test -p lumelog-can blf::` 19 pass + `cargo test -p lumelog-app` 90 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+**Parks（Minor，推迟）：** M4 容器仍整段解压/复制（已有 256MiB 上限，逐块流式留待后续）；M5 `BlfStats.error` 仍透出英文 `Display`（与文本源错误码体系统一留待后续）。
+
 ### Task 1. core `lumelog-can/src/blf.rs`
-**Files:** Create `crates/lumelog-can/src/blf.rs`（`BlfSource: FrameSource`；`LOGG` 头/`SYSTEMTIME`、`LOG_CONTAINER`（无压缩/zlib2、256MiB 上限）、v1/v2 对象、类型 1/86/100/101、跨容器 tail、`take_error`、Hinnant 日历、10µs/1ns）；Modify `lib.rs`（`pub mod blf` + `pub use BlfSource`）、`Cargo.toml`/`Cargo.lock`（`flate2 = "1"`）；spec 同步 FD64 data 偏移（payload@40，ext 边界 `ext-56`）。
+**Files:** Create `crates/lumelog-can/src/blf.rs`（`BlfSource: FrameSource`；`LOGG` 头/`SYSTEMTIME`、`LOG_CONTAINER`（无压缩/zlib2、256MiB 上限）、v1/v2 对象、类型 1/86/100/101、跨容器 tail、`take_error`、Hinnant 日历、10µs/1ns）；Modify `lib.rs`（`pub mod blf` + `pub use BlfSource`）、`Cargo.toml`/`Cargo.lock`（`flate2 = "1"`）；spec 同步 FD64 data 偏移（payload@40，ext 边界 `ext-(16+ext_len+40)`）。
 **Why:** 与项目自带 candump/ASC 解析一致、可行性可控；不依赖第三方 BLF crate。FD64 首版按参照实现 `cursor+40` 偏移会错 16B（测试捕获：数据从第 17 字节开始）→ 按真实 40B 结构改为 payload@40。
 **验证:** `cargo test -p lumelog-can blf::` 10 pass（经典字段/时间 1.5s、ext/RTR/channel、FD100 dlc 9→12 + edl/brs/esi、FD64 64B、zlib 等价、跨容器一帧、10µs、未知对象 skipped、坏 magic/截断）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。另加护栏：跨容器 partial tail > 64MiB 直接报错（不无界增长）。
 

@@ -143,7 +143,9 @@ impl BlfSource {
                 )));
             }
             let mut payload = vec![0u8; obj_size as usize - OBJ_HEADER_BASE];
-            self.file.read_exact(&mut payload)?;
+            self.file
+                .read_exact(&mut payload)
+                .map_err(|e| io_to_format(e, "truncated object"))?;
             skip_padding(&mut self.file, obj_size)?;
 
             if obj_type != LOG_CONTAINER {
@@ -161,7 +163,8 @@ impl BlfSource {
                     let mut out = Vec::new();
                     ZlibDecoder::new(data)
                         .take(MAX_CONTAINER_DECOMPRESSED + 1)
-                        .read_to_end(&mut out)?;
+                        .read_to_end(&mut out)
+                        .map_err(|e| io_to_format(e, "corrupt zlib container"))?;
                     if out.len() as u64 > MAX_CONTAINER_DECOMPRESSED {
                         return Err(CanError::SourceFormat(
                             "blf: decompressed container too large".into(),
@@ -181,26 +184,33 @@ impl BlfSource {
     /// Parse complete `LOBJ` objects from one (decompressed) container, keeping a
     /// trailing partial object in `tail` for the next container.
     fn parse_container(&mut self, data: &[u8]) -> Result<(), CanError> {
-        let mut buf = std::mem::take(&mut self.tail);
-        buf.extend_from_slice(data);
-        // A single object may span containers, but a partial object cannot be
-        // larger than the object cap: refuse instead of growing without bound.
-        if buf.len() as u64 > MAX_OBJECT_SIZE + 8 {
+        // A partial object waiting for the next container cannot exceed the
+        // single-object cap (checked before merging, not after).
+        if self.tail.len() as u64 > MAX_OBJECT_SIZE {
             return Err(CanError::SourceFormat(
                 "blf: container tail exceeds object limit".into(),
             ));
         }
+        let mut buf = std::mem::take(&mut self.tail);
+        buf.extend_from_slice(data);
         let mut pos = 0usize;
         loop {
             let search_end = (pos + 8).min(buf.len());
             let found = (pos..search_end).find(|&i| buf[i..].starts_with(b"LOBJ"));
             let Some(obj_start) = found else {
-                if buf.len() - pos > 8 {
+                let rest = &buf[pos..];
+                // Trailing 1-3 bytes of zero padding after the last inner object
+                // are not a torn object; anything else short is left for the next
+                // container, and a long garbage run is corruption.
+                if rest.len() < OBJ_HEADER_BASE && rest.iter().all(|&b| b == 0) {
+                    return Ok(());
+                }
+                if rest.len() > 8 {
                     return Err(CanError::SourceFormat(
                         "blf: could not find next object".into(),
                     ));
                 }
-                self.tail = buf[pos..].to_vec();
+                self.tail = rest.to_vec();
                 return Ok(());
             };
             if obj_start + OBJ_HEADER_BASE > buf.len() {
@@ -262,7 +272,7 @@ impl BlfSource {
         let frame = match obj_type {
             CAN_MESSAGE | CAN_MESSAGE2 => self.classic_frame(payload, timestamp)?,
             CAN_FD_MESSAGE => self.fd_frame(payload, timestamp)?,
-            CAN_FD_MESSAGE_64 => self.fd64_frame(payload, timestamp)?,
+            CAN_FD_MESSAGE_64 => self.fd64_frame(payload, ext_len, timestamp)?,
             _ => {
                 self.stats.skipped += 1;
                 return Ok(());
@@ -286,7 +296,9 @@ impl BlfSource {
         }
         let channel = u16::from_le_bytes(payload[0..2].try_into().unwrap());
         let flags = payload[2];
-        let dlc = payload[3];
+        // A declared DLC beyond 8 is malformed; clamp so `frame_json`'s
+        // `data[..dlc]` can never go out of bounds (mirrors the ASC source).
+        let dlc = payload[3].min(8);
         let can_id = u32::from_le_bytes(payload[4..8].try_into().unwrap());
         let mut data = [0u8; 64];
         let n = (dlc as usize).min(8);
@@ -294,7 +306,7 @@ impl BlfSource {
         Ok(Frame {
             line_number: 0, // filled by the caller
             timestamp,
-            channel: channel.saturating_sub(1) as u8,
+            channel: channel.saturating_sub(1).min(u8::MAX as u16) as u8,
             can_id: can_id & 0x1FFF_FFFF,
             dlc,
             data,
@@ -324,7 +336,7 @@ impl BlfSource {
         Ok(Frame {
             line_number: 0,
             timestamp,
-            channel: channel.saturating_sub(1) as u8,
+            channel: channel.saturating_sub(1).min(u8::MAX as u16) as u8,
             can_id: can_id & 0x1FFF_FFFF,
             dlc: dlc2len(dlc_code),
             data,
@@ -338,7 +350,12 @@ impl BlfSource {
         })
     }
 
-    fn fd64_frame(&self, payload: &[u8], timestamp: Option<f64>) -> Result<Frame, CanError> {
+    fn fd64_frame(
+        &self,
+        payload: &[u8],
+        ext_len: usize,
+        timestamp: Option<f64>,
+    ) -> Result<Frame, CanError> {
         if payload.len() < 40 {
             return Err(CanError::SourceFormat(
                 "blf: CAN FD 64 message too small".into(),
@@ -354,8 +371,9 @@ impl BlfSource {
         // its data follows immediately (payload offset 40, not 40 + ext_len).
         let data_start = 40usize;
         let available = if ext_data_offset != 0 {
-            // ext_data_offset is in object coords; payload starts 16 bytes in.
-            ext_data_offset.saturating_sub(OBJ_HEADER_BASE + data_start)
+            // ext_data_offset is in object coords; payload starts 16 bytes in and
+            // the 40-byte struct starts after the base+version header extension.
+            ext_data_offset.saturating_sub(OBJ_HEADER_BASE + ext_len + data_start)
         } else {
             payload.len().saturating_sub(data_start)
         };
@@ -384,6 +402,10 @@ impl BlfSource {
 
 impl FrameSource for BlfSource {
     fn next_frame(&mut self) -> Option<Frame> {
+        // Frames parsed before a mid-container error stay visible (spec §5).
+        if let Some(frame) = self.pending.pop_front() {
+            return Some(frame);
+        }
         if self.error.is_some() {
             return None;
         }
@@ -391,7 +413,9 @@ impl FrameSource for BlfSource {
             Ok(frame) => frame,
             Err(e) => {
                 self.error = Some(e);
-                None
+                // `pull` may have queued frames from this container before hitting
+                // the corrupt object; hand them out first (spec §5).
+                self.pending.pop_front()
             }
         }
     }
@@ -428,9 +452,21 @@ fn skip_padding(file: &mut BufReader<File>, obj_size: u64) -> Result<(), CanErro
     let pad = (obj_size % 4) as usize;
     if pad != 0 {
         let mut buf = [0u8; 4];
-        file.read_exact(&mut buf[..pad])?;
+        file.read_exact(&mut buf[..pad])
+            .map_err(|e| io_to_format(e, "truncated object padding"))?;
     }
     Ok(())
+}
+
+/// Map EOF/corrupt-input I/O errors to the stable `source_format` code; real
+/// I/O failures stay `io`.
+fn io_to_format(e: std::io::Error, what: &str) -> CanError {
+    match e.kind() {
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidInput => {
+            CanError::SourceFormat(format!("blf: {what}: {e}"))
+        }
+        _ => e.into(),
+    }
 }
 
 /// Convert a BLF `SYSTEMTIME` (16 bytes, eight little-endian u16 fields:
@@ -443,14 +479,34 @@ fn systemtime_epoch(bytes: &[u8]) -> Option<f64> {
     let field = |i: usize| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]) as i64;
     let (year, month, day) = (field(0), field(1), field(3));
     let (hour, minute, second, ms) = (field(4), field(5), field(6), field(7));
-    if year == 0 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if year == 0 || !(1..=12).contains(&month) {
         return None;
     }
-    if hour > 23 || minute > 59 || second > 60 || ms > 999 {
+    if day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 || ms > 999 {
         return None;
     }
     let days = days_from_civil(year, month, day);
     Some(days as f64 * 86_400.0 + (hour * 3600 + minute * 60 + second) as f64 + ms as f64 / 1000.0)
+}
+
+/// Days in a Gregorian month (used to reject impossible SYSTEMTIME dates).
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (Howard Hinnant).
@@ -480,19 +536,34 @@ mod tests {
     }
 
     fn object(obj_type: u32, payload: &[u8], rel_ns: u64, flags: u32) -> Vec<u8> {
-        let obj_size = (OBJ_HEADER_BASE + 16 + payload.len()) as u32;
+        object_v(obj_type, payload, rel_ns, flags, 1)
+    }
+
+    fn object_v(
+        obj_type: u32,
+        payload: &[u8],
+        rel_ns: u64,
+        flags: u32,
+        version: u16,
+    ) -> Vec<u8> {
+        let ext = if version == 2 { 24usize } else { 16usize };
+        let header_size = (OBJ_HEADER_BASE + ext) as u16;
+        let obj_size = header_size as usize + payload.len();
         let mut v = Vec::new();
         v.extend_from_slice(b"LOBJ");
-        push_u16(&mut v, (OBJ_HEADER_BASE + 16) as u16);
-        push_u16(&mut v, 1);
-        push_u32(&mut v, obj_size);
+        push_u16(&mut v, header_size);
+        push_u16(&mut v, version);
+        push_u32(&mut v, obj_size as u32);
         push_u32(&mut v, obj_type);
         push_u32(&mut v, flags);
         push_u16(&mut v, 0); // client index
         push_u16(&mut v, 0); // object version
         v.extend_from_slice(&rel_ns.to_le_bytes());
+        if version == 2 {
+            v.extend_from_slice(&0u64.to_le_bytes()); // original timestamp
+        }
         v.extend_from_slice(payload);
-        let pad = obj_size as usize % 4;
+        let pad = obj_size % 4;
         v.extend_from_slice(&vec![0u8; pad]);
         v
     }
@@ -533,11 +604,15 @@ mod tests {
     }
 
     fn file(objects: &[Vec<u8>]) -> Vec<u8> {
+        file_with_start(start_time(), objects)
+    }
+
+    fn file_with_start(start: [u16; 8], objects: &[Vec<u8>]) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(b"LOGG");
         push_u32(&mut v, 144);
         v.resize(40, 0);
-        for x in start_time() {
+        for x in start {
             push_u16(&mut v, x);
         }
         v.resize(144, 0);
@@ -595,6 +670,20 @@ mod tests {
         p
     }
 
+    fn fd64_payload_with_ext(
+        dlc_code: u8,
+        id: u32,
+        valid: u8,
+        fd_flags: u32,
+        data: &[u8],
+        ext: u8,
+        extra: &[u8],
+    ) -> Vec<u8> {
+        let mut p = fd64_payload(dlc_code, id, valid, fd_flags, data);
+        p[35] = ext;
+        p.extend_from_slice(extra);
+        p
+    }
     fn fd64_payload(dlc_code: u8, id: u32, valid: u8, fd_flags: u32, data: &[u8]) -> Vec<u8> {
         let mut p = vec![3u8, dlc_code, valid, 0];
         push_u32(&mut p, id);
@@ -611,6 +700,155 @@ mod tests {
     }
 
     // ---- tests --------------------------------------------------------------
+
+    #[test]
+    fn classic_dlc_over_8_is_clamped() {
+        let obj = object(
+            CAN_MESSAGE,
+            &classic_payload(1, 0, 200, 0x70, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            0,
+            TIME_ONE_NANS,
+        );
+        let path = write_temp("dlc", &file(&[container(&obj, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        let f = src.next_frame().unwrap();
+        assert_eq!(f.dlc, 8, "malformed DLC is clamped, not propagated");
+        assert_eq!(&f.data[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn message2_uses_classic_layout() {
+        let obj = object(
+            CAN_MESSAGE2,
+            &classic_payload(1, 0, 2, 0x123, &[9, 8]),
+            0,
+            TIME_ONE_NANS,
+        );
+        let path = write_temp("msg2", &file(&[container(&obj, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        let f = src.next_frame().unwrap();
+        assert_eq!(f.can_id, 0x123);
+        assert_eq!(&f.data[..2], &[9, 8]);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn header_v2_object_is_parsed() {
+        let obj = object_v(
+            CAN_MESSAGE,
+            &classic_payload(1, 0, 1, 0x321, &[5]),
+            0,
+            TIME_ONE_NANS,
+            2,
+        );
+        let path = write_temp("hv2", &file(&[container(&obj, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        let f = src.next_frame().unwrap();
+        assert_eq!(f.can_id, 0x321);
+        assert_eq!(f.data[0], 5);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn inner_padding_at_eof_is_not_truncation() {
+        // FD64 with valid=3 => object size 75 => one byte of inner padding at EOF.
+        let obj = object(
+            CAN_FD_MESSAGE_64,
+            &fd64_payload(3, 0x11, 3, FD64_EDL, &[7, 8, 9]),
+            0,
+            TIME_ONE_NANS,
+        );
+        let path = write_temp("pad", &file(&[container(&obj, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        let frames = drain(&mut src);
+        assert_eq!(frames.len(), 1);
+        assert!(src.take_error().is_none(), "padding must not look truncated");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn frames_before_error_are_kept() {
+        let good = object(
+            CAN_MESSAGE,
+            &classic_payload(1, 0, 1, 0x80, &[1]),
+            0,
+            TIME_ONE_NANS,
+        );
+        let mut bad = Vec::new();
+        bad.extend_from_slice(b"LOBJ");
+        push_u16(&mut bad, 16);
+        push_u16(&mut bad, 1);
+        push_u32(&mut bad, 4); // object_size < 16 => corrupt
+        push_u32(&mut bad, 999);
+        let inner = [good, bad].concat();
+        let path = write_temp("partial", &file(&[container(&inner, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        assert!(src.next_frame().is_some(), "frame before the error stays visible");
+        assert!(src.next_frame().is_none());
+        assert_eq!(src.take_error().unwrap().ipc_code(), "source_format");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn fd64_ext_offset_bounds_data() {
+        // v1 header (32B) + 40B struct + 3 data bytes => ext points just past data.
+        let obj = object(
+            CAN_FD_MESSAGE_64,
+            &fd64_payload_with_ext(3, 0x22, 3, FD64_EDL, &[1, 2, 3], 75, &[0xEE; 8]),
+            0,
+            TIME_ONE_NANS,
+        );
+        let path = write_temp("fdext", &file(&[container(&obj, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        let f = src.next_frame().unwrap();
+        assert_eq!(&f.data[..3], &[1, 2, 3]);
+        assert_eq!(f.data[3], 0, "extension bytes are not payload");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn no_start_time_is_relative() {
+        let obj = object(
+            CAN_MESSAGE,
+            &classic_payload(1, 0, 1, 0x90, &[1]),
+            1_500_000_000,
+            TIME_ONE_NANS,
+        );
+        let path = write_temp("notime", &file_with_start([0; 8], &[container(&obj, false)]));
+        let mut src = BlfSource::open(&path).unwrap();
+        let f = src.next_frame().unwrap();
+        assert!((f.timestamp.unwrap() - 1.5).abs() < 1e-9);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn corrupt_zlib_is_source_format() {
+        let mut inner = container(&[], true);
+        // Corrupt the deflate payload (starts after the 16B object + 16B container headers).
+        let idx = OBJ_HEADER_BASE + LOG_CONTAINER_HEADER + 2;
+        inner[idx] ^= 0xFF;
+        let path = write_temp("badzlib", &file(&[inner]));
+        let mut src = BlfSource::open(&path).unwrap();
+        assert!(src.next_frame().is_none());
+        let err = src.take_error().unwrap();
+        assert_eq!(err.ipc_code(), "source_format");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn invalid_systemtime_is_none() {
+        let st = |y: u16, m: u16, d: u16, s: u16| {
+            let mut b = Vec::new();
+            for x in [y, m, 0, d, 0, 0, s, 0] {
+                b.extend_from_slice(&x.to_le_bytes());
+            }
+            b
+        };
+        assert!(systemtime_epoch(&st(2020, 2, 31, 0)).is_none(), "Feb 31");
+        assert!(systemtime_epoch(&st(2020, 1, 2, 60)).is_none(), "leap second");
+        assert!(systemtime_epoch(&st(2020, 2, 29, 0)).is_some(), "2020 is a leap year");
+    }
 
     #[test]
     fn classic_frame_fields_and_time() {
