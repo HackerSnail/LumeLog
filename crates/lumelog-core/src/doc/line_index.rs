@@ -48,6 +48,22 @@ impl LineIndex {
             idx
         }
     }
+
+    /// Extend the index with bytes appended at `base_offset` (the previous
+    /// `file_size`). Only `0x0A` starts a new line, matching the builder; this is
+    /// correct whether the old file ended with a newline (the trailing empty
+    /// line's offset already exists) or not (the appended bytes continue it).
+    pub fn extend(&mut self, appended: &[u8], base_offset: u64) -> Result<(), CoreError> {
+        for local in memchr::memchr_iter(b'\n', appended) {
+            let start = base_offset + local as u64 + 1;
+            if start > u32::MAX as u64 {
+                return Err(CoreError::TooLarge);
+            }
+            self.offsets.push(start as u32);
+        }
+        self.file_size = base_offset + appended.len() as u64;
+        Ok(())
+    }
 }
 
 /// Build a line index from a full in-memory buffer (tests + CLI convenience).
@@ -228,5 +244,45 @@ mod tests {
         assert_eq!(idx.line_at_byte(3), 0); // the \n at index 3 belongs to line 0
         assert_eq!(idx.line_at_byte(4), 1);
         assert_eq!(idx.line_at_byte(7), 2);
+    }
+
+    #[test]
+    fn extend_after_trailing_lf() {
+        let mut idx = build(b"a\nb\n").unwrap(); // [0,2,4] (trailing empty line)
+        idx.extend(b"c\n", 4).unwrap();
+        assert_eq!(offs(&idx), vec![0, 2, 4, 6]);
+        assert_eq!(idx.file_size(), 6);
+    }
+
+    #[test]
+    fn extend_after_no_trailing_lf() {
+        let mut idx = build(b"a\nb").unwrap(); // [0,2], size 3
+        idx.extend(b"\nc", 3).unwrap();
+        assert_eq!(offs(&idx), vec![0, 2, 4]);
+        assert_eq!(idx.line_range(2), Some((4, 5)));
+    }
+
+    #[test]
+    fn extend_empty_noop() {
+        let mut idx = build(b"a\n").unwrap();
+        idx.extend(b"", 2).unwrap();
+        assert_eq!(offs(&idx), vec![0, 2]);
+        assert_eq!(idx.file_size(), 2);
+    }
+
+    #[test]
+    fn extend_multiple_lf() {
+        let mut idx = build(b"").unwrap();
+        idx.extend(b"x\ny\n", 0).unwrap();
+        assert_eq!(offs(&idx), vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn extend_overflow_rejected() {
+        let mut idx = build(b"").unwrap();
+        assert!(matches!(
+            idx.extend(b"\n", u32::MAX as u64),
+            Err(CoreError::TooLarge)
+        ));
     }
 }

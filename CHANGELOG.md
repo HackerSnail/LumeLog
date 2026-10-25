@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
+
+**依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。
+
+### Task 1. core `LineIndex::extend`
+**Files:** Modify `crates/lumelog-core/src/doc/line_index.rs`（`extend(appended,base_offset)`：只扫追加字节 `0x0A`，推 `base+i+1`；越界→`TooLarge`；更新 `file_size`）+ 5 单测。
+**Why:** tail 追加不应重建全文；尾有/无 LF 两种旧状态均只需推 LF+1（不重复起点）。
+**验证:** `cargo test -p lumelog-core line_index::` 14 pass（+5：尾有 LF/尾无 LF/空追加/多 LF/4GB 越界）+ `cargo clippy -p lumelog-core --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。
