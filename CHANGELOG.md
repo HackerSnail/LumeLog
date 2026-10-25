@@ -2,6 +2,46 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 8 M3 外部修改监听（feat/m3-external-watch）
+
+**依据：** spec `docs/specs/2026-10-25-m3-external-watch-design.md`；计划 `docs/plans/2026-10-25-m3-external-watch.md`（M3 子项目 B2：已打开文档的外部修改持续监听 + 干净自动重载 + 脏黄点/三选）。
+
+### 终审修复波（CodeReview 全分支 1 Critical / 4 Important / 3 Minor，全修）
+**Files:** `watch.rs`（**Critical**：watcher 移入独立 `Mutex`，`notify` 的 watch/unwatch 不再持 `shared` 锁调用（回调会抢它，可能死锁）；`registry.paths` 改 `HashMap<PathBuf,u32>`（同文件多标签/关闭重开不再丢监听）；`status()` 公开）；`state.rs`（`DocSnapshot` 别名；`snapshot_for_path` 在 doc 锁内成对读 `disk_meta`+当前磁盘，并按 `canonicalize` 比较路径）；`commands.rs`（**Save-As 后端重绑 `DocFile` 到新路径**（path/index/cache/快照/冲突基线跟随）并在**释放 doc 锁后** `retarget(old,new)`；`watch_retarget` 改为 `watch_status`）；`lib.rs`；`ipc.ts`/`ipc.test`（`watchStatus`）；`main.ts`（`confirmExternalConflict(detail)` 保留 `err.zh` 知情细节；重载 `await` 后重校验关闭/重开与“途中输入”保护；`handleClose→Promise<boolean>`，模式切换不二次确认也不误开新标签；打开后刷新 watch 状态）；docs spec/plan 同步。
+**Why:** Critical 为真实死锁窗口（持锁调 notify 等事件线程 ack，而事件线程在 handler 里等同一把锁）；Important：Save-As 后监听静默失效（doc 仍绑旧 path→新路径事件永无匹配、`doc_reload` 也会重载旧文件）、三选丢失冲突 detail、同路径多文档丢监听、重载后不校验状态（可覆盖途中输入/向已关标签写状态）。Minor：快照与 stat 的 TOCTOU 误报、启动后降级不上报、模式切换依赖已捕获引用。
+**验证:** `cargo test -p lumelog-app` 80 pass（+`registry_same_path_keeps_watch_until_last_close`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm test` 64 pass + `npm run build` tsc 通过。
+**定向复审：** 8/8 ADDRESSED、无阻塞新问题；追加修：模式切换关标签后 `watchPending.delete`（防重放到死 docId）、`afterSave` 后 `refreshWatchStatus`（Save-As 新目录降级及时上报）、spec §5 同步 `watchStatus`。
+
+### Task 1. `watch` 纯逻辑
+**Files:** Create `app/src-tauri/src/watch.rs`（`ExternalKind{Changed,Removed}` lowercase serde；`classify(disk,snapshot)`；`WatchRegistry{dirs refcount,paths}` + `watch/unwatch/tracked`；`ExternalEvent{path,kind}` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod watch;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
+**Why:** spec §2—`classify` 用式样：`disk==snapshot`→None（自我写入/无变化）、`None`→Removed、否则 Changed；监视单位=父目录，同目录 refcount 归零才停；裸文件名退化为 `.`。
+**验证:** `cargo test -p lumelog-app watch::` 7 pass（等值忽略/size或mtime变/缺失/同目录只 watch 一次/refcount 归零/相对名 `.`/事件 lowercase 往返）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 2. `AppWatch` 运行态 + 订阅 + 文档生命周期挂钩
+**Files:** Modify `app/src-tauri/src/watch.rs`（`WatchStatus`、`Inner`、`AppWatch{start/watch_path/unwatch_path/retarget}`、`debounce_loop`（Condvar 500ms 静默窗）、`WatchRegistry::dirs`）；Modify `state.rs`（`snapshot_for_path` + 测）；Modify `commands.rs`（`watch_subscribe`/`watch_retarget`；`doc_open` 成功后 `watch_path`、`doc_close` 前 `unwatch_path`）；Modify `lib.rs`（manage `AppWatch` + 注册 2 命令）；Modify `Cargo.toml`（`notify="6"`）+ `Cargo.lock`。
+**Why:** spec §2。watcher 回调只入 `pending` 并唤醒；去抖线程等首个事件后持续等到 500ms 无新事件才 drain；drain 时按 `snapshot_for_path` 逐 doc `classify`（Removed 优先、每 path 只发一条）；watcher 创建失败→`degraded` 不阻塞。
+**验证:** `cargo test -p lumelog-app` 76 pass（+2：`snapshot_for_path` 同 path 两 doc/未知 path；`watch_status_starts_not_degraded`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（notify 6.1.1 编译通过）。
+
+### Task 3. `AppDocs::replace` + `doc_reload`
+**Files:** Modify `app/src-tauri/src/state.rs`（`replace(id,doc)` 锁同一 Arc 原地赋值 + 测）；Modify `commands.rs`（可测 `reload_doc(state,doc_id)` + `#[tauri::command] doc_reload`；重开前 `validate_open_path`，超限→`too_large`；返回新 `DocInfo`（同 id，mode 可能变）+完成 tick；+ `reload_tests` 2 例）；Modify `lib.rs`（注册）。
+**Why:** spec §3。原地替换保 Arc 一致（`DocLines`/导出持有的 Arc 立即看到新文件）；`DocFile::open` 重建索引/刷新 `(size,mtime)`。测试夹具采用无尾换行（核心行语义：尾 `\n` 会多一空行）。
+**验证:** `cargo test -p lumelog-app` 79 pass（+3：replace 同 id 新 doc/未知 id；reload 外部改 3→5 行、`chunk_at` 新文本、`disk_meta` 刷新；未知 doc 码）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 4. 前端基础件（ipc / tabs / listview / statusbar）
+**Files:** Modify `ipc.ts`（`ExternalEvent`/`WatchStatus`/`watchSubscribe`/`docReload`/`watchRetarget`）；`tabs.ts`（`TabEntry.ext` `.ext-dot` + 可测纯函数 `externalDot(on)` + `setExternalFlag`）；`listview.ts`（`scrollTop()`/`setScrollTop()`）；`statusbar.ts`（`.status-watch` + `setWatch("ok"|"degraded", reason)`）；`styles.css`（`.ext-dot/.warn`、`.status-watch`）；Tests `ipc.test.ts`(+1)、Create `tabs.test.ts`(2)。
+**Why:** spec §3。项目无 jsdom，TabStrip 本体不可无依赖测——把黄点表现抽为 `externalDot` 纯函数单测；`.ext-dot` 独立于 `.dirty-dot`。
+**验证:** `npm test` 64 pass（10 文件，+3）+ `run build` tsc 通过（43 modules）。
+
+### Task 5. `main.ts` 外部事件分发
+**Files:** Modify `app/frontend/src/main.ts`（`initWatch` 启动订阅 + 降级写状态栏；`handleExternalEvent` 按 path 反查 docId：removed→黄点+toast；脏→黄点+`.ext-bar`（重新加载/保留）；干净→`reloadDocFromDisk`；单飞 `watchReloading`/`watchPending`；编辑保 scroll/选区、只读保 scroll + 清查询；跨 200MB 模式变化→关+重开；重载失败→黄点保留；`afterSave`/`handleClose` 清黄点与提示条）。
+**Why:** spec §3。重载在 `docReload` 后重新拼装状态（encoding/eol/totalLines/invalid）并 `markSaved`；黄点/提示条在保存/关闭/成功重载时清除。
+**验证:** `run build`（tsc 通过）+ `npm test` 64 pass（无回归；DOM 路径留 GUI 手工）。
+
+### Task 6. 保存三选模态 + Save-As 监听迁移 + 样式
+**Files:** Modify `app/frontend/src/main.ts`（`confirmExternalConflict()` 自绘三键模态（重加载/强制覆盖/取消，Esc/遮罩=取消）；`saveActive` 冲突分支：`conflict`→三选（reload 走 `reloadDocFromDisk` 丢弃本地修改）、`unmappable` 仍两键 `ask`；`afterSave` 当 `target!==prevPath` 时 `watchRetarget`）；`styles.css`（`.ext-bar`/`.ext-label` + `.modal-3way*`）。
+**Why:** spec §3。仅 `conflict` 走三选，避免与编码门语义混淆；Save-As 后监听迁移到新路径（后端从 doc 取旧 path）。
+**验证:** `run build`（tsc 通过，43 modules）+ `npm test` 64 pass。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。

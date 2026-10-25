@@ -687,3 +687,40 @@ export function recoveryEnabled(): Promise<boolean> {
 export function recoverySetEnabled(enabled: boolean): Promise<void> {
   return call<void>("recovery_set_enabled", { enabled });
 }
+
+// ---- External watch (spec §4.4/A10, M3 子项目 B2) --------------------------
+
+/** One external-change notification (`changed` | `removed`). */
+export interface ExternalEvent {
+  path: string;
+  kind: "changed" | "removed";
+}
+
+/** A non-null `degraded` reason means watching fell back to save-time checks. */
+export interface WatchStatus {
+  degraded: string | null;
+}
+
+/** Subscribe once at startup; events arrive on the returned channel. */
+export function watchSubscribe(
+  onEvent: (e: ExternalEvent) => void,
+): Promise<WatchStatus> {
+  const ch = new Channel<ExternalEvent>();
+  ch.onmessage = onEvent;
+  return call<WatchStatus>("watch_subscribe", { onEvent: ch });
+}
+
+/** Reopen a document from disk after an external change (same doc id). */
+export function docReload(
+  docId: number,
+  onProgress: (p: IndexProgress) => void,
+): Promise<DocInfo> {
+  const ch = new Channel<IndexProgress>();
+  ch.onmessage = onProgress;
+  return call<DocInfo>("doc_reload", { docId, onProgress: ch });
+}
+
+/** Current watcher health (degradation can appear when a new dir fails). */
+export function watchStatus(): Promise<WatchStatus> {
+  return call<WatchStatus>("watch_status", {});
+}

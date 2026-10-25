@@ -239,6 +239,74 @@ html.has-custom-titlebar .win-btns {
 .side-option input {
   margin: 0;
 }
+/* Yellow "changed on disk" dot beside the dirty dot (spec §4.4). */
+.ext-dot {
+  font-size: 9px;
+  line-height: 1;
+  color: transparent;
+}
+.ext-dot.warn {
+  color: var(--warn);
+}
+.status-watch {
+  color: var(--warn);
+}
+/* Non-blocking "changed on disk" bar for a dirty document (spec §4.4). */
+.ext-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 84px;
+  transform: translateX(-50%);
+  z-index: 65;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 92vw;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow);
+  font-size: 12px;
+}
+.ext-label {
+  color: var(--warn);
+  white-space: nowrap;
+}
+.modal-3way {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+.modal-3way-box {
+  width: min(420px, 92vw);
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px var(--shadow);
+  padding: 16px;
+}
+.modal-3way-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.modal-3way-msg {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 14px;
+}
+.modal-3way-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
 .side-item {
   padding: 6px 10px;
   cursor: pointer;

@@ -23,8 +23,8 @@
   - watcher 回调：`pending.insert(event.path)` + `Condvar.notify_one()`。
 - **命令**：
   - `watch_subscribe(on_event: Channel<ExternalEvent>) -> Result<WatchStatus{degraded: Option<String>}, IpcError>`：初始化 watcher（失败→`degraded=Some(原因)`，不返错，前端标注）；绑定通道。若注册表里已有（subscribe 前被 `watch_path` 记下的）目录，创建时一并加入监听。
-  - `watch_retarget(doc_id: u64, path: String) -> Result<(), IpcError>`：Save-As 后调用——`unwatch(old)` + `watch(new)`（旧 path 取自文档当前 `disk_meta` 前的 `path()`，由前端同一次调用传入新路径，后端从 `state.get(doc_id)` 读旧 path）。
-  - `doc_open` 成功后：`AppWatch::watch_path(app, &path)`（失败仅记日志，置 degraded 状态，不影响打开）。
+  - `watch_status() -> Result<WatchStatus, IpcError>`：读当前降级状态（打开新目录可能才失败，前端在打开后刷新）。
+  - `doc_open` 成功后：`AppWatch::watch_path(path)`（失败仅记 degraded，不影响打开）。
   - `doc_close(doc_id)`：先取 path 再 `unwatch_path`（`doc_close` 现有签名只吃 doc_id，需先 `state.get` 取 `doc.path()`，再 `state.remove`）。
   - `#[tauri::command] doc_reload(state, doc_id, on_progress: Channel<IndexProgress>) -> Result<DocInfo, IpcError>`：`state.get`→取 path→`validate_open_path(path, SIZE_LIMIT)`（超限→`too_large`）→`DocFile::open`→`AppDocs::replace(doc_id, fresh)`（**锁同一 Arc 原地赋值**，令既有 `DocLines`/导出持有的 Arc 看到新文件）→ 返回新 `DocInfo`（同 doc_id，`mode` 可能变）+ 单次完成 tick。`AppDocs::replace` 新增：`get(id)` 后 `*arc.lock() = doc; true`。
 - **自我写入抑制**：`doc_save` 的 `reload_after_save` 已刷新 `(size,mtime)`；`classify` 与文档快照相等 → 忽略。外部"同 size 同 mtime"改写接受为理论遗漏。
@@ -46,12 +46,12 @@
     - `changed` + **脏**：`tabs.setExternalFlag(docId,true)` + 显示外部修改提示条（`.ext-bar`，含"重新加载（丢弃我的修改）"/"保留我的修改"）；保留→仅关提示条，黄点留到保存/关闭。
   - **重新加载（脏文档，用户确认丢弃修改）**：与干净编辑重载同一路径——`docReload` → `loadAllText` → `replaceText` → **`markSaved()` 回到干净态**（`replaceText` 会置脏，随后清掉，因为内容就是磁盘内容）→ 清黄点/提示条。
   - **保存冲突三选**：仅 `IpcError.code === "conflict"` 时改调自绘 `confirmExternalConflict(): Promise<"reload"|"overwrite"|"cancel">`（DOM 模态，三键，Esc=取消）。`reload`→执行上述重载（丢弃内存编辑）；`overwrite`→现有 `force:true` 保存；`cancel`→复位 busy。`unmappable` 仍用现有两键 `ask`。保存成功→`tabs.setExternalFlag(docId,false)` + 隐藏提示条。
-  - **Save-As**：`afterSave` 改 path 后调 `watchRetarget(docId, target)`（后端从文档取旧 path，unwatch+watch）。
+  - **Save-As**：`doc_save` 成功后**后端**重绑 `DocFile` 到新路径（path/index/cache/disk 快照随之更新，冲突基线不再锚在旧文件）并 `retarget(old,new)`（在释放 doc 锁后调用，避免与 watcher 回调抢锁）；前端无需额外调用。
   - 关闭文档/编码切换（丢弃脏改动）后 → 清黄点/提示条。
 - `styles.css`：`.ext-dot.warn`（黄点）、`.ext-bar`（底部/顶部非阻断条，复用 banner 风格）、`.modal-3way` + 按钮。
 
 ## 4. 错误 / 边界
-- 自我写入：`(size,mtime)` 比对抑制；Save-As 改 path 后由 `watch_retarget` 迁移监听（§2）。
+- 自我写入：`(size,mtime)` 比对抑制（快照与当前磁盘在同一 doc 锁内成对读取，避免保存交错误报；路径按规范化比较兼容 Windows 大小写/分隔符）。
 - 文件删除：`Removed` 事件；保存 → `io` 错误（既有）。
 - watcher 创建失败/网络盘：`degraded` → 状态栏标注；保存前冲突检查仍在。
 - 只读大文件重载：同步重建索引（`doc_open` 同为同步，~0.6s/GB）；期间单飞。
@@ -66,7 +66,7 @@
 - `doc_reload`（集成，tempfile）：改文件内容/行数后 reload → 返回新 `totalLines`，`doc_chunk` 读到新文本，`disk_meta` 已更新。
 **前端：**
 - `tabs.setExternalFlag`（伪 view）：黄点 class 切换、与 `refreshDirty` 独立。
-- `ipc` 包装 typeof（watchSubscribe/docReload/watchRetarget）。
+- `ipc` 包装 typeof（watchSubscribe/docReload/watchStatus）。
 - 纯 helper（如需）：`clampScroll(prev, newMax)`。
 **GUI 手工：**只读日志 `echo >>` 追加→自动重载且滚动保持；编辑干净→外部覆盖→文本更新、光标近似保持；编辑脏→外部覆盖→黄点+提示条→保存弹三选（三种分支）；删除文件→提示；降级状态栏。
 

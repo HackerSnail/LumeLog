@@ -4,11 +4,15 @@
 //! `search_cancel(request_id)` can stop a scan cooperatively.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lumelog_can::dbc::Database;
 use lumelog_core::doc::DocFile;
+
+/// `(doc_id, doc snapshot, current disk meta)` used by the external watcher.
+pub type DocSnapshot = (u64, (u64, std::time::SystemTime), Option<(u64, std::time::SystemTime)>);
 
 #[derive(Default)]
 pub struct AppDocs {
@@ -50,6 +54,56 @@ impl AppDocs {
     /// released — repeated open/close no longer leaks documents.
     pub fn remove(&self, id: u64) -> bool {
         self.docs.lock().unwrap().remove(&id).is_some()
+    }
+
+    /// `(doc_id, (size, mtime), current-disk)` for every open doc whose path
+    /// matches `path`. The disk read happens under the doc lock, so a concurrent
+    /// save (which holds that lock across write+reindex) cannot be misread as an
+    /// external change. Paths are compared canonically so case/separator
+    /// differences (Windows / notify) still match.
+    pub fn snapshot_for_path(
+        &self,
+        path: &Path,
+    ) -> Vec<DocSnapshot> {
+        let docs: Vec<(u64, Arc<Mutex<DocFile>>)> = self
+            .docs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, arc)| (*id, arc.clone()))
+            .collect();
+        let want = std::fs::canonicalize(path).ok();
+        docs.into_iter()
+            .filter_map(|(id, arc)| {
+                let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+                let same = match &want {
+                    Some(w) => std::fs::canonicalize(d.path())
+                        .map(|p| &p == w)
+                        .unwrap_or_else(|_| d.path() == path),
+                    None => d.path() == path,
+                };
+                if !same {
+                    return None;
+                }
+                let disk = std::fs::metadata(path).ok().map(|m| {
+                    (m.len(), m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH))
+                });
+                Some((id, d.disk_meta(), disk))
+            })
+            .collect()
+    }
+
+    /// Replace a document's `DocFile` in place, keeping its id and `Arc` so any
+    /// in-flight reader (`DocLines`/export) immediately sees the fresh file.
+    /// Returns false for an unknown id.
+    pub fn replace(&self, id: u64, doc: DocFile) -> bool {
+        match self.get(id) {
+            Some(arc) => {
+                *arc.lock().unwrap_or_else(|p| p.into_inner()) = doc;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Begin a search: mint a request id and its (shared) cancel flag.
@@ -100,5 +154,41 @@ mod tests {
         assert!(s.get_dbc(a).is_some());
         assert!(s.get_dbc(b).is_some());
         assert!(s.get_dbc(9_999).is_none(), "unknown id misses");
+    }
+
+    #[test]
+    fn snapshot_for_path_matches_open_docs() {
+        let s = AppDocs::default();
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, b"one\ntwo\n").unwrap();
+        let path = f.path().to_path_buf();
+        let a = s.insert(DocFile::open(&path, 1 << 20).unwrap());
+        let b = s.insert(DocFile::open(&path, 1 << 20).unwrap());
+        let mut got: Vec<u64> = s
+            .snapshot_for_path(&path)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        got.sort_unstable();
+        let mut want = vec![a, b];
+        want.sort_unstable();
+        assert_eq!(got, want);
+        assert!(s.snapshot_for_path(Path::new("C:/nope/x.log")).is_empty());
+    }
+
+    #[test]
+    fn replace_swaps_in_place() {
+        let s = AppDocs::default();
+        let mut a = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut a, b"one\n").unwrap();
+        let mut b = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut b, b"x\ny\nz").unwrap(); // no trailing \n -> 3 lines
+
+        let id = s.insert(DocFile::open(a.path(), 1 << 20).unwrap());
+        let fresh = DocFile::open(b.path(), 1 << 20).unwrap();
+        assert!(s.replace(id, fresh));
+        let lines = s.get(id).unwrap().lock().unwrap().line_count();
+        assert_eq!(lines, 3, "same id now serves the replacement doc");
+        assert!(!s.replace(9_999, DocFile::open(b.path(), 1 << 20).unwrap()));
     }
 }

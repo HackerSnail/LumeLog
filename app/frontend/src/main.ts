@@ -33,6 +33,10 @@ import {
   recoveryLoad,
   recoveryEnabled,
   recoverySetEnabled,
+  watchSubscribe,
+  docReload,
+  watchStatus,
+  type ExternalEvent,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -97,6 +101,11 @@ const recoveryWrites = new Map<string, Promise<void>>();
 let recoveryChk: HTMLInputElement | null = null;
 let recoveryBannerEl: HTMLElement | null = null;
 let recoveryEntries: RecoveryEntry[] = [];
+// External-watch reload single-flight (per doc) + one non-blocking bar.
+const watchReloading = new Set<number>();
+const watchPending = new Set<number>();
+let extBarEl: HTMLElement | null = null;
+let extBarDocId: number | null = null;
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -874,6 +883,7 @@ async function openPath(path: string): Promise<boolean> {
     // The shell owns the ≤200MB split (spec §4.3/A1) via `DocInfo.mode`.
     if (info.mode === "readonly") mountList(info, path);
     else await mountDoc(info, path);
+    void refreshWatchStatus(); // a new directory may have failed to watch
     return true;
   } catch (err) {
     reportError(err);
@@ -1081,6 +1091,213 @@ async function initRecovery(): Promise<void> {
   if (recoveryOn) void checkRecovery();
 }
 
+// ---- external modification watcher (spec §4.4/A10, M3 B2) -------------------
+
+async function initWatch(): Promise<void> {
+  try {
+    const st = await watchSubscribe(handleExternalEvent);
+    status.setWatch(st.degraded ? "degraded" : "ok", st.degraded ?? undefined);
+  } catch {
+    status.setWatch("degraded", "订阅外部监听失败");
+  }
+}
+
+/** Re-read watcher health (degradation can appear when a new dir fails). */
+async function refreshWatchStatus(): Promise<void> {
+  try {
+    const st = await watchStatus();
+    status.setWatch(st.degraded ? "degraded" : "ok", st.degraded ?? undefined);
+  } catch {
+    // Status is advisory; a failure here must not disturb opening.
+  }
+}
+
+function handleExternalEvent(e: ExternalEvent): void {
+  const hits: number[] = [];
+  for (const [id, ds] of docStates) {
+    if (ds.path === e.path) hits.push(id);
+  }
+  for (const docId of hits) {
+    if (e.kind === "removed") {
+      tabs.setExternalFlag(docId, true);
+      toastMsg(`文件已被外部删除：${basenameOf(e.path)}`);
+      continue;
+    }
+    const h = editors.get(docId);
+    if (h && h.isDirty()) {
+      tabs.setExternalFlag(docId, true);
+      showExtBar(docId, e.path);
+      continue;
+    }
+    void reloadDocFromDisk(docId, e.path);
+  }
+}
+
+/** Non-blocking bar for a dirty doc whose file changed on disk. */
+function showExtBar(docId: number, path: string): void {
+  if (extBarDocId !== null) hideExtBar(extBarDocId);
+  const box = document.createElement("div");
+  box.className = "ext-bar";
+  box.setAttribute("role", "status");
+  const label = document.createElement("span");
+  label.className = "ext-label";
+  label.textContent = `文件已被外部修改：${basenameOf(path)}`;
+  const reloadBtn = mkBtn("重新加载（丢弃我的修改）", "用磁盘内容覆盖当前编辑", () =>
+    void reloadDirtyFromDisk(docId, path),
+  );
+  const keepBtn = mkBtn("保留我的修改", "黄点保留，保存时再决定", () => hideExtBar(docId));
+  box.append(label, reloadBtn, keepBtn);
+  document.body.append(box);
+  extBarEl = box;
+  extBarDocId = docId;
+}
+
+function hideExtBar(docId: number): void {
+  if (extBarDocId !== docId) return;
+  extBarEl?.remove();
+  extBarEl = null;
+  extBarDocId = null;
+}
+
+/** Dirty "重新加载": confirm discarding local edits, then reload from disk. */
+async function reloadDirtyFromDisk(docId: number, path: string): Promise<void> {
+  const go = await ask("重新加载会丢弃当前未保存的修改，是否继续？", {
+    title: "外部修改",
+    kind: "warning",
+    okLabel: "丢弃并重新加载",
+    cancelLabel: "取消",
+  });
+  if (!go) return;
+  hideExtBar(docId);
+  await reloadDocFromDisk(docId, path);
+}
+
+/** Three-way save-conflict choice (spec §4.4; `ask` is only two buttons). */
+function confirmExternalConflict(detail: string): Promise<"reload" | "overwrite" | "cancel"> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-3way";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    const box = document.createElement("div");
+    box.className = "modal-3way-box";
+    const title = document.createElement("div");
+    title.className = "modal-3way-title";
+    title.textContent = "文件已被外部修改";
+    const msg = document.createElement("div");
+    msg.className = "modal-3way-msg";
+    // Keep the shell's informed detail (disk size + unmappable `?` count).
+    msg.textContent = `${detail}\n\n重新加载会丢弃你当前的修改；强制覆盖会写入你的版本。`;
+    msg.style.whiteSpace = "pre-wrap";
+    const row = document.createElement("div");
+    row.className = "modal-3way-actions";
+    const done = (choice: "reload" | "overwrite" | "cancel"): void => {
+      document.removeEventListener("keydown", onKey);
+      overlay.remove();
+      resolve(choice);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") done("cancel");
+    };
+    row.append(
+      mkBtn("重新加载", "丢弃我的修改，载入磁盘内容", () => done("reload")),
+      mkBtn("强制覆盖", "用我的修改覆盖磁盘", () => done("overwrite")),
+      mkBtn("取消", "返回编辑", () => done("cancel")),
+    );
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) done("cancel");
+    });
+    box.append(title, msg, row);
+    overlay.append(box);
+    document.body.append(overlay);
+    document.addEventListener("keydown", onKey);
+    (row.querySelector("button") as HTMLButtonElement | null)?.focus();
+  });
+}
+
+/** Reload a clean doc from disk, keeping cursor/scroll; dirty callers confirm first. */
+async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
+  if (watchReloading.has(docId)) {
+    watchPending.add(docId);
+    return;
+  }
+  watchReloading.add(docId);
+  const ds = docStates.get(docId);
+  const h = editors.get(docId);
+  const list = lists.get(docId);
+  let scroll = 0;
+  let sel: { anchor: number; head: number } | null = null;
+  if (h) {
+    scroll = h.view.scrollDOM.scrollTop;
+    const m = h.view.state.selection.main;
+    sel = { anchor: m.anchor, head: m.head };
+  } else if (list) {
+    scroll = list.scrollTop();
+  }
+  try {
+    const info = await docReload(docId, () => {});
+    // The tab may have been closed/re-opened while the reload was in flight.
+    if (!ds || docStates.get(docId) !== ds || !tabs.get(docId)) return;
+    if (info.mode !== ds.mode) {
+      // Grew/shrank across the 200 MB threshold: reopen keeps views truthful.
+      // The user already consented on the dirty path; do not ask twice.
+      if (h && h.isDirty()) h.markSaved();
+      const closed = await handleClose(docId);
+      if (!closed) return;
+      watchPending.delete(docId); // the tab is gone: never replay onto a dead id
+      await openPath(path);
+      toastMsg("文件大小变化导致视图模式切换，已重新打开");
+      return;
+    }
+    const hNow = editors.get(docId);
+    const listNow = lists.get(docId);
+    // The user may have typed during the reload: never overwrite fresh edits.
+    if (hNow && hNow.isDirty()) {
+      tabs.setExternalFlag(docId, true);
+      showExtBar(docId, path);
+      return;
+    }
+    ds.encoding = info.encoding;
+    ds.eol = info.eol;
+    ds.totalLines = info.totalLines ?? info.lineCountEstimate;
+    ds.invalid = 0;
+    indexed.set(docId, ds.totalLines);
+    if (hNow) {
+      const { text, invalidCount } = await loadAllText(docId, ds.totalLines);
+      ds.invalid = invalidCount;
+      hNow.replaceText(text);
+      hNow.markSaved();
+      const len = hNow.view.state.doc.length;
+      if (sel) {
+        hNow.view.dispatch({
+          selection: { anchor: Math.min(sel.anchor, len), head: Math.min(sel.head, len) },
+        });
+      }
+      hNow.view.scrollDOM.scrollTop = scroll;
+      tabs.refreshDirty(docId);
+    } else if (listNow) {
+      listNow.invalidate();
+      listNow.setView(null, false, false);
+      queryHits.delete(docId);
+      queryCursor.delete(docId);
+      listNow.refresh();
+      listNow.setScrollTop(scroll);
+    }
+    syncStatus(docId);
+    updateInspector(docId);
+    refreshSidebar();
+    tabs.setExternalFlag(docId, false);
+    hideExtBar(docId);
+    toastMsg(`文件已变化，已重新加载：${basenameOf(path)}`);
+  } catch (err) {
+    tabs.setExternalFlag(docId, true); // reload failed (deleted/locked): keep the warning
+    reportError(err);
+  } finally {
+    watchReloading.delete(docId);
+    if (watchPending.delete(docId)) void reloadDocFromDisk(docId, path);
+  }
+}
+
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
   const total = info.totalLines ?? info.lineCountEstimate;
   indexed.set(info.docId, total);
@@ -1196,42 +1413,51 @@ async function saveActive(saveAs = false): Promise<void> {
     });
     afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target, prevPath);
   } catch (err) {
-    if (
-      err instanceof IpcError &&
-      (err.payload.code === "conflict" || err.payload.code === "unmappable")
-    ) {
-      // Cross-platform async dialog (I4): window.confirm is unreliable on
-      // WKWebView / webkit2gtk. One *informed* confirmation folds both gates
-      // (final-review I-1): the shell's conflict detail already spells out the
-      // lossy-`?` consequence, so a single force prompt discloses everything.
-      setBusy(false);
-      const go = await ask(`${err.zh}\n\n确定要强制覆盖吗？`, {
-        title: err.payload.code === "conflict" ? "保存冲突" : "编码无法表示",
+    const ipcErr = err instanceof IpcError ? err : null;
+    const code = ipcErr?.payload.code ?? "";
+    if (code !== "conflict" && code !== "unmappable") {
+      reportError(err);
+      return;
+    }
+    // Cross-platform async dialog (I4): window.confirm is unreliable on
+    // WKWebView / webkit2gtk.
+    setBusy(false);
+    if (code === "conflict") {
+      // Three-way (spec §4.4): reload discards local edits, overwrite forces
+      // the write, cancel keeps editing. `ask` only has two buttons.
+      const choice = await confirmExternalConflict(ipcErr!.zh);
+      if (choice === "reload") {
+        await reloadDocFromDisk(a.info.docId, ds.path);
+        return;
+      }
+      if (choice === "cancel") return;
+    } else {
+      // Encoding gate keeps the two-button informed prompt (spec §5.4).
+      const go = await ask(`${ipcErr!.zh}\n\n确定要强制覆盖吗？`, {
+        title: "编码无法表示",
         kind: "warning",
         okLabel: "强制覆盖",
         cancelLabel: "取消",
       });
-      if (go) {
-        setBusy(true);
-        try {
-          const report = await docSave({
-            docId: a.info.docId,
-            text: handle.getText(),
-            path: target,
-            encoding: ds.encoding,
-            eol: ds.eol,
-            force: true,
-          });
-          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target, prevPath);
-        } catch (err2) {
-          reportError(err2);
-        } finally {
-          setBusy(false);
-        }
-      }
-      return;
+      if (!go) return;
     }
-    reportError(err);
+    setBusy(true);
+    try {
+      const report = await docSave({
+        docId: a.info.docId,
+        text: handle.getText(),
+        path: target,
+        encoding: ds.encoding,
+        eol: ds.eol,
+        force: true,
+      });
+      afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target, prevPath);
+    } catch (err2) {
+      reportError(err2);
+    } finally {
+      setBusy(false);
+    }
+    return;
   } finally {
     setBusy(false);
   }
@@ -1262,6 +1488,11 @@ function afterSave(
   // Saved: the shadow is stale — clear both the pre-Save-As and the new path.
   cancelRecovery(docId, prevPath);
   cancelRecovery(docId, ds.path);
+  // A successful write resolves any external-change warning.
+  tabs.setExternalFlag(docId, false);
+  hideExtBar(docId);
+  // Save-As may have moved the file to a directory that failed to watch.
+  void refreshWatchStatus();
 }
 
 /**
@@ -1338,9 +1569,9 @@ function applyMode(docId: number, mode: ModeChoice): void {
   handle.setMode(ext); // reconfigure language only — keeps undo + scroll (I2)
 }
 
-async function handleClose(docId: number): Promise<void> {
+async function handleClose(docId: number): Promise<boolean> {
   const view = tabs.get(docId);
-  if (!view) return;
+  if (!view) return false;
   if (view.isDirty()) {
     const go = await ask("文档有未保存改动，确定关闭？", {
       title: "关闭文档",
@@ -1348,10 +1579,11 @@ async function handleClose(docId: number): Promise<void> {
       okLabel: "丢弃并关闭",
       cancelLabel: "取消",
     });
-    if (!go) return;
+    if (!go) return false;
   }
   const closing = docStates.get(docId);
   if (closing) cancelRecovery(docId, closing.path);
+  hideExtBar(docId);
   tabs.remove(docId);
   docStates.delete(docId);
   editors.delete(docId);
@@ -1363,6 +1595,7 @@ async function handleClose(docId: number): Promise<void> {
   queryCursor.delete(docId); // late `filter_run` onDone repopulates a closed, never-reused id
   refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
+  return true;
 }
 
 function syncStatus(docId: number): void {
@@ -1989,3 +2222,4 @@ registerShortcuts();
 // cannot observe real first-paint, so §2 records P1/P2 as human smoke items.
 void appPing().catch(() => {});
 void initRecovery();
+void initWatch();

@@ -20,6 +20,9 @@ import {
   recoveryDiscard,
   recoveryEnabled,
   recoverySetEnabled,
+  watchSubscribe,
+  docReload,
+  watchStatus,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -128,6 +131,12 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
       recoveryEnabled,
       recoverySetEnabled,
     ]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("external_watch_wrappers_are_functions", () => {
+    for (const fn of [watchSubscribe, docReload, watchStatus]) {
       expect(typeof fn).toBe("function");
     }
   });

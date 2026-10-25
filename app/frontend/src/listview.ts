@@ -197,6 +197,16 @@ export class ListView implements TabView {
     this.refresh();
   }
 
+  /** Current vertical scroll offset (px) — kept across an external reload. */
+  scrollTop(): number {
+    return this.root.scrollTop;
+  }
+
+  /** Restore a scroll offset after a reload; the scroll event repaints. */
+  setScrollTop(px: number): void {
+    this.root.scrollTop = Math.max(0, px);
+  }
+
   /** Bring a slot into view: subset mode uses the slot index, plain mode the
    *  line index. Used by F3/Shift+F3 (caller tracks which hit index is current). */
   scrollToHit(hitIndex: number): void {

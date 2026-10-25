@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::dto::*;
 use crate::can_export::export_can;
+use crate::watch::{AppWatch, ExternalEvent, WatchStatus};
 use crate::state::AppDocs;
 
 /// 4 GiB u32 line-index ceiling (spec §4.1/A9). `validate_open_path` rejects at
@@ -55,6 +56,7 @@ pub fn app_ping() -> &'static str {
 #[tauri::command]
 pub fn doc_open(
     state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
     path: String,
     on_progress: Channel<IndexProgress>,
 ) -> Result<DocInfo, IpcError> {
@@ -72,6 +74,8 @@ pub fn doc_open(
         .unwrap_or_default()
         .as_millis() as u64;
     let doc_id = state.insert(doc);
+    // Watch the document's directory so external modifications reach the UI.
+    app.state::<AppWatch>().watch_path(Path::new(&path));
 
     let info = DocInfo {
         doc_id,
@@ -86,6 +90,60 @@ pub fn doc_open(
     let _ = on_progress.send(IndexProgress {
         doc_id,
         indexed_bytes: size,
+        done: true,
+    });
+    Ok(info)
+}
+
+/// Reopen `doc_id`'s file from disk (external change): refresh the `DocFile` in
+/// place so the id/tab stay stable. Testable without `State`.
+fn reload_doc(state: &AppDocs, doc_id: u64) -> Result<DocInfo, IpcError> {
+    let arc = state
+        .get(doc_id)
+        .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
+    let path = {
+        let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+        d.path().to_path_buf()
+    };
+    lumelog_core::doc::validate_open_path(&path, SIZE_LIMIT)
+        .map_err(IpcError::from_open_reject)?;
+    let doc = DocFile::open(&path, SIZE_LIMIT).map_err(IpcError::from_core)?;
+    let size = doc.size();
+    let encoding = doc.encoding().as_str().to_string();
+    let eol = eol_str(doc.eol_style());
+    let lines = doc.line_count() as u64;
+    let mtime_millis = doc
+        .mtime()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if !state.replace(doc_id, doc) {
+        return Err(IpcError::new("unknown_doc", format!("no document {doc_id}")));
+    }
+    Ok(DocInfo {
+        doc_id,
+        size,
+        mtime_millis,
+        encoding,
+        eol,
+        mode: mode_str(size),
+        line_count_estimate: lines,
+        total_lines: Some(lines),
+    })
+}
+
+/// Reload a document after an external change (spec §4.4). Rebuilds the line
+/// index and returns the fresh `DocInfo` (mode may have changed).
+#[tauri::command]
+pub fn doc_reload(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+    on_progress: Channel<IndexProgress>,
+) -> Result<DocInfo, IpcError> {
+    let info = reload_doc(&state, doc_id)?;
+    let _ = on_progress.send(IndexProgress {
+        doc_id,
+        indexed_bytes: info.size,
         done: true,
     });
     Ok(info)
@@ -129,8 +187,10 @@ pub fn doc_chunk(
 /// Persist `text` for `doc_id`. `encoding`/`eol` are the front-end labels; a
 /// `path` switches to Save-As. `force` overrides conflict / unmappable gates.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC: doc + app + text + path/encoding/eol/force
 pub fn doc_save(
     state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
     doc_id: u64,
     text: String,
     path: Option<String>,
@@ -145,22 +205,41 @@ pub fn doc_save(
     let doc_arc = state
         .get(doc_id)
         .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
-    let mut doc = doc_arc
-        .lock()
-        .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
-
-    let meta = doc.disk_meta();
-    let opts = SaveOptions {
-        path: path.map(PathBuf::from),
-        encoding: label,
-        eol: eol_style,
-        overwrite_policy: if force {
-            OverwritePolicy::Force
-        } else {
-            OverwritePolicy::SafetyConfirm
-        },
+    // Do all doc work under the lock, then drop it before touching the watcher:
+    // `notify`'s watch/unwatch waits for its event thread, which may be inside
+    // `snapshot_for_path` waiting for this very doc lock.
+    let (report, retarget) = {
+        let mut doc = doc_arc
+            .lock()
+            .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+        let meta = doc.disk_meta();
+        let old_path = doc.path().to_path_buf();
+        let opts = SaveOptions {
+            path: path.map(PathBuf::from),
+            encoding: label,
+            eol: eol_style,
+            overwrite_policy: if force {
+                OverwritePolicy::Force
+            } else {
+                OverwritePolicy::SafetyConfirm
+            },
+        };
+        let report = save_text(&mut doc, &text, &opts, meta).map_err(IpcError::from_core)?;
+        // Save-As: rebind the doc to the file the tab now edits so path, index,
+        // cache, disk snapshot and the conflict baseline all follow it.
+        let mut retarget = None;
+        if let Some(p) = &opts.path {
+            if p != &old_path {
+                let fresh = DocFile::open(p, SIZE_LIMIT).map_err(IpcError::from_core)?;
+                *doc = fresh;
+                retarget = Some((old_path, p.clone()));
+            }
+        }
+        (report, retarget)
     };
-    let report = save_text(&mut doc, &text, &opts, meta).map_err(IpcError::from_core)?;
+    if let Some((old, new)) = retarget {
+        app.state::<AppWatch>().retarget(&old, &new);
+    }
     Ok(SaveReportJson {
         replace_count: report.replace_count as u64,
         conflict: report.conflict,
@@ -325,7 +404,18 @@ pub fn doc_set_encoding(
 /// open). Drops the `DocFile` (closes the handle, frees the line index + cache)
 /// so opening/closing repeatedly does not leak documents (I5).
 #[tauri::command]
-pub fn doc_close(state: tauri::State<'_, AppDocs>, doc_id: u64) -> Result<(), IpcError> {
+pub fn doc_close(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+) -> Result<(), IpcError> {
+    if let Some(arc) = state.get(doc_id) {
+        let path = {
+            let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+            d.path().to_path_buf()
+        };
+        app.state::<AppWatch>().unwatch_path(&path);
+    }
     if state.remove(doc_id) {
         Ok(())
     } else {
@@ -334,6 +424,22 @@ pub fn doc_close(state: tauri::State<'_, AppDocs>, doc_id: u64) -> Result<(), Ip
             format!("no document {doc_id}"),
         ))
     }
+}
+
+/// Subscribe to external-change events (spec §4.4). Returns the degradation
+/// state: a non-`None` reason means only save-time checks remain.
+#[tauri::command]
+pub fn watch_subscribe(
+    app: AppHandle,
+    on_event: Channel<ExternalEvent>,
+) -> Result<WatchStatus, IpcError> {
+    Ok(app.state::<AppWatch>().start(&app, on_event))
+}
+
+/// Current watcher health (degradation may appear after the initial subscribe).
+#[tauri::command]
+pub fn watch_status(app: AppHandle) -> Result<WatchStatus, IpcError> {
+    Ok(app.state::<AppWatch>().status())
 }
 
 /// Read + lenient-parse a DBC file. Lenient so a single bad construct does not
@@ -1149,6 +1255,51 @@ pub fn recovery_set_enabled(app: AppHandle, enabled: bool) -> Result<(), IpcErro
     std::fs::write(&path, next)
         .map_err(|e| IpcError::new("io", format!("write config: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    #[test]
+    fn reload_after_external_rewrite() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"a\nb\nc\n").unwrap();
+        f.flush().unwrap();
+        let path = f.path().to_path_buf();
+        let state = AppDocs::default();
+        let id = state.insert(DocFile::open(&path, 1 << 20).unwrap());
+
+        // External rewrite: five lines.
+        {
+            let mut w = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            w.write_all(b"1\n2\n3\n4\n5").unwrap(); // no trailing \n -> 5 lines
+            w.flush().unwrap();
+        }
+
+        let info = reload_doc(&state, id).unwrap();
+        assert_eq!(info.total_lines, Some(5));
+        let text = {
+            let arc = state.get(id).unwrap();
+            let mut d = arc.lock().unwrap();
+            d.chunk_at(0, 5).unwrap().text
+        };
+        assert!(text.contains('5'), "{text}");
+        let disk_len = std::fs::metadata(&path).unwrap().len();
+        let snap_len = state.get(id).unwrap().lock().unwrap().disk_meta().0;
+        assert_eq!(snap_len, disk_len, "snapshot refreshed after reload");
+    }
+
+    #[test]
+    fn reload_unknown_doc_is_unknown_doc() {
+        let state = AppDocs::default();
+        let err = reload_doc(&state, 42).unwrap_err();
+        assert_eq!(err.code, "unknown_doc");
+    }
 }
 
 #[cfg(test)]
