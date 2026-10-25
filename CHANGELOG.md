@@ -11,6 +11,11 @@
 **Why:** 提供 spec §2 的 AND-of-includes / NOT-of-excludes 谓词，产**行内 cu16 高亮区间**（`char_map` 不过 IPC），与渲染文本逐字符一致。`LineFilter::build` 编译各条件（字面走 `regex::escape`、大小写走 `RegexBuilder::case_insensitive`），`keep(line_text)->Option<Vec<Cu16Range>>`（Some=保留+包含命中的 cu16 区间升序去重；None=剔除；仅排除时 Some(空)）。字节→cu16 用前缀 `chars().map(len_utf16).sum()`。空条件文本/非法正则 → `CoreError::InvalidPattern`。
 **验证:** `cargo test -p lumelog-core filter::` 10 pass（AND 语义/排除否决/仅排除恒真/大小写/字面元字符/多字节 cu16 偏移 `错误 <emoji>`→start3 len2/空模式拒/非法正则拒/has_conditions 空假/含全真）；`cargo clippy -p lumelog-core --all-targets -- -D warnings` 净；core 其余 58 测不回归；前端无改动。
 
+### Task 2. 过滤 DTO（`lumelog-app`）
+**Files:** Modify `app/src-tauri/src/dto.rs`（新增 `FilterCondition`(+`to_core`)、`Cu16RangeJson`(+`From<Cu16Range>`)、`LineHit`、`FilterStats{kept,scanned,truncated}`、`IndexedText`、`LineContentPayload`，均 camelCase；+`filter_dto_tests`）。未接入命令前对 6 结构体/`to_core`/`From` impl 加带注释 `#[allow(dead_code)]`（Task 3/4 接入后剥除）。
+**Why:** 为 `filter_run`/`doc_lines_at` 定IPC 契约。**Ruling：**过滤模式编译错误（空条件/非法正则）由 `LineFilter::build` 返 `CoreError::InvalidPattern`，`IpcError::from_core` 已映射为 `"invalid_pattern"`（ipc.ts 已有中文表）——不再另设 `bad_regex`（那个码专属于 CAN 正则源），与 M1 搜索一致、零分叉。
+**验证:** `cargo test -p lumelog-app` 16 pass（新 4 个 `filter_dto_tests`）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。

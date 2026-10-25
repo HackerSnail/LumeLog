@@ -8,6 +8,7 @@ use lumelog_can::decode::decode_signals;
 use lumelog_can::error::CanError;
 use lumelog_can::frame::{Frame, SignalValue};
 use lumelog_core::error::{CoreError, OpenReject};
+use lumelog_core::filter::{CondKind, CondMode, CondSpec, Cu16Range};
 use serde::{Deserialize, Serialize};
 
 /// Summary returned by `doc_open`. Indexing is synchronous in v1, so
@@ -254,6 +255,94 @@ pub struct CanStatsJson {
     pub skipped: u64,
 }
 
+// ---- M3 filter DTOs (spec §6.4 / §9). camelCase to match ipc.ts ------------
+
+/// One filter condition as it arrives from the query panel. `mode` is
+/// `"include"`/`"exclude"`, `kind` is `"literal"`/`"regex"`; unknown strings
+/// degrade to include/literal rather than erroring (the panel only emits the
+// four known values, and a typo must not abort the whole scan.
+#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterCondition {
+    pub mode: String,
+    pub kind: String,
+    pub text: String,
+}
+
+#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+impl FilterCondition {
+    pub fn to_core(&self) -> CondSpec {
+        CondSpec {
+            mode: if self.mode.eq_ignore_ascii_case("exclude") {
+                CondMode::Exclude
+            } else {
+                CondMode::Include
+            },
+            kind: if self.kind.eq_ignore_ascii_case("regex") {
+                CondKind::Regex
+            } else {
+                CondKind::Literal
+            },
+            text: self.text.clone(),
+        }
+    }
+}
+
+/// A highlight span in UTF-16 code units within a line (front-end `String.slice`).
+#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cu16RangeJson {
+    pub cu16_start: u32,
+    pub cu16_len: u32,
+}
+
+#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+impl From<Cu16Range> for Cu16RangeJson {
+    fn from(r: Cu16Range) -> Self {
+        Cu16RangeJson { cu16_start: r.start, cu16_len: r.len }
+    }
+}
+
+/// One kept line + its include-match highlight ranges, batched (`on_batch`).
+#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineHit {
+    pub line: u64,
+    pub ranges: Vec<Cu16RangeJson>,
+}
+
+/// Terminal `filter_run` tally (`on_done`). `truncated` is set when range output
+/// was capped at `HIT_RANGE_CAP` (later kept lines carry empty `ranges`).
+#[allow(dead_code)] // consumed by `filter_run` (Task 3)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilterStats {
+    pub kept: u64,
+    pub scanned: u64,
+    pub truncated: bool,
+}
+
+/// One requested line's decoded text, keyed by its original 0-based index.
+#[allow(dead_code)] // consumed by `doc_lines_at` (Task 4)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedText {
+    pub index: u32,
+    pub text: String,
+}
+
+/// Payload of `doc_lines_at` (`on_data`) — a sparse subset of line texts.
+#[allow(dead_code)] // consumed by `doc_lines_at` (Task 4)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineContentPayload {
+    pub lines: Vec<IndexedText>,
+    pub invalid_count: u64,
+}
+
 fn signal_value_json(s: SignalValue) -> SignalValueJson {
     SignalValueJson {
         name: s.name,
@@ -409,5 +498,57 @@ mod can_tests {
         assert!(v.get("timestampMs").is_some());
         assert!(v.get("isRemote").is_some());
         assert!(v.get("errorFrame").is_some());
+    }
+}
+
+#[cfg(test)]
+mod filter_dto_tests {
+    use super::*;
+
+    #[test]
+    fn filter_condition_deserializes_and_maps_to_core() {
+        let c: FilterCondition =
+            serde_json::from_str(r#"{"mode":"exclude","kind":"regex","text":"a"}"#).unwrap();
+        let spec = c.to_core();
+        assert_eq!(spec.mode, CondMode::Exclude);
+        assert_eq!(spec.kind, CondKind::Regex);
+        assert_eq!(spec.text, "a");
+        // unknown strings degrade to include/literal, never error
+        let u: FilterCondition =
+            serde_json::from_str(r#"{"mode":"x","kind":"y","text":"z"}"#).unwrap();
+        assert_eq!(u.to_core().mode, CondMode::Include);
+        assert_eq!(u.to_core().kind, CondKind::Literal);
+    }
+
+    #[test]
+    fn line_hit_serializes_camel_case() {
+        let hit = LineHit {
+            line: 5,
+            ranges: vec![Cu16RangeJson { cu16_start: 3, cu16_len: 2 }],
+        };
+        let v = serde_json::to_value(&hit).unwrap();
+        assert_eq!(v.get("line").unwrap(), 5);
+        let r = &v["ranges"][0];
+        assert_eq!(r.get("cu16Start").unwrap(), 3);
+        assert_eq!(r.get("cu16Len").unwrap(), 2);
+    }
+
+    #[test]
+    fn filter_stats_shape() {
+        let v = serde_json::to_value(FilterStats {
+            kept: 1,
+            scanned: 2,
+            truncated: true,
+        })
+        .unwrap();
+        assert_eq!(v.get("kept").unwrap(), 1);
+        assert_eq!(v.get("scanned").unwrap(), 2);
+        assert_eq!(v.get("truncated").unwrap(), true);
+    }
+
+    #[test]
+    fn cu16_range_from_core() {
+        let j: Cu16RangeJson = Cu16Range { start: 7, len: 4 }.into();
+        assert_eq!((j.cu16_start, j.cu16_len), (7, 4));
     }
 }
