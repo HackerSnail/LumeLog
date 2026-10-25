@@ -8,6 +8,7 @@ mod commands;
 mod dto;
 mod keymap;
 mod recovery;
+mod script;
 mod state;
 mod watch;
 
@@ -30,6 +31,12 @@ pub fn run() {
             commands::keymap_get,
             commands::keymap_set,
             commands::keymap_reset,
+            commands::script_list,
+            commands::script_read,
+            commands::script_write,
+            commands::script_delete,
+            commands::script_run,
+            commands::script_cancel,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,

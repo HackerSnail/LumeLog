@@ -2,6 +2,46 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
+
+**依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。
+
+### Task 1. MSRV 1.87 + `rquickjs` + 脚本存储/工具
+**Files:** Modify `Cargo.toml`/`app/src-tauri/Cargo.toml`（`rust-version 1.79→1.87`、`rquickjs = "0.14"`；QuickJS C 经 cc 编译成功）、`Cargo.lock`；Create `app/src-tauri/src/script.rs`（`ScriptEntry/Console/Progress/Stats`、名字校验 `^[A-Za-z0-9_-]{1,64}\.js$`、`scripts/` list/read/write/delete（tmp→rename）、有界控制台 200×4096）；Modify `lib.rs`（`mod script`）、`commands.rs`（`config_path` 提升 `pub(crate)`）、`crates/lumelog-can/src/source/mod.rs`（MSRV 1.87 使 clippy 新增 `manual_is_multiple_of` → `is_multiple_of`）。
+**Why:** 沙箱引擎与脚本存储都在 app 侧，不污染 core；脚本名只允许安全字符防目录穿越；保存原子化。MSRV 提升是 rquickjs 0.14 的硬要求（当前工具链 1.99）。
+**验证:** `cargo test -p lumelog-app script::` 3 pass（名字 8 类非法/合法、存储 roundtrip+无 tmp 残留、控制台单条截断+200 条后仅一条“已截断”）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 2. `run_script` QuickJS 运行器
+**Files:** Modify `app/src-tauri/src/script.rs`（`Runtime` 64MiB/1MiB 栈 + interrupt（取消或 300s）；console shim 在 JS 侧 `JSON.stringify` 后回传；eval 一次→`onLine`；`DocLines` 逐行、三态返回、ctx `{lineNumber,index,path}`；输出 UTF-8/LF、4GiB 上限；tmp→rename（脚本错误保留前缀；I/O 错误删 tmp）；超时/取消/错误区分）；新增 8 测。
+**Why:** spec §2/§3；只有 `DocLines` 分块读取才能保证 GB 级恒定内存；JS 侧格式化避免复杂值封送；`cancelled` 与“超时/脚本错误”分开上报。
+**验证:** `cargo test -p lumelog-app script::` 11 pass（三态/行号/抛错前缀/缺 onLine/非法返回/UTF-8/console 三级别+对象 JSON/无 tmp 残留）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 3. 脚本命令 + 注册
+**Files:** Modify `app/src-tauri/src/commands.rs`（`same_path`（canonicalize）；`script_list/read/write/delete`；`script_run`（doc 存在/目标≠源→`invalid_argument`；`begin_search`+`spawn_blocking`+`run_script`，console/progress/done 三 Channel）；`script_cancel`；测试 `same_path`）；`lib.rs`（注册 6 命令）；`script.rs`（除模块 allow；`RunStop::Io` 真正使用：写盘失败删 tmp 并返回错误）；新增 `stats_camel_case` 测试。
+**Why:** 目标与源同路径会覆盖正在读的文档，prologue 拒绝；取消复用通用 registry；DTO camelCase 直接由 script 类型序列化。
+**验证:** `cargo test -p lumelog-app script` 13 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 4. 前端 IPC（脚本）
+**Files:** Modify `app/frontend/src/ipc.ts`（`ScriptEntry/Console/Progress/Stats` + `scriptList/Read/Write/Delete/Run/Cancel`，Run 三 Channel）；`ipc.test.ts`（+1 typeof 6 个）。
+**Why:** `script-ui` 不直接依赖 ipc，由 main 注入回调；与现有双/三 Channel 包装形状一致。
+**验证:** `npm test` 90 pass（ipc 16→17）+ `run build` tsc 通过。
+
+### Task 5. `script-ui.ts` 脚本管理器模态
+**Files:** Create `app/frontend/src/script-ui.ts`（列表/新建模板/删除/保存/textarea+Tab/控制台/运行+取消/状态行；未保存确认；运行中锁编辑；`inert` 背景）；`script-ui.test.ts`（4 个 jsdom：列表选中读取、非法名+新建模板、保存调用、无文档禁用+运行流控制台）；`styles.css`（`.script-*`）。
+**Why:** 回调注入使模态不依赖 ipc、可 jsdom 测；名字规则与服务端一致；运行中禁止切脚本/编辑。
+**验证:** `npm test` 94 pass（14 文件，script-ui 4）+ `run build` tsc 通过。
+
+### Task 6. `main.ts` 脚本接线
+**Files:** Modify `app/frontend/src/main.ts`（`scriptModalOpen`与快捷键短路；工具栏“脚本”+面板“脚本…”；`openScriptManager` 注入 list/read/write/remove/chooseTarget(save 默认 `<doc基名>.out.txt`)/run(解析当前 docId)/cancel/confirm(ask)；与 keymap 模态互斥）。
+**Why:** spec §4；模态保持纯净（仅回调），文档不存在时运行 reject；两模态不能同时抢键盘/inert。
+**验证:** `run build` tsc 通过（46 modules）+ `npm test` 94 pass。
+
+### 终审修复波（CodeReview 全分支 0 Critical / 5 Important / 10 Minor）
+**Files:** `script.rs`（**I1** 最终 `writer.flush()` 错误不再被吞 → 删 tmp 并报“写入输出文件失败”，避免静默丢尾；**I2** 新增 `RunStop::Cancelled`，`onLine` 调用失败时先判 `cancel()`/超时，避免“已取消/300s 超时”退化为 `interrupted` 错；**I3** `const/let onLine = () => …` 现代写法可用（global lexical binding 不在 globalThis，补一次求值）；**I5** `read_script_in` 1 MiB 上限 + 剥 UTF-8 BOM + `from_utf8_lossy`（外部编辑器存 ANSI/GBK 不再直接失败）；输出 tmp 名加纳秒防碰撞）；`commands.rs`（**I4** `run_script` 包 `catch_unwind(AssertUnwindSafe)`，panic 时仍发 `on_done` 并 `end_search`）；`script-ui.ts`（**M1** 删除重复 `box.append`；**M2** 列表补修改时间；**M3** Esc 关闭 + 初始聚焦关闭钮，监听器在 close 里摘除）；`main.ts`（**M10** `openScriptModal` 抛错时回滚 `scriptModalOpen`，否则全局快捷键永久失效）；新增 2 测（const 箭头函数、BOM/非 UTF-8 读取）。
+**Why:** I1/I2/I4 均为低概率但后果不可恢复（静默丢数据 / 取消语义丢失 / 模态永久锁死）；I3/I5 直接影响可用性（现代写法与中文 Windows 记事本）。
+**Parked（本次未修，已记录）：** M4 模态 `String(e)` 未全走 `.zh`；M5 测目录用 PID 命名（改用 tempfile）；M7 返回串内含 `\n` 不归一（文档语义：一行可拆多行）；M8 Windows 保留设备名黑名单；三平台 CI 矩阵需开 PR 验证 `rquickjs-sys` 在 macOS/Linux 的 cc 编译。
+**验证:** `cargo test -p lumelog-app script::` 14 pass、`cargo test --workspace`（app 103/core 89）、`cargo clippy --workspace --all-targets -- -D warnings` 净、`npm test` 94 pass、`run build` 通过。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。

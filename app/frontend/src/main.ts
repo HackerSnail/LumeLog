@@ -43,6 +43,12 @@ import {
   keymapSet,
   keymapReset,
   docTailAppend,
+  scriptList,
+  scriptRead,
+  scriptWrite,
+  scriptDelete,
+  scriptRun,
+  scriptCancel,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -60,6 +66,7 @@ import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
 import { openKeymapModal } from "./keymap-ui";
+import { openScriptModal } from "./script-ui";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView, isNearBottom } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -125,6 +132,7 @@ const tailSeenSize = new Map<number, number>();
 let keymapOverrides: Record<string, string> = {};
 let keymapState = mergeBindings({});
 let keymapModalOpen = false;
+let scriptModalOpen = false;
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -225,6 +233,7 @@ function layout(): void {
     mkBtn("打开文件", "", () => void openFile()),
     mkBtn("查询", "行过滤 / 高亮命中", () => openQueryPanel()),
     mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
+    mkBtn("脚本", "打开脚本管理器（QuickJS 逐行变换）", () => openScriptManager()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
     mkBtn("主题", "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）", () => theme.cycle()),
@@ -2385,7 +2394,7 @@ async function resetKeymapAll(): Promise<Partial<Record<ActionId, string>>> {
 }
 
 function openKeymapSettings(): void {
-  if (document.querySelector(".keymap-modal")) return;
+  if (document.querySelector(".keymap-modal") || document.querySelector(".script-modal")) return;
   keymapModalOpen = true;
   openKeymapModal({
     actions: ACTION_DEFS.map((d) => ({ id: d.id, title: d.title })),
@@ -2396,6 +2405,55 @@ function openKeymapSettings(): void {
       keymapModalOpen = false;
     },
   });
+}
+
+/** Script manager (Roadmap-3): all IO/dialog work is injected into the modal. */
+function openScriptManager(): void {
+  if (scriptModalOpen || document.querySelector(".script-modal") || document.querySelector(".keymap-modal")) {
+    return;
+  }
+  scriptModalOpen = true;
+  try {
+    openScriptModal({
+    hasDocument: () => tabs.active() !== null,
+    defaultOutputBase: () => {
+      const a = tabs.active();
+      const ds = a ? docStates.get(a.info.docId) : undefined;
+      return ds ? basenameOf(ds.path) : "script";
+    },
+    list: scriptList,
+    read: scriptRead,
+    write: scriptWrite,
+    remove: scriptDelete,
+    chooseTarget: async (base) => {
+      const picked = await save({
+        defaultPath: `${base}.out.txt`,
+        filters: [{ name: "文本", extensions: ["txt"] }],
+      });
+      return typeof picked === "string" ? picked : null;
+    },
+    run: (a) => {
+      const active = tabs.active();
+      if (!active) return Promise.reject(new Error("请先打开一个文档"));
+      return scriptRun({
+        docId: active.info.docId,
+        code: a.code,
+        targetPath: a.targetPath,
+        onConsole: a.onConsole,
+        onProgress: a.onProgress,
+        onDone: a.onDone,
+      });
+    },
+    cancel: scriptCancel,
+    confirm: (msg) => ask(msg, { title: "脚本", kind: "warning" }),
+    onClose: () => {
+      scriptModalOpen = false;
+    },
+    });
+  } catch (err) {
+    scriptModalOpen = false; // never leave shortcuts disabled on a failed open
+    reportError(err);
+  }
 }
 
 /** The command set offered by the palette, rebuilt per open so it reflects
@@ -2410,6 +2468,7 @@ function buildCommands(): Command[] {
   return [
     ...bound,
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
+    { id: "script", title: "脚本…", run: () => openScriptManager() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
     { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },
@@ -2531,7 +2590,7 @@ function setBusy(b: boolean): void {
 
 function registerShortcuts(): void {
   window.addEventListener("keydown", (e) => {
-    if (keymapModalOpen) return; // the settings modal owns the keyboard
+    if (keymapModalOpen || scriptModalOpen) return; // a modal owns the keyboard
     if (e.key === "F3") {
       // Only the read-only list view cycles query hits; in an editor let
       // CodeMirror's own searchKeymap handle F3 (avoids a double response).

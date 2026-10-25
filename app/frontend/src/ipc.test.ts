@@ -30,6 +30,12 @@ import {
   canParseBlf,
   exportBlfCsv,
   exportBlfJsonl,
+  scriptList,
+  scriptRead,
+  scriptWrite,
+  scriptDelete,
+  scriptRun,
+  scriptCancel,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -160,6 +166,19 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("blf_wrappers_are_functions", () => {
     for (const fn of [canParseBlf, exportBlfCsv, exportBlfJsonl]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("script_wrappers_are_functions", () => {
+    for (const fn of [
+      scriptList,
+      scriptRead,
+      scriptWrite,
+      scriptDelete,
+      scriptRun,
+      scriptCancel,
+    ]) {
       expect(typeof fn).toBe("function");
     }
   });

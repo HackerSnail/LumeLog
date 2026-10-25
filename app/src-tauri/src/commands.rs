@@ -23,6 +23,10 @@ use tauri::{AppHandle, Manager};
 
 use crate::dto::*;
 use crate::can_export::{export_can, export_frames};
+use crate::script::{
+    delete_script_in, list_scripts_in, read_script_in, run_script, scripts_dir, write_script_in,
+    ScriptConsole, ScriptStats, ScriptProgress,
+};
 use crate::watch::{AppWatch, ExternalEvent, WatchStatus};
 use crate::state::AppDocs;
 
@@ -1392,7 +1396,7 @@ fn recovery_dir(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
     Ok(recovery_root(app)?.join("recovery"))
 }
 
-fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
+pub(crate) fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
     Ok(recovery_root(app)?.join("config.toml"))
 }
 
@@ -1555,6 +1559,122 @@ mod tail_tests {
     fn tail_append_unknown_doc() {
         let state = AppDocs::default();
         assert_eq!(tail_append(&state, 9).unwrap_err().code, "unknown_doc");
+    }
+}
+
+// ---- scripts (Roadmap-3) ---------------------------------------------------
+
+/// True when both paths point at the same file (canonicalize when possible).
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+#[tauri::command]
+pub fn script_list(app: AppHandle) -> Result<Vec<crate::script::ScriptEntry>, IpcError> {
+    list_scripts_in(&scripts_dir(&app)?)
+}
+
+#[tauri::command]
+pub fn script_read(app: AppHandle, name: String) -> Result<String, IpcError> {
+    read_script_in(&scripts_dir(&app)?, &name)
+}
+
+#[tauri::command]
+pub fn script_write(app: AppHandle, name: String, text: String) -> Result<(), IpcError> {
+    write_script_in(&scripts_dir(&app)?, &name, &text)
+}
+
+#[tauri::command]
+pub fn script_delete(app: AppHandle, name: String) -> Result<(), IpcError> {
+    delete_script_in(&scripts_dir(&app)?, &name)
+}
+
+/// Run a script over the document's lines into `target_path`; cancel with
+/// `script_cancel`. Console/progress stream on channels, final stats on `on_done`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC args: doc/code/target/3 channels
+pub fn script_run(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    code: String,
+    target_path: String,
+    on_console: Channel<ScriptConsole>,
+    on_progress: Channel<ScriptProgress>,
+    on_done: Channel<ScriptStats>,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    let source = doc_arc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .path()
+        .to_path_buf();
+    let target = PathBuf::from(&target_path);
+    if same_path(&source, &target) {
+        return Err(fail(IpcError::new(
+            "invalid_argument",
+            "输出文件不能是源文档本身",
+        )));
+    }
+    // Tauri's JoinHandle has no synchronous result; the worker always answers
+    // via `on_done` + `end_search`, and panics are caught above.
+    let _handle = tauri::async_runtime::spawn_blocking(move || {
+        let cancel_fn = Arc::new(move || cancel.load(Ordering::Relaxed));
+        let mut console = |m| {
+            let _ = on_console.send(m);
+        };
+        let mut prog = |p| {
+            let _ = on_progress.send(p);
+        };
+        // A panic inside the runner must still release the cancel registration
+        // and answer the front end, or the modal stays locked forever.
+        let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_script(doc_arc, &code, &target, &mut console, &mut prog, cancel_fn)
+        }))
+        .unwrap_or_else(|_| ScriptStats {
+            error: Some("脚本运行器内部异常".into()),
+            ..Default::default()
+        });
+        let _ = on_done.send(stats);
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+#[tauri::command]
+pub fn script_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod script_cmd_tests {
+    use super::*;
+
+    #[test]
+    fn same_path_compares_canonicalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.log");
+        std::fs::write(&a, b"x").unwrap();
+        assert!(same_path(&a, &a));
+        assert!(!same_path(&a, &dir.path().join("b.log")));
     }
 }
 
