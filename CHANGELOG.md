@@ -21,6 +21,11 @@
 **Why:** spec §3.1 只回命中行号+cu16 区间（文本不过 IPC，守 §3），`scan_filter` 走 `DocLines` 惰性逐行、每行判取消、`PARSE_BATCH` 聚合；区间驻留超 `HIT_RANGE_CAP` 降级空区间 + `truncated`。异步化同 `can_parse`：取消可用、不冻结主线程、流式实时渲染。**Ruling：**`scan_filter` 设设泛型迭代器（而非计划的 `&mut DocFile`）以便无 `DocFile` 进单测；空条件不扇出全文件扫描（prologue 直发 `on_done{0,0,false}`）。
 **验证:** `cargo test -p lumelog-app` 20 pass（新 4 个 `scan_filter_*`：AND 保留行集/升序、cu16 区间、取消早停、超 cap 截断）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端无改动。
 
+### Task 4. `doc_lines_at` 按需取子集行文本
+**Files:** Modify `app/src-tauri/src/commands.rs`（新增纯函数 `gather_lines(&mut DocFile, &[u32])` + `#[tauri::command] doc_lines_at` + `doc_lines_at_tests`）；Modify `app/src-tauri/src/lib.rs`（注册）；Modify `dto.rs`（剥除 IndexedText/LineContentPayload 最后两处 `#[allow(dead_code)]`，已全部消除）。
+**Why:** 过滤子集视图只渲染命中行，需按稀疏原始行号批量取文本（守 §3，不驻留全文）。`gather_lines` 逐行 `chunk_at(i,1)` 并按 `loadWindow` 同法去尾换行（`\n` 然 `\r`），与 `filter_run` 的 cu16 区间逐字符对齐；`indices.len()>MAX_CHUNK_LINES` → `invalid_argument`。
+**验证:** `cargo test -p lumelog-app` 23 pass（新 3 个 `gather_lines_*`：子集取回、CRLF 去尾、超 cap 拒）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端无改动。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。

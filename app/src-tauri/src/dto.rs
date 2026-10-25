@@ -320,7 +320,6 @@ pub struct FilterStats {
 }
 
 /// One requested line's decoded text, keyed by its original 0-based index.
-#[allow(dead_code)] // consumed by `doc_lines_at` (Task 4)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexedText {
@@ -329,7 +328,6 @@ pub struct IndexedText {
 }
 
 /// Payload of `doc_lines_at` (`on_data`) — a sparse subset of line texts.
-#[allow(dead_code)] // consumed by `doc_lines_at` (Task 4)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineContentPayload {

@@ -868,6 +868,106 @@ mod filter_run_tests {
     }
 }
 
+/// Gather decoded text for a sparse, ascending set of 0-based line indices.
+/// Each line is fetched with `chunk_at(i, 1)` and stripped of its trailing
+/// terminator exactly like the front end's `loadWindow` (`\n` then `\r`), so the
+/// cu16 highlight ranges `filter_run` produced line up with this text
+/// character-for-character. Only the requested lines are resident — never the
+/// whole file (spec §3). Bounded by `MAX_CHUNK_LINES` per call.
+fn gather_lines(doc: &mut DocFile, indices: &[u32]) -> Result<LineContentPayload, IpcError> {
+    if indices.len() > MAX_CHUNK_LINES as usize {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!(
+                "too many lines requested ({} > {MAX_CHUNK_LINES})",
+                indices.len()
+            ),
+        ));
+    }
+    let mut lines = Vec::with_capacity(indices.len());
+    let mut invalid = 0usize;
+    for &idx in indices {
+        let chunk = doc.chunk_at(idx as usize, 1).map_err(IpcError::from_core)?;
+        invalid += chunk.invalid_count;
+        let mut text = chunk.text;
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        if text.ends_with('\r') {
+            text.pop();
+        }
+        lines.push(IndexedText { index: idx, text });
+    }
+    Ok(LineContentPayload {
+        lines,
+        invalid_count: invalid as u64,
+    })
+}
+
+/// Fetch the decoded text for the visible window of a filtered read-only list
+/// (spec §3.2). The whole file is never resident: the front end requests only
+/// the original line numbers currently shown, and text flows back over a
+/// channel like `doc_chunk`.
+#[tauri::command]
+pub fn doc_lines_at(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+    indices: Vec<u32>,
+    on_data: Channel<LineContentPayload>,
+) -> Result<(), IpcError> {
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(IpcError::new("unknown_doc", format!("no document {doc_id}"))),
+    };
+    let mut doc = doc_arc
+        .lock()
+        .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+    let payload = gather_lines(&mut doc, &indices)?;
+    let _ = on_data.send(payload);
+    Ok(())
+}
+
+#[cfg(test)]
+mod doc_lines_at_tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn doc_of(content: &str) -> (NamedTempFile, DocFile) {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let doc = DocFile::open(f.path(), SIZE_LIMIT).unwrap();
+        (f, doc)
+    }
+
+    #[test]
+    fn gather_lines_returns_requested_subset() {
+        let (_k, mut doc) = doc_of("a\nbb\nccc\n");
+        let p = gather_lines(&mut doc, &[0, 2]).unwrap();
+        assert_eq!(p.lines.len(), 2);
+        assert_eq!(p.lines[0].index, 0);
+        assert_eq!(p.lines[0].text, "a");
+        assert_eq!(p.lines[1].index, 2);
+        assert_eq!(p.lines[1].text, "ccc", "terminator stripped, original index kept");
+    }
+
+    #[test]
+    fn gather_lines_strips_crlf() {
+        let (_k, mut doc) = doc_of("one\r\ntwo\r\n");
+        let p = gather_lines(&mut doc, &[1]).unwrap();
+        assert_eq!(p.lines[0].text, "two", "no trailing CR");
+    }
+
+    #[test]
+    fn gather_lines_over_cap_rejects() {
+        let (_k, mut doc) = doc_of("x\n");
+        let idx: Vec<u32> = (0..=MAX_CHUNK_LINES).collect();
+        let err = gather_lines(&mut doc, &idx).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+    }
+}
+
 fn eol_str(e: EolStyle) -> String {
     match e {
         EolStyle::Lf => "lf".to_string(),
