@@ -21,6 +21,11 @@
 **Why:** spec §2/§3。列名 `消息名.信号名` 去重 `#n`；meta 7 列固定 + DBC 信号列；物理值 `{:.6}` 裁尾零（非有限→空）；CSV 仅在含 `,"\r\n` 时加引号；jsonl 复用 `serde_json::to_string`（FrameJson 本就 camelCase）。纯文本构造与文件 I/O 解耦→无盘可测。
 **验证:** `cargo test -p lumelog-app can_export::` 16 pass（+8：列限定去重、db_signal_columns、header meta/含信号、row 填列与空列、转义、无 msg、浮点稳定/非有限、jsonl 合法回读）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 4. `export_can` 扫描核
+**Files:** Modify `app/src-tauri/src/can_export.rs`（新 `CanExportStats{written,scanned,cancelled,errored}` + `export_can<W:Write>(doc_arc,dbc,kind,regex,filter,writer,on_progress,cancel,wide)`：`DocLines::new`+`build_frame_source`→逐帧`next_frame`→`frame_json`→`frame_matches`→CSV/JSONL 行；读写错→`errored`、每帧判 `cancel`）+ 4 测；Modify `app/src-tauri/src/commands.rs`（`DocLines::new` 改 `pub(crate)` 供 can_export 复用）。
+**Why:** spec §5。**优于计划草拟**：`export_can` 走 `DocLines` 按块加解锁（同 `can_parse`/`filter_run`），不持整轮 doc 锁→并发 `doc_chunk` 不饥死；`frame_json` 解码一次兼供过滤与取值。build/write 错吸收为 `errored`不返 Result。
+**验证:** `cargo test -p lumelog-app can_export::` 20 pass（+4：jsonl 有数帧、CSV header+id 过滤、DBC 信号列、取消早停且 written<total）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。

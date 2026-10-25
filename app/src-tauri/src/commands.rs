@@ -440,7 +440,7 @@ pub struct DocLines {
 
 impl DocLines {
     /// Line count is read once up front; the body is never materialized here.
-    fn new(doc: Arc<Mutex<DocFile>>) -> Self {
+    pub(crate) fn new(doc: Arc<Mutex<DocFile>>) -> Self {
         let total = doc
             .lock()
             .unwrap_or_else(|p| p.into_inner())

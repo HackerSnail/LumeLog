@@ -4,10 +4,14 @@
 //! renders, so backend export can never drift from what the user sees.
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 use lumelog_can::dbc::Database;
+use lumelog_core::doc::DocFile;
 
-use crate::dto::{CanFilterJson, FrameJson, SignalOp};
+use crate::commands::{build_frame_source, DocLines};
+use crate::dto::{frame_json, CanFilterJson, FrameJson, SignalOp};
 
 /// Qualified signal-column header shared by the CSV builder and the column index.
 const CSV_META: [&str; 7] = [
@@ -42,7 +46,6 @@ pub(crate) fn qualified_columns(msgs: &[(String, Vec<String>)]) -> Vec<String> {
 }
 
 /// Signal column names from an optional DBC (empty when none imported).
-#[allow(dead_code)] // consumed by export_can (Task 4)
 pub fn db_signal_columns(db: Option<&Database>) -> Vec<String> {
     let pairs: Vec<(String, Vec<String>)> = db
         .map(|d| {
@@ -76,7 +79,6 @@ fn fmt_physical(v: f64) -> String {
 }
 
 /// CSV header line: 7 meta columns + one per DBC signal, CRLF-terminated.
-#[allow(dead_code)] // consumed by export_can (Task 4)
 pub fn csv_header(db: Option<&Database>) -> String {
     let mut cells: Vec<String> = CSV_META.iter().map(|s| s.to_string()).collect();
     cells.extend(db_signal_columns(db));
@@ -91,7 +93,6 @@ pub fn csv_header(db: Option<&Database>) -> String {
 /// One CSV data row. `col_index` maps a qualified `消息名.信号名` to its column
 /// offset (0-based within the signal-column block); `ncols` is the total column
 /// count. Cells for signals the frame lacks stay empty. CRLF-terminated.
-#[allow(dead_code)] // consumed by export_can (Task 4)
 pub fn csv_row(fj: &FrameJson, col_index: &HashMap<String, usize>, ncols: usize) -> String {
     let mut cells = vec![String::new(); ncols];
     cells[0] = fj.line_number.to_string();
@@ -127,7 +128,6 @@ fn fmt_ts(ms: f64) -> String {
 }
 
 /// One JSONL line: the frame serialized exactly like `can_parse` sends it.
-#[allow(dead_code)] // consumed by export_can (Task 4)
 pub fn jsonl_line(fj: &FrameJson) -> String {
     // FrameJson serializes to camelCase (matches the front-end shape), so a
     // failed to_string is unreachable; fall back to an empty object defensively.
@@ -135,10 +135,110 @@ pub fn jsonl_line(fj: &FrameJson) -> String {
     format!("{s}\n")
 }
 
+/// Tally of one `export_can` run (mirrors the log `export_lines` shape).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanExportStats {
+    pub written: u64,
+    pub scanned: u64,
+    pub cancelled: bool,
+    pub errored: bool,
+}
+
+const CAN_EXPORT_BATCH: u64 = 512;
+
+/// Stream a CAN log's filtered frames to `writer` as CSV (`wide=true`) or JSONL.
+/// Reuses `can_parse`'s per-chunk `DocLines` reader + `build_frame_source`, so it
+/// does NOT hold the doc lock for the whole run (concurrent `doc_chunk` reads
+/// interleave). `frame_json` decodes each frame once; `frame_matches` decides
+/// inclusion. Source-build or write failure sets `errored` and stops (no `Result`);
+/// `cancel` is checked per frame.
+#[allow(dead_code)] // consumed by the export commands (Task 5)
+#[allow(clippy::too_many_arguments)] // scan inputs (doc/dbc/source/filter/sink/callbacks)
+pub fn export_can<W: Write>(
+    doc_arc: &Arc<Mutex<DocFile>>,
+    dbc: Option<&Database>,
+    kind: &str,
+    regex: &Option<String>,
+    filter: &CanFilterJson,
+    writer: &mut W,
+    on_progress: &mut dyn FnMut(u64),
+    cancel: &dyn Fn() -> bool,
+    wide: bool,
+) -> CanExportStats {
+    let lines = DocLines::new(doc_arc.clone());
+    let mut src = match build_frame_source(kind, regex, lines) {
+        Ok(s) => s,
+        Err(_) => {
+            return CanExportStats {
+                written: 0,
+                scanned: 0,
+                cancelled: false,
+                errored: true,
+            }
+        }
+    };
+    let cols = db_signal_columns(dbc);
+    let col_index: HashMap<String, usize> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.clone(), CSV_META.len() + i))
+        .collect();
+    let ncols = CSV_META.len() + cols.len();
+    if wide && writer.write_all(csv_header(dbc).as_bytes()).is_err() {
+        return CanExportStats {
+            written: 0,
+            scanned: 0,
+            cancelled: false,
+            errored: true,
+        };
+    }
+    let (mut written, mut scanned) = (0u64, 0u64);
+    loop {
+        if cancel() {
+            on_progress(written);
+            return CanExportStats {
+                written,
+                scanned,
+                cancelled: true,
+                errored: false,
+            };
+        }
+        let Some(f) = src.next_frame() else { break };
+        scanned += 1;
+        let fj = frame_json(&f, dbc);
+        if !frame_matches(&fj, filter) {
+            continue;
+        }
+        let row = if wide {
+            csv_row(&fj, &col_index, ncols)
+        } else {
+            jsonl_line(&fj)
+        };
+        if writer.write_all(row.as_bytes()).is_err() {
+            return CanExportStats {
+                written,
+                scanned,
+                cancelled: false,
+                errored: true,
+            };
+        }
+        written += 1;
+        if scanned % CAN_EXPORT_BATCH == 0 {
+            on_progress(written);
+        }
+    }
+    on_progress(written);
+    CanExportStats {
+        written,
+        scanned,
+        cancelled: false,
+        errored: false,
+    }
+}
+
 /// True iff `fj` satisfies every active axis of `f` (AND), matching
 /// `canfilter.ts`'s `applyCanFilter` exactly — including `Object.is` float
 /// equality for `==` (bit-equal: `NaN==NaN` is true, `+0 != -0`).
-#[allow(dead_code)] // consumed by `export_can` (Task 4)
 pub fn frame_matches(fj: &FrameJson, f: &CanFilterJson) -> bool {
     // ID closed range; a reversed range matches nothing.
     if let Some(from) = f.id_from {
@@ -419,5 +519,85 @@ mod tests {
         assert_eq!(parsed["canId"].as_u64(), Some(5));
         assert_eq!(parsed["msgName"].as_str(), Some("A"));
         assert_eq!(parsed["signals"][0]["physical"].as_f64(), Some(42.0));
+    }
+
+    // ---- export_can (Task 4) ----
+    use tempfile::NamedTempFile;
+
+    fn doc_arc(text: &str) -> (NamedTempFile, Arc<Mutex<DocFile>>) {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let d = DocFile::open(f.path(), 1 << 20).unwrap();
+        (f, Arc::new(Mutex::new(d)))
+    }
+    const CANDUMP: &str = "can0 100#DEADBEEF\ncan0 101#CAFEBEEF\n";
+
+    #[test]
+    fn export_jsonl_writes_valid_frame_lines() {
+        let (_k, arc) = doc_arc(CANDUMP);
+        let mut out: Vec<u8> = Vec::new();
+        let s = export_can(&arc, None, "candump", &None, &f(), &mut out, &mut |_| {}, &|| false, false);
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(s.written, 2);
+        assert_eq!(s.scanned, 2);
+        let p0: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(p0["canId"].as_u64(), Some(0x100));
+        assert!(!s.errored && !s.cancelled);
+    }
+
+    #[test]
+    fn export_csv_header_and_id_filter() {
+        let (_k, arc) = doc_arc(CANDUMP);
+        let mut flt = f();
+        flt.id_from = Some(0x101);
+        flt.id_to = Some(0x101);
+        let mut out: Vec<u8> = Vec::new();
+        let s = export_can(&arc, None, "candump", &None, &flt, &mut out, &mut |_| {}, &|| false, true);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("lineNumber,timestampMs,channel,canId,msgName,dlc,dataHex\r\n"));
+        // only the 0x101 (257) frame survives the id filter
+        assert_eq!(s.written, 1);
+        assert_eq!(s.scanned, 2);
+        assert!(text.contains(",257,"), "{text}");
+    }
+
+    #[test]
+    fn export_csv_includes_dbc_signal_columns() {
+        let (_k, arc) = doc_arc("can0 1#AABBCCDD\n"); // id 1 -> message A(id 1)
+        let mut db = sample_db(); // A(1){Speed,Temp}, B(2){Speed}
+        db.messages[0].id = 1;
+        let mut out: Vec<u8> = Vec::new();
+        let s = export_can(&arc, Some(&db), "candump", &None, &f(), &mut out, &mut |_| {}, &|| false, true);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("lineNumber,timestampMs,channel,canId,msgName,dlc,dataHex,A.Speed,A.Temp,B.Speed\r\n"), "{text}");
+        assert_eq!(s.written, 1);
+    }
+
+    #[test]
+    fn export_cancel_stops_and_is_prefix() {
+        let big = "can0 100#AA\n".repeat(20);
+        let (_k, arc) = doc_arc(&big);
+        let seen = std::cell::Cell::new(0u32);
+        let mut out: Vec<u8> = Vec::new();
+        let s = export_can(
+            &arc,
+            None,
+            "candump",
+            &None,
+            &f(),
+            &mut out,
+            &mut |_| {},
+            &|| {
+                let c = seen.get();
+                seen.set(c + 1);
+                c >= 3
+            },
+            false,
+        );
+        assert!(s.cancelled, "cancel reported");
+        assert!((s.written as usize) < 20);
     }
 }
