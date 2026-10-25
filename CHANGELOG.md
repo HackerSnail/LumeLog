@@ -31,6 +31,11 @@
 **Why:** spec §5。prologue 同步校验源 + `File::create`（坏路径→`io` 不建 worker）→ `spawn_blocking` 跑 `export_can`、`on_progress` 节流、`on_done` 必发、`end_search`；早返 req_id。两命令共用 `run_can_export`。
 **验证:** `cargo test -p lumelog-app` 56 pass（+`can_export_stats_json_from_and_camel_case`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 6. 前端 IPC 桥（CAN 导出）
+**Files:** Modify `app/frontend/src/ipc.ts`（`import type CanFilter`；新 `CanExportStats` 类型 + 内部 `exportCan` 共用体 + `exportCsv`/`exportJsonl`（Omit cmd）/`exportCanCancel`）；Modify `app/frontend/src/ipc.test.ts`（+`can_export_wrappers_are_functions`）。
+**Why:** spec §4.2；两导出共用一个包装只发不同 cmd 名。filter 直接用 canfilter 的 `CanFilter`（与 Rust `CanFilterJson` camelCase 对齐）。
+**验证:** `npm --prefix app/frontend test` 55 pass（ipc 10→11）+ `run build`（tsc 通过）；Rust 未改。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。

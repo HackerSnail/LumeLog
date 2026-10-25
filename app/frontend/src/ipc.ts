@@ -4,6 +4,7 @@
 //! the shell returns stable lowercase-snake codes, we map them to Chinese copy.
 
 import { invoke, Channel } from "@tauri-apps/api/core";
+import type { CanFilter } from "./canfilter";
 
 /** Summary returned by `doc_open` (Rust `DocInfo`). */
 export interface DocInfo {
@@ -579,4 +580,60 @@ export function exportLines(args: {
 /** Ask an in-flight `exportLines` to stop. */
 export function exportCancel(requestId: number): Promise<void> {
   return call<void>("export_cancel", { requestId });
+}
+
+// ---- CAN export (spec §7.5 / §9) ------------------------------------------
+
+/** Terminal `exportCsv`/`exportJsonl` tally (Rust `CanExportStatsJson`). */
+export interface CanExportStats {
+  written: number;
+  scanned: number;
+  cancelled: boolean;
+  errored: boolean;
+}
+
+/**
+ * Export the CanPanel-filtered frame set to `targetPath` as a wide CSV
+ * (`exportCsv`) or JSONL (`exportJsonl`); the backend re-decodes + applies
+ * `filter` (same shape as `canfilter.ts`). Resolves with the job id for
+ * `exportCanCancel`.
+ */
+function exportCan(args: {
+  cmd: "export_csv" | "export_jsonl";
+  docId: number;
+  dbcId?: number | null;
+  sourceKind: string;
+  regex?: string | null;
+  filter: CanFilter;
+  targetPath: string;
+  onProgress: (p: { written: number }) => void;
+  onDone: (s: CanExportStats) => void;
+}): Promise<number> {
+  const progCh = new Channel<{ written: number }>();
+  progCh.onmessage = args.onProgress;
+  const doneCh = new Channel<CanExportStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>(args.cmd, {
+    docId: args.docId,
+    dbcId: args.dbcId ?? null,
+    sourceKind: args.sourceKind,
+    regex: args.regex ?? null,
+    filter: args.filter,
+    targetPath: args.targetPath,
+    onProgress: progCh,
+    onDone: doneCh,
+  });
+}
+
+export function exportCsv(args: Omit<Parameters<typeof exportCan>[0], "cmd">): Promise<number> {
+  return exportCan({ ...args, cmd: "export_csv" });
+}
+
+export function exportJsonl(args: Omit<Parameters<typeof exportCan>[0], "cmd">): Promise<number> {
+  return exportCan({ ...args, cmd: "export_jsonl" });
+}
+
+/** Ask an in-flight CAN export to stop. */
+export function exportCanCancel(requestId: number): Promise<void> {
+  return call<void>("export_can_cancel", { requestId });
 }
