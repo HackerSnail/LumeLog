@@ -6,6 +6,7 @@
 mod can_export;
 mod commands;
 mod dto;
+mod recovery;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -35,6 +36,12 @@ pub fn run() {
             commands::export_csv,
             commands::export_jsonl,
             commands::export_can_cancel,
+            commands::recovery_save,
+            commands::recovery_list,
+            commands::recovery_load,
+            commands::recovery_discard,
+            commands::recovery_enabled,
+            commands::recovery_set_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");

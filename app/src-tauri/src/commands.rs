@@ -1042,6 +1042,115 @@ pub fn export_can_cancel(
     }
 }
 
+// ---- Crash-recovery shadow store + minimal config switch (M3 B1) ------------
+
+/// LumeLog's config root: `<app_config>/LumeLog`.
+fn recovery_root(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
+    let base = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| IpcError::new("io", format!("no config dir: {e}")))?;
+    Ok(base.join("LumeLog"))
+}
+
+fn recovery_dir(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
+    Ok(recovery_root(app)?.join("recovery"))
+}
+
+fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
+    Ok(recovery_root(app)?.join("config.toml"))
+}
+
+/// Current `recovery_enabled` (missing/unreadable config -> true).
+fn recovery_enabled_now(app: &AppHandle) -> bool {
+    let text = config_path(app)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    crate::recovery::read_recovery_enabled(&text)
+}
+
+/// Persist a dirty doc's shadow (no-op when recovery is disabled).
+#[tauri::command]
+pub fn recovery_save(
+    app: AppHandle,
+    path: String,
+    encoding: String,
+    eol: String,
+    text: String,
+) -> Result<(), IpcError> {
+    if !recovery_enabled_now(&app) {
+        return Ok(()); // defence in depth; the front-end also gates scheduling
+    }
+    let dir = recovery_dir(&app)?;
+    let saved_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let meta = crate::recovery::RecoveryMeta {
+        path,
+        encoding,
+        eol,
+        saved_at_ms,
+    };
+    crate::recovery::write_shadow(&dir, &meta, &text)
+        .map_err(|e| IpcError::new("io", format!("write shadow: {e}")))
+}
+
+/// List recoverable shadows (empty when recovery is disabled).
+#[tauri::command]
+pub fn recovery_list(app: AppHandle) -> Result<Vec<crate::recovery::RecoveryEntry>, IpcError> {
+    if !recovery_enabled_now(&app) {
+        return Ok(Vec::new());
+    }
+    Ok(crate::recovery::list_shadows(&recovery_dir(&app)?))
+}
+
+/// Load one shadow's text + metadata.
+#[tauri::command]
+pub fn recovery_load(
+    app: AppHandle,
+    path: String,
+) -> Result<crate::recovery::RecoveryContent, IpcError> {
+    let dir = recovery_dir(&app)?;
+    let (meta, text) = crate::recovery::read_shadow(&dir, &path)
+        .map_err(|e| IpcError::new("io", format!("read shadow: {e}")))?;
+    Ok(crate::recovery::RecoveryContent {
+        path: meta.path,
+        encoding: meta.encoding,
+        eol: meta.eol,
+        text,
+    })
+}
+
+/// Delete a shadow (idempotent: a missing file is fine; other I/O errors surface).
+#[tauri::command]
+pub fn recovery_discard(app: AppHandle, path: String) -> Result<(), IpcError> {
+    crate::recovery::discard_shadow(&recovery_dir(&app)?, &path)
+        .map_err(|e| IpcError::new("io", format!("discard shadow: {e}")))
+}
+
+/// Read the minimal config switch.
+#[tauri::command]
+pub fn recovery_enabled(app: AppHandle) -> Result<bool, IpcError> {
+    Ok(recovery_enabled_now(&app))
+}
+
+/// Write `recovery_enabled` into `config.toml`, preserving other keys.
+#[tauri::command]
+pub fn recovery_set_enabled(app: AppHandle, enabled: bool) -> Result<(), IpcError> {
+    let path = config_path(&app)?;
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let next = crate::recovery::set_recovery_enabled(&text, enabled);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| IpcError::new("io", format!("create config dir: {e}")))?;
+    }
+    std::fs::write(&path, next)
+        .map_err(|e| IpcError::new("io", format!("write config: {e}")))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod filter_run_tests {
     use super::*;

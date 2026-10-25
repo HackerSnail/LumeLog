@@ -43,6 +43,8 @@
       ↳ M3 子项目 A 已全部交付：增量1（Plan 4 `feat/m3-filter-highlight`）只读视图多条件 AND 行过滤（包含/排除 × 字面/正则 × 大小写）+ 命中区 cu16 背景高亮 + F3/Shift+F3 跳转 + 实时取消（`filter_run` 异步流式、`doc_lines_at` 按需取子集文本），统一“查询面板”取代旧单框搜索；增量2（Plan 5 `feat/m3-timeline-export`）**时序筛选**：时间戳抽取正则 + 内置格式（ISO8601/epoch s/ms，chrono）按区间过滤，无抽取正则时退化为行号区间。
 - [x] 导出筛选后的报文/日志片段
       ↳ 已全部交付：日志片段导出（Plan 5 `feat/m3-timeline-export` `export_lines`，按行号取原始字节流式写、保编码/行尾） + CAN 报文导出（Plan 6 `feat/m3-can-export` `export_csv` 宽表（meta+DBC 信号列、物理值）/`export_jsonl`（每帧对象），后端重解码并套用与 CanPanel 一致的 `frame_matches` 视图过滤，流式可取消）。
+- [x] 未保存编辑的崩溃恢复（影子文件 + 启动横幅恢复 + 侧栏开关）
+      ↳ M3 子项目 B1（Plan 7 `feat/m3-crash-recovery`）：编辑模式脏文档停输 2s 把全量文本+编码/行尾写入 `$APP_CONFIG/LumeLog/recovery/<FNV(path)>.lumelog`；启动以单列表横幅逐项“恢复/丢弃”（恢复后仍脏、保存才落盘）；保存/关闭/换编码后自动删影；侧栏“崩溃恢复”勾选开关持久化到 `config.toml` 的 `recovery_enabled`（默认开、禁用不删既有影子）。外部修改监听（`notify` debounce、干净文档自动重载）为后续 B2。
 - [x] 自定义主题（浅 / 暗 / Dracula 三主题 + 跟随系统 + localStorage 持久化；无边框自绘标题栏；Ctrl+Shift+P 命令面板）
       ↳ UI 重构 `feat/m-ui-notelume`（参考 NoteLume）已交付：主题 token 体系、三栏外壳（侧栏/检查器/可拖分栏）、命令面板、工具条即标题栏
 - [ ] 快捷键配置同步（当前内置固定快捷键；用户自定义与跨设备同步为后续）

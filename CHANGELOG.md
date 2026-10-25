@@ -2,6 +2,45 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
+
+**依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。
+
+### 终审修复波（CodeReview 全分支 1 Critical / 3 Important / 4 Minor，全修）
+**Files:** `app/frontend/src/editor.ts`（`OpenEditableOpts.onEdit` 每次改动触发；`onDirty` 仍只在首次脏转变；`replaceText`/`setEol` 也触发 `onEdit`）；`app/frontend/src/main.ts`（`onEdit→scheduleRecovery`（onDirty 每次脏周期只触发一次，是 Critical 根因）；`openPath→Promise<boolean>`；恢复时**复用已开同路径标签**（`tabs.list/activate`，避免双 docId 抢同一影子/文件）；`cancelRecovery` 同步移除横幅行；恢复后 `updateInspector`+`refreshSidebar`；`recoveryWrites` 按 path 串行化在飞写入，discard 等写入落地后再删（防“返回的旧影复活”）；`recovery_discard` 错误上浮）；`app/src-tauri/src/recovery.rs`（`discard_shadow→io::Result`，仅 NotFound 视为成功）；`app/src-tauri/src/commands.rs`（`recovery_discard` 映射 `io`）；`app/frontend/src/styles.css`（`#toast` `z-index:70` 高于横幅 60）。
+**Why:** Critical（影子在整个脏周期只写一次→长时间编辑后崩溃只恢复首次输入后 2s 快照）使验收项失效；Important 三项（缺失文件提示不可达、恢复重复开页、保存/关闭后横幅僵尸行）均为真实数据/UX 缺口；Minor 四项（信息栏不刷新、写入/discard 竞争、删除错误被吞、toast 被横幅遮）顺手修正。
+**验证:** `cargo test -p lumelog-app recovery::` 11 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm run build`（tsc，43 modules）+ `npm test` 61 pass。GUI 必测：长时间编辑→停输 2s→再编辑→`kill -9`→恢复为最后文本。
+
+### Task 1. `recovery` 影子存储层
+**Files:** Create `app/src-tauri/src/recovery.rs`（`RecoveryMeta/RecoveryEntry/RecoveryContent` camelCase；`fnv1a64`/`doc_key`/`shadow_path`/`write_shadow`/`read_shadow`/`list_shadows`/`discard_shadow` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod recovery;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
+**Why:** spec §2—影子 `<doc_key>.lumelog` = 首行 JSON meta + `\n` + 原始 UTF-8 文本（大文本免 JSON 转义）；`doc_key=FNV-1a64(path)` 16hex（零依赖、稳定）；写入 `.lumelogtmp`→rename；list 按 `saved_at_ms` 降序、坏文件跳过、缺失目录→空。
+**验证:** `cargo test -p lumelog-app recovery::` 7 pass（FNV 标准向量、key 稳定/区分、meta+文本往返含中文/emoji/CRLF、同 key 覆盖、排序+坏文件跳过、缺目录、discard 幂等）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 2. 存储命令 + 最小配置命令 + 注册
+**Files:** Modify `app/src-tauri/src/recovery.rs`（`read_recovery_enabled`/`set_recovery_enabled` + 4 配置/DTO 测，剥模块 allow）；Modify `app/src-tauri/src/commands.rs`（`recovery_root/dir/config_path/recovery_enabled_now` + 6 命令 `recovery_save/list/load/discard/enabled/set_enabled`；禁用时 save no-op、list 空）；Modify `app/src-tauri/Cargo.toml`（`toml="0.8"`）+ `Cargo.lock`；Modify `lib.rs`（注册 6 命令）。
+**Why:** spec §3/§3.1。命令全以 `path` 为键（后端推 FNV）；config.toml 顶层 `recovery_enabled`（缺失/坏→true），set 保留其它键；写回前 `create_dir_all`；`recovery_save` 防御式再查开关。
+**验证:** `cargo test -p lumelog-app` 67 pass（recovery 11：含 4 配置/DTO）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（新 `toml` 依赖编译通过；Cargo.lock 随本次提交）。
+
+### Task 3. 前端 `recovery.ts`（Debouncer + 格式化）
+**Files:** Create `app/frontend/src/recovery.ts`（`Debouncer`（按 docId 合并/取消/cancelAll）+ `humanSize` + `formatSavedAt`）；Create `recovery.test.ts`（5 测）。
+**Why:** spec §4/§6。把 2s 节流的时序与展示格式抽为 DOM 无关纯模块，便于 fake-timers 单测；不依赖 locale 避免平台差异。
+**验证:** `npm --prefix app/frontend test` 60 pass（+5：合并只写一次/取消/多 id 隔离+cancelAll/humanSize 边界/时间格式形状）+ `run build` tsc 通过。
+
+### Task 4. 前端 IPC 桥（崩溃恢复）
+**Files:** Modify `app/frontend/src/ipc.ts`（`RecoveryEntry`/`RecoveryContent` 类型 + `recoverySave/recoveryList/recoveryLoad/recoveryDiscard/recoveryEnabled/recoverySetEnabled`）；Modify `ipc.test.ts`（+1 typeof）。
+**Why:** spec §3/§3.1；`RecoveryEntry` 字段与 Rust camelCase 对齐（`savedAtMs/sizeBytes`）；均以 `path` 为键。
+**验证:** `npm test` 61 pass（ipc 11→12）+ `run build` tsc 通过；Rust 未改。
+
+### Task 5. `main.ts` 排影 + 清理
+**Files:** Modify `app/frontend/src/main.ts`（导入 `Debouncer`/`recoverySave`/`recoveryDiscard`；`recoveryOn`/`recoveryDebounce`；`fireRecovery`/`scheduleRecovery`/`cancelRecovery`；`mountDoc.onDirty` 追加 schedule；`saveActive` 记 `prevPath` 并传给 `afterSave`（签名 +1 参）；`afterSave` 末尾清旧/新 path 影子；`handleClose` 关前清影；`changeEncoding` 丢弃重载后清影）。
+**Why:** spec §4。2s 节流只在“编辑模式 + 脏 + 开关开”时排影；保存（含 Save-As 前后两 path）/关闭/换编码丢弃后删影 + 清定时器；写影失败 best-effort 不拖断编辑。
+**验证:** `npm --prefix app/frontend run build`（tsc 通过，43 modules）+ `npm test` 61 pass（无回归；时序逻辑已由 T3 单测覆盖）。
+
+### Task 6. 侧栏勾选框 + 启动横幅 + 恢复/丢弃
+**Files:** Modify `app/frontend/src/main.ts`（侧栏 `.side-option` “崩溃恢复”复选框；`initRecovery` 读配置回填 + 拉起 `checkRecovery`；`onRecoveryToggle` 写配置/回滚/禁用时 `cancelAll`+收横幅；`renderRecoveryBanner`/`discardRecovery`/`discardAllRecovery`/`restoreRecovery`（`openPath`→`recoveryLoad`→`replaceText`→套 encoding/eol→仍脏→删旧影）；启动尾部 `void initRecovery();`）；Modify `styles.css`（`.side-option` + `.recovery-banner/head/list/row/label/foot`，用现有主题 token）。
+**Why:** spec §4。横幅不阻塞启动；原文件缺失时提示且**不删条目**（仅显式丢弃）；禁止/开启与 config.toml 双向一致，写失败回滚勾选。
+**验证:** `run build`（tsc 通过）+ `npm test` 61 pass；GUI 手工清单留 Task 7。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。

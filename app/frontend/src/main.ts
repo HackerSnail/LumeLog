@@ -27,6 +27,12 @@ import {
   exportCsv,
   exportJsonl,
   exportCanCancel,
+  recoverySave,
+  recoveryDiscard,
+  recoveryList,
+  recoveryLoad,
+  recoveryEnabled,
+  recoverySetEnabled,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -37,8 +43,10 @@ import {
   type IndexedText,
   type TimeFormat,
   type CanExportStats,
+  type RecoveryEntry,
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
+import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -81,6 +89,14 @@ const lists = new Map<number, ListView>();
 /** Lines indexed so far per doc; drives the list "待索引" placeholder (Task 11). */
 const indexed = new Map<number, number>();
 let busy = false;
+/** Crash-recovery schedule (spec §4.4): 2s idle → write the doc's shadow. */
+let recoveryOn = true; // refreshed from config.toml at startup (Task 6)
+const recoveryDebounce = new Debouncer(2000, (docId) => fireRecovery(docId));
+/** In-flight shadow writes per path: discard must wait, or a late write revives it. */
+const recoveryWrites = new Map<string, Promise<void>>();
+let recoveryChk: HTMLInputElement | null = null;
+let recoveryBannerEl: HTMLElement | null = null;
+let recoveryEntries: RecoveryEntry[] = [];
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -200,7 +216,15 @@ function layout(): void {
   asideTitle.textContent = "已打开文档";
   sidebarListEl = document.createElement("div");
   sidebarListEl.className = "side-list";
-  aside.append(asideTitle, sidebarListEl);
+  const recoveryOption = document.createElement("label");
+  recoveryOption.className = "side-option";
+  recoveryChk = document.createElement("input");
+  recoveryChk.type = "checkbox";
+  recoveryChk.id = "recovery-enabled";
+  recoveryChk.checked = true;
+  recoveryChk.addEventListener("change", () => void onRecoveryToggle(recoveryChk!.checked));
+  recoveryOption.append(recoveryChk, document.createTextNode("崩溃恢复"));
+  aside.append(asideTitle, sidebarListEl, recoveryOption);
 
   // Right inspector: metadata for the active document + the ⚠ detail.
   const insp = document.createElement("aside");
@@ -842,16 +866,18 @@ async function openFile(): Promise<void> {
   if (typeof picked === "string") await openPath(picked);
 }
 
-async function openPath(path: string): Promise<void> {
-  if (busy) return;
+async function openPath(path: string): Promise<boolean> {
+  if (busy) return false;
   setBusy(true);
   try {
     const info = await docOpen(path, onIndexProgress);
     // The shell owns the ≤200MB split (spec §4.3/A1) via `DocInfo.mode`.
     if (info.mode === "readonly") mountList(info, path);
     else await mountDoc(info, path);
+    return true;
   } catch (err) {
     reportError(err);
+    return false;
   } finally {
     setBusy(false);
   }
@@ -863,6 +889,196 @@ function onIndexProgress(p: IndexProgress): void {
   const ds = docStates.get(p.docId);
   if (ds) indexed.set(p.docId, ds.totalLines);
   lists.get(p.docId)?.refresh();
+}
+
+/** Write the dirty doc's shadow after the 2s idle debounce (best-effort). */
+function fireRecovery(docId: number): void {
+  const ds = docStates.get(docId);
+  const h = editors.get(docId);
+  if (!ds || !h || !h.isDirty()) return;
+  const path = ds.path;
+  let write: Promise<void>;
+  write = recoverySave({
+    path,
+    encoding: ds.encoding,
+    eol: ds.eol,
+    text: h.getText(),
+  })
+    .catch(() => {
+      // A shadow write failure must never interrupt editing; the next idle retries.
+    })
+    .finally(() => {
+      if (recoveryWrites.get(path) === write) recoveryWrites.delete(path);
+    });
+  recoveryWrites.set(path, write);
+}
+
+/** Arm the shadow timer for a dirty edit-mode doc (no-op when disabled). */
+function scheduleRecovery(docId: number): void {
+  if (!recoveryOn) return;
+  const h = editors.get(docId);
+  if (!h || !h.isDirty()) return;
+  recoveryDebounce.schedule(docId);
+}
+
+/** Drop a pending shadow write and delete the on-disk shadow for `path`. */
+function cancelRecovery(docId: number, path: string): void {
+  recoveryDebounce.cancel(docId);
+  const inflight = recoveryWrites.get(path);
+  if (inflight) {
+    // A write may still be landing: delete only after it settles, else a stale
+    // shadow could survive a successful save/close.
+    void inflight.finally(() => recoveryDiscard(path).catch(() => {}));
+  } else {
+    recoveryDiscard(path).catch(() => {});
+  }
+  // Keep the banner in sync when the shadow is cleared from outside it.
+  if (recoveryEntries.some((e) => e.path === path)) {
+    recoveryEntries = recoveryEntries.filter((e) => e.path !== path);
+    renderRecoveryBanner();
+  }
+}
+
+// ---- crash recovery UI (spec §4.4/§10, M3 B1) -------------------------------
+
+function removeRecoveryBanner(): void {
+  recoveryBannerEl?.remove();
+  recoveryBannerEl = null;
+}
+
+function renderRecoveryBanner(): void {
+  removeRecoveryBanner();
+  if (recoveryEntries.length === 0) return;
+  const box = document.createElement("div");
+  box.className = "recovery-banner";
+  box.setAttribute("role", "status");
+  const head = document.createElement("div");
+  head.className = "recovery-head";
+  head.textContent = `发现 ${recoveryEntries.length} 个未保存恢复项（崩溃恢复）`;
+  const list = document.createElement("div");
+  list.className = "recovery-list";
+  for (const e of recoveryEntries) {
+    const row = document.createElement("div");
+    row.className = "recovery-row";
+    const label = document.createElement("span");
+    label.className = "recovery-label";
+    label.textContent = `${basenameOf(e.path)} · ${formatSavedAt(e.savedAtMs)} · ${humanSize(e.sizeBytes)}`;
+    label.title = e.path;
+    const ok = mkBtn("恢复", "把影子内容恢复到编辑器（恢复后仍未保存）", () => void restoreRecovery(e));
+    const no = mkBtn("丢弃", "删除该影子，不再提示", () => void discardRecovery(e.path));
+    row.append(label, ok, no);
+    list.append(row);
+  }
+  const foot = document.createElement("div");
+  foot.className = "recovery-foot";
+  foot.append(
+    mkBtn("全部丢弃", "删除全部恢复项", () => void discardAllRecovery()),
+    mkBtn("关闭", "暂时收起（影子保留，下次启动再问）", () => removeRecoveryBanner()),
+  );
+  box.append(head, list, foot);
+  document.body.append(box);
+  recoveryBannerEl = box;
+}
+
+async function checkRecovery(): Promise<void> {
+  if (!recoveryOn) {
+    removeRecoveryBanner();
+    return;
+  }
+  try {
+    recoveryEntries = await recoveryList();
+  } catch {
+    return; // a config/dir problem must never block startup
+  }
+  renderRecoveryBanner();
+}
+
+async function discardRecovery(path: string): Promise<void> {
+  try {
+    await recoveryDiscard(path);
+  } catch {
+    // idempotent backend: failure only means the file is already gone
+  }
+  recoveryEntries = recoveryEntries.filter((e) => e.path !== path);
+  renderRecoveryBanner();
+}
+
+async function discardAllRecovery(): Promise<void> {
+  for (const e of [...recoveryEntries]) {
+    await recoveryDiscard(e.path).catch(() => {});
+  }
+  recoveryEntries = [];
+  renderRecoveryBanner();
+}
+
+/** Open the original file, then replace its text with the shadow (kept dirty). */
+async function restoreRecovery(e: RecoveryEntry): Promise<void> {
+  if (busy) {
+    toastMsg("请稍候…");
+    return;
+  }
+  const existing = tabs.list().find((t) => t.path === e.path);
+  if (existing) {
+    // Reuse the open tab: a second doc id for the same path would fork the
+    // shadow key and fight over the same file on save.
+    tabs.activate(existing.docId);
+  } else if (!(await openPath(e.path))) {
+    toastMsg(`原文件已缺失，无法恢复：${basenameOf(e.path)}`);
+    return; // keep the entry: only an explicit discard removes it
+  }
+  const a = tabs.active();
+  const docId = a?.info.docId;
+  const h = docId === undefined ? undefined : editors.get(docId);
+  const ds = docId === undefined ? undefined : docStates.get(docId);
+  if (docId === undefined || !h || !ds || ds.path !== e.path) {
+    toastMsg("恢复失败：未找到刚打开的文档");
+    return;
+  }
+  try {
+    const c = await recoveryLoad(e.path);
+    h.replaceText(c.text); // triggers onEdit -> a fresh shadow after the next idle
+    ds.encoding = c.encoding || ds.encoding;
+    ds.eol = c.eol || ds.eol;
+    status.setEncoding(ds.encoding);
+    status.setEol(ds.eol);
+    tabs.refreshDirty(docId);
+    updateInspector(docId);
+    refreshSidebar();
+    // Drop the consumed shadow; the dirty editor re-writes it after 2s idle.
+    await recoveryDiscard(e.path).catch(() => {});
+    recoveryEntries = recoveryEntries.filter((x) => x.path !== e.path);
+    renderRecoveryBanner();
+    toastMsg(`已恢复 ${basenameOf(e.path)}（仍未保存）`);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+async function onRecoveryToggle(want: boolean): Promise<void> {
+  try {
+    await recoverySetEnabled(want);
+    recoveryOn = want;
+    if (want) {
+      void checkRecovery();
+    } else {
+      recoveryDebounce.cancelAll();
+      recoveryEntries = [];
+      removeRecoveryBanner();
+    }
+  } catch (err) {
+    if (recoveryChk) recoveryChk.checked = !want; // roll back the checkbox
+    reportError(err);
+  }
+}
+
+async function initRecovery(): Promise<void> {
+  try {
+    recoveryOn = await recoveryEnabled();
+  } catch {
+    recoveryOn = true; // default on when the config cannot be read
+  }
+  if (recoveryChk) recoveryChk.checked = recoveryOn;
+  if (recoveryOn) void checkRecovery();
 }
 
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
@@ -881,6 +1097,8 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
     info,
     ext: extOf(path),
     onDirty: () => tabs.refreshDirty(info.docId),
+    // onDirty fires once per dirty cycle; every edit must re-arm the 2s timer.
+    onEdit: () => scheduleRecovery(info.docId),
     onInvalid: (n) => {
       // Persistent ⚠ beside the encoding (spec §5.4), not a transient toast —
       // a wrong-encoding file must stay discoverable while it is open.
@@ -953,6 +1171,7 @@ async function saveActive(saveAs = false): Promise<void> {
   }
   const ds = docStates.get(a.info.docId);
   if (!ds) return;
+  const prevPath = ds.path; // shadow key before a possible Save-As rebind
 
   // Save-As (Ctrl+Shift+S): pick a destination first; cancelling aborts quietly.
   let target = ds.path;
@@ -975,7 +1194,7 @@ async function saveActive(saveAs = false): Promise<void> {
       eol: ds.eol,
       force: false,
     });
-    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target);
+    afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, false, target, prevPath);
   } catch (err) {
     if (
       err instanceof IpcError &&
@@ -1003,7 +1222,7 @@ async function saveActive(saveAs = false): Promise<void> {
             eol: ds.eol,
             force: true,
           });
-          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target);
+          afterSave(a.info.docId, handle, ds, report.replaceCount, report.conflict, true, target, prevPath);
         } catch (err2) {
           reportError(err2);
         } finally {
@@ -1026,6 +1245,7 @@ function afterSave(
   conflict: boolean,
   forced: boolean,
   target: string,
+  prevPath: string,
 ): void {
   ds.path = target; // a Save-As rebinds the tab to its new file
   handle.markSaved();
@@ -1039,6 +1259,9 @@ function afterSave(
   } else {
     updatePos(handle);
   }
+  // Saved: the shadow is stale — clear both the pre-Save-As and the new path.
+  cancelRecovery(docId, prevPath);
+  cancelRecovery(docId, ds.path);
 }
 
 /**
@@ -1094,7 +1317,11 @@ async function changeEncoding(label: string): Promise<void> {
     ds.eol = updated.eol || ds.eol;
     status.setEncoding(updated.encoding);
     updateInspector(docId); // inspector shows the new encoding / ⚠ detail
-    if (handle) tabs.refreshDirty(docId);
+    if (handle) {
+      tabs.refreshDirty(docId);
+      // The dirty text was discarded by the re-decode; any shadow is stale.
+      cancelRecovery(docId, ds.path);
+    }
   } catch (err) {
     reportError(err);
     status.setEncoding(ds.encoding);
@@ -1123,6 +1350,8 @@ async function handleClose(docId: number): Promise<void> {
     });
     if (!go) return;
   }
+  const closing = docStates.get(docId);
+  if (closing) cancelRecovery(docId, closing.path);
   tabs.remove(docId);
   docStates.delete(docId);
   editors.delete(docId);
@@ -1759,3 +1988,4 @@ registerShortcuts();
 // timing endpoint for the manual GUI cold-start measurement. A headless CI
 // cannot observe real first-paint, so §2 records P1/P2 as human smoke items.
 void appPing().catch(() => {});
+void initRecovery();
