@@ -16,6 +16,11 @@
 **Why:** BLF 无 `DocLines`，需与文本源共用帧→行/过滤/取消/统计逻辑；行为与签名不变。
 **验证:** `cargo test -p lumelog-app can_export::` 20 pass（既有断言零改动）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 3. `can_parse_blf` + `can_export_blf_csv/jsonl`
+**Files:** Modify `app/src-tauri/src/commands.rs`（三个命令 + `run_blf_export` 骨架；`BlfSource::open` 在 prologue 同步校验，坏文件直接 reject；解析复用 `parse_frames`，导出复用 `export_frames`；`take_error` 写 `BlfStatsJson.error` / 置 `errored`；取消复用 `can_cancel`）；`dto.rs`（`BlfStatsJson` + camelCase 测试）；`lib.rs`（注册）。
+**Why:** spec §3；无源文档，BLF 帧仍走同一批处理/过滤/取消链路；大文件不整文件载入。
+**验证:** `cargo test -p lumelog-app` 90 pass（+1 DTO）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。

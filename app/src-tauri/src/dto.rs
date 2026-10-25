@@ -338,6 +338,17 @@ pub struct TailAppendJson {
     pub size: u64,
 }
 
+/// Result of a BLF parse run (`can_parse_blf`, Roadmap: BLF).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlfStatsJson {
+    pub decoded: u64,
+    /// Unsupported/unknown objects skipped (LIN, statistics, ...).
+    pub skipped: u64,
+    /// Fatal parse error after the stream stopped (frames already sent stay).
+    pub error: Option<String>,
+}
+
 // ---- M3 filter DTOs (spec §6.4 / §9). camelCase to match ipc.ts ------------
 
 /// One filter condition as it arrives from the query panel. `mode` is
@@ -523,6 +534,32 @@ pub fn frame_json(f: &Frame, db: Option<&Database>) -> FrameJson {
         error_frame: f.flags.is_error_frame,
         msg_name,
         signals,
+    }
+}
+
+#[cfg(test)]
+mod blf_stats_tests {
+    use super::*;
+
+    #[test]
+    fn blf_stats_camel_case() {
+        let ok = serde_json::to_value(BlfStatsJson {
+            decoded: 12,
+            skipped: 3,
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(ok["decoded"], 12);
+        assert_eq!(ok["skipped"], 3);
+        assert!(ok["error"].is_null());
+
+        let bad = serde_json::to_value(BlfStatsJson {
+            decoded: 1,
+            skipped: 0,
+            error: Some("blf: bad".into()),
+        })
+        .unwrap();
+        assert_eq!(bad["error"], "blf: bad");
     }
 }
 
