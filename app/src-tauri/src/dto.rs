@@ -256,6 +256,50 @@ pub struct CanStatsJson {
     pub skipped: u64,
 }
 
+// ---- CAN export DTOs (spec §7.5 / §9). camelCase to match ipc.ts -------------
+
+/// Signal comparison operator for the CanPanel signal condition (mirrors the
+/// `signalOp` string values used by `canfilter.ts`).
+#[allow(dead_code)] // consumed by `export_can` (Task 4) / command sig (Task 5)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignalOp {
+    #[serde(rename = ">")]
+    Gt,
+    #[serde(rename = "<")]
+    Lt,
+    #[serde(rename = ">=")]
+    Ge,
+    #[serde(rename = "<=")]
+    Le,
+    #[serde(rename = "==")]
+    Eq,
+}
+
+/// The CanPanel view filter, mirrored server-side so `export_csv`/`export_jsonl`
+/// reproduce exactly what the panel shows. Field-for-field equal to
+/// `canfilter.ts`'s `CanFilter`; every axis optional (absent = not applied).
+#[allow(dead_code)] // consumed by `export_can` (Task 4) / command sig (Task 5)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CanFilterJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_from: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_to: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_op: Option<SignalOp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_from_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_to_ms: Option<f64>,
+}
+
 // ---- M3 filter DTOs (spec §6.4 / §9). camelCase to match ipc.ts ------------
 
 /// One filter condition as it arrives from the query panel. `mode` is

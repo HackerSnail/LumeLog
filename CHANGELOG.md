@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
+
+**依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
+
+### Task 1. `can_export::frame_matches`（canfilter.ts 端口）
+**Files:** Create `app/src-tauri/src/can_export.rs`（`frame_matches(fj:&FrameJson,f:&CanFilterJson)->bool` + 8 单测）；Modify `app/src-tauri/src/dto.rs`（`SignalOp`{Gt,Lt,Ge,Le,Eq → ">"/"<"/">="/"<="/"=="} + `CanFilterJson` camelCase/`default`/`skip_serializing_if`）；Modify `app/src-tauri/src/lib.rs`（`mod can_export;`）。`frame_matches`/`CanFilterJson`/`SignalOp` 暂加带注释 `#[allow(dead_code)]`（Task4/5 接入后剥）。
+**Why:** 后端导出需与 CanPanel 视图过滤一致。作用在 `FrameJson`（与前端同结构）逐字端口 `canfilter.ts`；ID 闭/反向不匹配、msgName 精确、信号三要素齐才判、`Eq` 用 `to_bits()` 复现 JS `Object.is`（NaN==NaN 真、+0≠-0）、时间窗缺 ts 不匹配。
+**验证:** `cargo test -p lumelog-app can_export::` 8 pass（逐字对应 canfilter.test.ts：空过滤/ID 闭/反向/msgName/信号 gt+缺失/`Eq` Object.is 语义/时间窗/AND 组合）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。

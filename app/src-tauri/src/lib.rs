@@ -3,6 +3,7 @@
 //! pure-Rust crate, reused by the CLI in Task 7 and this shell). Streams that
 //! the front end consumes are delivered over `tauri::ipc::Channel`s.
 
+mod can_export;
 mod commands;
 mod dto;
 mod state;
