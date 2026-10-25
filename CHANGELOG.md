@@ -2,6 +2,55 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
+
+**依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。
+
+### 终审修复波（CodeReview 全分支 0 Critical / 0 Important / 3 Minor）
+**Files:** Modify `app/frontend/src/main.ts`（M1：导出默认名改为 `<docname>.filtered.log`（取 `docStates` 的 `basenameOf(path)`）；M2：`doExport` 开头加“仅只读视图”守卫（`lists.has`），避免对可编辑文档导出磁盘未保存旧字节）；Modify `app/src-tauri/src/commands.rs`（M3：导出 worker 注释改准——导出按整任务持 doc 锁，与 `filter_run`/`can_parse` 按块加解锁不同；`export_cancel` 走独立注册表仍即时、无死锁）。
+**Why:** 终审仅余 3 项非阻塞 Minor，均低代价且 M2 是真实一致性缺口→一并修。**验证:** `npm test` 54 pass + `run build`（tsc）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（本轮仅改 main.ts 逻辑 + 注释，Rust 行为无变）。
+
+### Task 1. lumelog-core 行过滤器加时序 + 行号轴
+**Files:** Modify `Cargo.toml`（root `[workspace.dependencies]` 加 `chrono = { version="0.4", default-features=false, features=["std"] }`）；Modify `crates/lumelog-core/Cargo.toml`（`chrono = { workspace = true }`）；Modify `crates/lumelog-core/src/filter.rs`（新 `TimeFormat{Iso,EpochSec,EpochMillis}`/`TimeSpec`/`parse_time_ms`；`LineFilter` 加 `time`/`line_range` 字段，`build` 新增 `time: Option<TimeSpec>, line_range: Option<(u64,u64)>` 参（校验抽取正则含命名组 `ts`、预解 from/to，非法→`InvalidPattern`），`keep(line_no,text)` 新增 `line_no` 参并依次过行号区间→文本 AND→时间窗（无 ts 行按 `keep_when_no_ts`））；Modify `app/src-tauri/src/commands.rs`（新签名涟漪：`scan_filter` 的 `lf.keep(line1-1,&text)`、`filter_run` 与测试 `make_filter` 的 `build(.., None, None)`）。
+**Why:** spec §2/§3.1。行号与时间是两条独立 AND 轴；时间解析用内置格式集（chrono，无偏移当 UTC，支持 RFC3339/小数秒）；无抽取正则时行号区间为退化路径。**涟漪决策：**因 `build`/`keep` 签名变更，本 Task 一并适配 `commands.rs` 现有调用（传 `None,None` 保持旧行为），保证本提交 workspace 仍可编译（时间轴/行号轴的 **功能接入** 属 Task 4）。
+**验证:** `cargo test -p lumelog-core filter::` 16 pass（旧 10 适配新签名 + 新 6：行号区间/ISO 窗/epoch 秒/无 ts 保留标记/缺 ts 组报错/ISO 偏移与小数秒）；`cargo test -p lumelog-app` 23 pass（旧 filter_run 测试适配）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 2. lumelog-core::export 原始字节导出
+**Files:** Create `crates/lumelog-core/src/export.rs`；Modify `crates/lumelog-core/src/lib.rs`（`pub mod export;`）。
+**Why:** spec §3.2。`export::run<W:Write>(doc, matcher, writer, on_progress, cancel) -> ExportStats{written,scanned,cancelled,errored}` 逐块 `chunk_at`（`chunk_lines` 去尾换行与 filter_run 的 `DocLines` 同法，保证 keep 判定与屏显一致）→保留行用 `line_byte_range`+`read_window` 取**原始字节**写 `writer`（不转码，精确保编码/行尾）；每行判 cancel、每块报进度；读/写错吸收为 `errored` 不返回 Result（落 core 因 `line_byte_range/read_window` 是 `pub(crate)`）。
+**验证:** `cargo test -p lumelog-core export::` 4 pass（字节一致/含选中行“bb\n”、CRLF+无尾换行全量逐字节、GBK 多字节原样拷贝、取消早停且输出为前缀）；`cargo clippy -p lumelog-core --all-targets -- -D warnings` 净。
+
+### Task 3. 时序/导出 DTO（`lumelog-app`）
+**Files:** Modify `app/src-tauri/src/dto.rs`（新增 `TimeSpecJson{extractPattern,format,from?,to?,keepWhenNoTs}`(+`to_core`→`TimeSpec`，未知格式→Iso)、`ExportProgress{written}`、`ExportStatsJson{written,scanned,cancelled,errored}`(+`From<core ExportStats>`)；均 camelCase；+`timeline_export_dto_tests`）。未接入命令前加带注释 `#[allow(dead_code)]`（Task 4/5 剥）。
+**Why:** spec §3.3，为 `filter_run`/`export_lines` 定契约；时间轴编译错误由 core `LineFilter::build`→`IpcError::from_core`→`invalid_pattern`（无新错误码）。
+**验证:** `cargo test -p lumelog-app` 26 pass（新 3：格式映射/驼峰导出/From core）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 4. `filter_run` 接时间轴/行号轴
+**Files:** Modify `app/src-tauri/src/commands.rs`（`filter_run` 入参加 `time: Option<TimeSpecJson>`/`line_from`/`line_to`；组装 `line_range=Some((from,to))`仅当两侧都给、`time_core=time.to_core()`；no-op 守卫改为“无任何轴”才短路；`LineFilter::build(specs,case,time_core,line_range)`；新 2 测）；Modify `dto.rs`（剥 TimeSpecJson+to_core 的 `#[allow(dead_code)]`）。
+**Why:** spec §3.3—时间/行号与文本 AND 同扫描一次完成（单一选中集），不二次 pass。
+**验证:** `cargo test -p lumelog-app` 28 pass（新 `scan_filter_line_range_degrade`、`scan_filter_time_axis_keeps_range`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端未改。
+
+### Task 5. `export_lines` / `export_cancel` 命令
+**Files:** Modify `app/src-tauri/src/commands.rs`（新 `open_export_target` + `#[tauri::command] export_lines`（同步 prologue 校验/建文件 → `spawn_blocking` 持 doc 锁跑 `export::run` 写原始字节、`on_progress` 节流、`on_done` 始终发、`end_search`）+ `export_cancel`；+`export_cmd_tests`）；Modify `app/src-tauri/src/lib.rs`（注册两命令）；Modify `dto.rs`（剥 ExportProgress/ExportStatsJson/From 三处 `#[allow(dead_code)]`）。
+**Why:** spec §3.3/§5：目标路径打开失败同步返 `io`（不空写）；worker 持 doc 锁整任务扫描（同 `can_parse`/`filter_run`，主线程不冻），读/写错吸收进 `errored`、取消保留前缀，`on_done` 必发。**Ruling：**worker 持 `doc` 锁期间若同时关文档，`doc_arc` 被任务持有→后端扫完已关文件（与增量1 同模），不阻塞交付（已记 out-of-scope，二增量可接 export 取消 worker）。
+**验证:** `cargo test -p lumelog-app` 30 pass（新 `open_export_target_bad_path_is_io`/`open_export_target_creates_file`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`use std::io::Write` 补入使 `flush` 可用。
+
+### Task 6. 前端 IPC 桥（时序/导出）
+**Files:** Modify `app/frontend/src/ipc.ts`（新 `TimeFormat`/`TimeSpec`/`ExportStats` 类型；`filterRun` args 加 `time?/lineFrom?/lineTo?` 并透传；新 `exportLines`（多 Channel、解为 req_id）/`exportCancel`）；Modify `app/frontend/src/ipc.test.ts`（+`export_wrappers_are_functions`）。
+**Why:** spec §4.2；镜像 Rust 命令参数（camelCase↔snake）；错误码全复用。
+**验证:** `npm --prefix app/frontend test` 47 pass（ipc 9→10）+ `run build`（tsc 通过，41 modules）；Rust 未改。
+
+### Task 7. 查询面板时序区 + 导出
+**Files:** Create `app/frontend/src/query.ts`（纯函数 `pickTimelineInput`：抽取正则非空→时间轴(from/to可单侧)，否则行号区间(两侧必填/正整数/from≤to)，错误返 `error` 不抛）+ `query.test.ts`（7 例）；Modify `app/frontend/src/main.ts`（`applyQuery` 加 `sel: TimelineSelection` 参、no-op 守卫改为“无任何轴”、传 time/lineFrom/lineTo；新 `exportQuery`；面板加时序行(`query-time`：抽取正则+格式下拉+起止+保留无ts)+“导出…”按钮(save 对话框、无轴时 `ask` 二次确认)；共享“停止”按 `queryKind` 分派 `filterCancel`/`exportCancel`）。
+**Why:** spec §4.1。导出与扫描共用单任务互斥（queryBusy/queryReqId），`queryKind` 决定 Stop 取消哪个；时间轴/行号退化由 `pickTimelineInput` 集中判定（可测）。
+**验证:** `npm --prefix app/frontend test` 54 pass（新 `query.test.ts` 7 + ipc 10）+ `run build`（tsc 通过，42 modules）。
+
+### Task 8. 样式 + 全量验收
+**Files:** Modify `app/frontend/src/styles.css`（`.query-time` 时序行：flex-wrap、`input[placeholder^="抽取"]` 增长、起/止窄；按 placeholder 定位避免误命中勾选框）。
+**Why:** spec §7。面板复用 `#search-panel` flex 列（head/conds/timeRow/status），时序行固定不抢 conds 滚动区。
+**手工验收清单（需 `tauri dev`）：**① ISO 时间窗只显区间内行；② 不填抽取→行号区间退化生效；③ 保留无时间戳行开关有/无效；④ 导出当前筛选→目标文件行内容/编码/行尾与源一致（多字节/CRLF）；⑤ 大文件导出中“停止”→文件为前缀、toast 区分取消/中断/成功。
+**验证（全量四门）:** `cargo test --workspace` 全绿（app 30、core 78 含 filter16/export4、can 集成、cli_smoke 9/1 ignored、docfile/proptest）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 54 pass + `run build`（tsc 通过）。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。

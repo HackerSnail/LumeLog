@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::io::{BufWriter, Write};
 use std::time::UNIX_EPOCH;
 
 use lumelog_can::dbc::{parse_lenient, ParseOutcome};
@@ -15,6 +16,7 @@ use lumelog_core::doc::{save_text, DocFile, EolStyle, OverwritePolicy, SaveOptio
 use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::search::{search_stream, Mode, SearchQuery};
 use lumelog_core::filter::LineFilter;
+use lumelog_core::export;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
@@ -669,7 +671,7 @@ fn scan_filter<I: Iterator<Item = Line>>(
             break;
         }
         scanned += 1;
-        if let Some(ranges) = lf.keep(&text) {
+        if let Some(ranges) = lf.keep(line1 - 1, &text) {
             kept += 1;
             let out = if ranges.is_empty() {
                 Vec::new()
@@ -700,13 +702,16 @@ fn scan_filter<I: Iterator<Item = Line>>(
 /// main thread is never tied up. Only kept line numbers + cu16 ranges cross IPC;
 /// line TEXT is fetched on demand via `doc_lines_at` (spec §3, never resident).
 #[tauri::command]
-#[allow(clippy::too_many_arguments)] // IPC: doc + conditions + case + 2 channels + handles
+#[allow(clippy::too_many_arguments)] // IPC: doc + conditions + case + time/lines + 2 channels + handles
 pub fn filter_run(
     state: tauri::State<'_, AppDocs>,
     app: AppHandle,
     doc_id: u64,
     conditions: Vec<FilterCondition>,
     case_sensitive: bool,
+    time: Option<TimeSpecJson>,
+    line_from: Option<u64>,
+    line_to: Option<u64>,
     on_batch: Channel<Vec<LineHit>>,
     on_done: Channel<FilterStats>,
 ) -> Result<u64, IpcError> {
@@ -720,9 +725,14 @@ pub fn filter_run(
         None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
     };
     let specs: Vec<_> = conditions.iter().map(|c| c.to_core()).collect();
-    if specs.is_empty() {
-        // Defensive no-op: the panel guards against an empty query, but never
-        // fan out into a whole-file scan that keeps every line.
+    let line_range = match (line_from, line_to) {
+        (Some(a), Some(b)) => Some((a, b)),
+        _ => None,
+    };
+    let time_core = time.as_ref().map(|t| t.to_core());
+    if specs.is_empty() && time_core.is_none() && line_range.is_none() {
+        // No axis supplied: defensive no-op (the panel guards this), never fan
+        // out into a whole-file scan that keeps every line.
         let _ = on_done.send(FilterStats {
             kept: 0,
             scanned: 0,
@@ -731,7 +741,8 @@ pub fn filter_run(
         state.end_search(req_id);
         return Ok(req_id);
     }
-    let lf = LineFilter::build(specs, case_sensitive).map_err(|e| fail(IpcError::from_core(e)))?;
+    let lf = LineFilter::build(specs, case_sensitive, time_core, line_range)
+        .map_err(|e| fail(IpcError::from_core(e)))?;
     tauri::async_runtime::spawn_blocking(move || {
         let lines = DocLines::new(doc_arc);
         let mut emit = |batch: Vec<LineHit>| {
@@ -760,10 +771,88 @@ pub fn filter_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Resul
     }
 }
 
+/// Open the export target so a bad path rejects the command synchronously
+/// (never spin up a worker that streams progress into a file we can't create).
+fn open_export_target(path: &str) -> Result<std::fs::File, IpcError> {
+    std::fs::File::create(path).map_err(|e| IpcError::new("io", e.to_string()))
+}
+
+/// Export the lines a filter/timeline/line-range selects, as raw source bytes
+/// (exact encoding + line endings), to `target_path` (spec §7.5). Async like
+/// `filter_run`: validate + create the file in the prologue, then scan+write on
+/// a blocking task and return `req_id` immediately so `export_cancel` works.
+/// Read/write errors are absorbed into `ExportStats::errored`; `on_done` always
+/// fires with the final tally.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC: doc + conditions + case + time/lines + path + 2 channels + handles
+pub fn export_lines(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    conditions: Vec<FilterCondition>,
+    case_sensitive: bool,
+    time: Option<TimeSpecJson>,
+    line_from: Option<u64>,
+    line_to: Option<u64>,
+    target_path: String,
+    on_progress: Channel<ExportProgress>,
+    on_done: Channel<ExportStatsJson>,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    let specs: Vec<_> = conditions.iter().map(|c| c.to_core()).collect();
+    let line_range = match (line_from, line_to) {
+        (Some(a), Some(b)) => Some((a, b)),
+        _ => None,
+    };
+    let time_core = time.as_ref().map(|t| t.to_core());
+    let lf = LineFilter::build(specs, case_sensitive, time_core, line_range)
+        .map_err(|e| fail(IpcError::from_core(e)))?;
+    let file = open_export_target(&target_path).map_err(fail)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        // Export holds the doc lock for the WHOLE run (coarser than filter_run /
+        // can_parse, which lock per chunk via DocLines): the main thread stays
+        // free and `export_cancel` — via the separate cancel registry — still stops
+        // it promptly; partial bytes remain on `errored`/`cancelled`. Concurrent
+        // reads of the SAME doc block until the export finishes.
+        let mut doc = doc_arc.lock().unwrap_or_else(|p| p.into_inner());
+        let mut writer = BufWriter::new(file);
+        let mut prog = |written: u64| {
+            let _ = on_progress.send(ExportProgress { written });
+        };
+        let stats =
+            export::run(&mut doc, &lf, &mut writer, &mut prog, &|| cancel.load(Ordering::Relaxed));
+        let _ = writer.flush();
+        let _ = on_done.send(stats.into());
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+/// Ask an in-flight `export_lines` to stop (shares the generic cancel registry).
+#[tauri::command]
+pub fn export_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod filter_run_tests {
     use super::*;
-    use lumelog_core::filter::{CondKind, CondMode, CondSpec};
+    use lumelog_core::filter::{CondKind, CondMode, CondSpec, TimeFormat, TimeSpec};
 
     fn lines(text: &str) -> Vec<Line> {
         text.lines()
@@ -787,7 +876,7 @@ mod filter_run_tests {
                 text: (*t).to_string(),
             });
         }
-        LineFilter::build(specs, case).unwrap()
+        LineFilter::build(specs, case, None, None).unwrap()
     }
 
     #[test]
@@ -865,6 +954,71 @@ mod filter_run_tests {
         assert_eq!(got[0].ranges.len(), 1);
         assert_eq!(got[1].ranges.len(), 1);
         assert!(got[2].ranges.is_empty() && got[3].ranges.is_empty(), "later hits drop ranges");
+    }
+
+    #[test]
+    fn scan_filter_line_range_degrade() {
+        let lf = LineFilter::build(
+            vec![CondSpec { mode: CondMode::Include, kind: CondKind::Literal, text: "x".into() }],
+            true,
+            None,
+            Some((2, 3)),
+        )
+        .unwrap();
+        let mut got: Vec<LineHit> = Vec::new();
+        scan_filter(
+            lines("x\nx\nx\nx").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            usize::MAX,
+        );
+        assert_eq!(
+            got.iter().map(|h| h.line).collect::<Vec<_>>(),
+            vec![1, 2],
+            "only 1-based lines 2,3 survive (0-based 1,2)"
+        );
+    }
+
+    #[test]
+    fn scan_filter_time_axis_keeps_range() {
+        let t = TimeSpec {
+            extract: r"(?<ts>\d+)".to_string(),
+            format: TimeFormat::EpochMillis,
+            from: Some("2".into()),
+            to: Some("3".into()),
+            keep_when_no_ts: false,
+        };
+        let lf = LineFilter::build(vec![], true, Some(t), None).unwrap();
+        let mut got: Vec<LineHit> = Vec::new();
+        scan_filter(
+            lines("ts=1\nts=2\nts=3\nts=4").into_iter(),
+            &lf,
+            &mut |b| got.extend(b),
+            &|| false,
+            usize::MAX,
+        );
+        assert_eq!(got.iter().map(|h| h.line).collect::<Vec<_>>(), vec![1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod export_cmd_tests {
+    use super::*;
+
+    #[test]
+    fn open_export_target_bad_path_is_io() {
+        // An empty path cannot be created on any OS -> `io`, synchronously.
+        let err = open_export_target("").unwrap_err();
+        assert_eq!(err.code, "io");
+    }
+
+    #[test]
+    fn open_export_target_creates_file() {
+        let p = std::env::temp_dir().join(format!("lumelog_exp_ok_{}.log", std::process::id()));
+        let f = open_export_target(p.to_str().unwrap());
+        assert!(f.is_ok(), "valid temp path creates the target");
+        std::fs::remove_file(&p).ok();
     }
 }
 

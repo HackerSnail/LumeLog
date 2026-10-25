@@ -478,6 +478,27 @@ html.has-custom-titlebar .win-btns {
 .query-chk input {
   flex: 0 0 auto;
 }
+/* Timeline axis row: extract regex (grows) + format + start/end bounds. */
+.query-time {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 8px;
+  flex-wrap: wrap;
+}
+.query-time input[type="text"] {
+  padding: 3px 6px;
+}
+.query-time input[placeholder^="抽取"] {
+  flex: 1 1 auto;
+  min-width: 14ch;
+}
+.query-time input[placeholder="起"],
+.query-time input[placeholder="止"] {
+  flex: 0 0 auto;
+  width: 12ch;
+}
 /* Matched range highlight: translucent amber reads on light/dark/Dracula alike
  * without a per-theme token; the text color stays inherited. */
 .line-hl {

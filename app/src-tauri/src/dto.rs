@@ -8,7 +8,8 @@ use lumelog_can::decode::decode_signals;
 use lumelog_can::error::CanError;
 use lumelog_can::frame::{Frame, SignalValue};
 use lumelog_core::error::{CoreError, OpenReject};
-use lumelog_core::filter::{CondKind, CondMode, CondSpec, Cu16Range};
+use lumelog_core::export::ExportStats as CoreExportStats;
+use lumelog_core::filter::{CondKind, CondMode, CondSpec, Cu16Range, TimeFormat, TimeSpec};
 use serde::{Deserialize, Serialize};
 
 /// Summary returned by `doc_open`. Indexing is synchronous in v1, so
@@ -335,6 +336,68 @@ pub struct LineContentPayload {
     pub invalid_count: u64,
 }
 
+// ---- M3 timeline + export DTOs (spec §3 / §9). camelCase to match ipc.ts ------
+
+/// Timeline constraint for `filter_run`/`export_lines`: a regex with a named
+/// group `ts` + a built-in format (`iso`/`epoch_s`/`epoch_ms`) + optional
+/// `[from,to]` bound strings parsed by that format, and whether lines whose `ts`
+/// is absent survive the window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeSpecJson {
+    pub extract_pattern: String,
+    pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub keep_when_no_ts: bool,
+}
+
+impl TimeSpecJson {
+    pub fn to_core(&self) -> TimeSpec {
+        TimeSpec {
+            extract: self.extract_pattern.clone(),
+            format: match self.format.as_str() {
+                "epoch_s" => TimeFormat::EpochSec,
+                "epoch_ms" => TimeFormat::EpochMillis,
+                _ => TimeFormat::Iso,
+            },
+            from: self.from.clone(),
+            to: self.to.clone(),
+            keep_when_no_ts: self.keep_when_no_ts,
+        }
+    }
+}
+
+/// Throttled export progress (`on_progress`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProgress {
+    pub written: u64,
+}
+
+/// Terminal `export_lines` tally (`on_done`), mirroring core `ExportStats`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportStatsJson {
+    pub written: u64,
+    pub scanned: u64,
+    pub cancelled: bool,
+    pub errored: bool,
+}
+
+impl From<CoreExportStats> for ExportStatsJson {
+    fn from(s: CoreExportStats) -> Self {
+        ExportStatsJson {
+            written: s.written,
+            scanned: s.scanned,
+            cancelled: s.cancelled,
+            errored: s.errored,
+        }
+    }
+}
+
 fn signal_value_json(s: SignalValue) -> SignalValueJson {
     SignalValueJson {
         name: s.name,
@@ -542,5 +605,53 @@ mod filter_dto_tests {
     fn cu16_range_from_core() {
         let j: Cu16RangeJson = Cu16Range { start: 7, len: 4 }.into();
         assert_eq!((j.cu16_start, j.cu16_len), (7, 4));
+    }
+}
+
+#[cfg(test)]
+mod timeline_export_dto_tests {
+    use super::*;
+
+    #[test]
+    fn time_spec_maps_formats() {
+        let mk = |f: &str| TimeSpecJson {
+            extract_pattern: "(?<ts>x)".into(),
+            format: f.into(),
+            from: None,
+            to: Some("5".into()),
+            keep_when_no_ts: true,
+        };
+        assert_eq!(mk("epoch_ms").to_core().format, TimeFormat::EpochMillis);
+        assert_eq!(mk("epoch_s").to_core().format, TimeFormat::EpochSec);
+        assert_eq!(mk("iso").to_core().format, TimeFormat::Iso);
+        assert_eq!(mk("garbage").to_core().format, TimeFormat::Iso, "unknown -> Iso");
+        assert_eq!(mk("iso").to_core().to.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn export_stats_json_camel_case() {
+        let v = serde_json::to_value(ExportStatsJson {
+            written: 1,
+            scanned: 2,
+            cancelled: true,
+            errored: false,
+        })
+        .unwrap();
+        assert_eq!(v.get("written").unwrap(), 1);
+        assert_eq!(v.get("scanned").unwrap(), 2);
+        assert_eq!(v.get("cancelled").unwrap(), true);
+        assert_eq!(v.get("errored").unwrap(), false);
+    }
+
+    #[test]
+    fn export_stats_from_core_maps() {
+        let j: ExportStatsJson = CoreExportStats {
+            written: 3,
+            scanned: 9,
+            cancelled: false,
+            errored: true,
+        }
+        .into();
+        assert_eq!((j.written, j.scanned, j.cancelled, j.errored), (3, 9, false, true));
     }
 }

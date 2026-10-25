@@ -468,16 +468,41 @@ export function canDecodeSnippet(args: {
   });
 }
 
+/** Timeline timestamp format (M3 spec §3.1). */
+export type TimeFormat = "iso" | "epoch_s" | "epoch_ms";
+
+/** A timeline constraint: a regex with a named group `ts` + a format + an
+ *  optional `[from,to]` window (strings parsed by `format`). */
+export interface TimeSpec {
+  extractPattern: string;
+  format: TimeFormat;
+  from?: string;
+  to?: string;
+  keepWhenNoTs: boolean;
+}
+
+/** Terminal `exportLines` tally (Rust `ExportStatsJson`). */
+export interface ExportStats {
+  written: number;
+  scanned: number;
+  cancelled: boolean;
+  errored: boolean;
+}
+
 /**
  * Stream a multi-condition AND line filter (spec §3.1). Kept lines arrive in
  * batches on `onBatch` (line number + cu16 highlight ranges only — never line
  * text); the tally arrives once on `onDone`. Resolves with the job id for
- * `filterCancel`. Mirrors `canParse`'s dual-channel shape.
+ * `filterCancel`. Optional `time` (timeline axis) / `lineFrom`/`lineTo`
+ * (line-range degrade) AND-combine with `conditions`. Mirrors `canParse`.
  */
 export function filterRun(args: {
   docId: number;
   conditions: FilterCondition[];
   caseSensitive: boolean;
+  time?: TimeSpec | null;
+  lineFrom?: number | null;
+  lineTo?: number | null;
   onBatch: (h: LineHit[]) => void;
   onDone: (s: FilterStats) => void;
 }): Promise<number> {
@@ -489,6 +514,9 @@ export function filterRun(args: {
     docId: args.docId,
     conditions: args.conditions,
     caseSensitive: args.caseSensitive,
+    time: args.time ?? null,
+    lineFrom: args.lineFrom ?? null,
+    lineTo: args.lineTo ?? null,
     onBatch: batchCh,
     onDone: doneCh,
   });
@@ -512,4 +540,43 @@ export function docLinesAt(args: {
   const ch = new Channel<{ lines: IndexedText[]; invalidCount: number }>();
   ch.onmessage = args.onData;
   return call<void>("doc_lines_at", { docId: args.docId, indices: args.indices, onData: ch });
+}
+
+/**
+ * Export the lines the current filter/timeline/line-range selects, as raw source
+ * bytes (exact encoding + line endings), to `targetPath` (spec §7.5). Progress
+ * streams on `onProgress`, final tally on `onDone`; resolves with the job id for
+ * `exportCancel`.
+ */
+export function exportLines(args: {
+  docId: number;
+  conditions: FilterCondition[];
+  caseSensitive: boolean;
+  time?: TimeSpec | null;
+  lineFrom?: number | null;
+  lineTo?: number | null;
+  targetPath: string;
+  onProgress: (p: { written: number }) => void;
+  onDone: (s: ExportStats) => void;
+}): Promise<number> {
+  const progCh = new Channel<{ written: number }>();
+  progCh.onmessage = args.onProgress;
+  const doneCh = new Channel<ExportStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("export_lines", {
+    docId: args.docId,
+    conditions: args.conditions,
+    caseSensitive: args.caseSensitive,
+    time: args.time ?? null,
+    lineFrom: args.lineFrom ?? null,
+    lineTo: args.lineTo ?? null,
+    targetPath: args.targetPath,
+    onProgress: progCh,
+    onDone: doneCh,
+  });
+}
+
+/** Ask an in-flight `exportLines` to stop. */
+export function exportCancel(requestId: number): Promise<void> {
+  return call<void>("export_cancel", { requestId });
 }
