@@ -36,6 +36,11 @@
 **Why:** spec §4.2。cu16 区间用 JS `String.slice` 直切（索引即 UTF-16 码元），重叠/相邻区间先合并去重、越界丢弃（不重复 emit、不在代理对中间切，后端区间按字符对齐）。模式切换重置 renderFirst/Last 强制新窗口（Review Focus 4）；连续快路径不变（仅命中行走切分）。
 **验证:** `npm --prefix app/frontend test` 46 pass（listview 5→10）+ `run build`（tsc 通过）；Rust 无改动。
 
+### Task 7. `main.ts` 查询面板（取代旧单框搜索）
+**Files:** Modify `app/frontend/src/main.ts`（删 `openSearchFlow/renderSearchShell/runSearch/appendHits` 与 `searchRun`/`MatchJson` 导入；新增查询面板 `openQueryPanel`（多条件行 `addCondRow`/`collectConditions` + “过滤到命中行”/“高亮命中”/“区分大小写” + 应用/上一个/下一个/停止/关闭 + 状态）、`applyQuery`（`filterRun` 流式收集 hits→`onDone` 单点 `list.setView(hits,hide,hl)`、重入守卫、`queryReqId` 接 `filterCancel`）、`cycleHit`、`fetchLines`（`docLinesAt` Promise 包装）；`mountList` 注入 `loadLines`；appbar/命令面板/快捷键 `Ctrl+Shift+F` 改指 `openQueryPanel`；`registerShortcuts` 新增 F3/Shift+F3（无 mod））。
+**Why:** spec §4.1。面板统一走 `filter_run`（单条包含=原单模式搜索+高亮），**Ruling：旧 `search_run` 保留注册但退出前端主路径**（不重复异步化，避免两套正则链路）；`queryBusy` 仅在 `onDone`/catch 置否（filterRun 提前解 id）；hits 每 doc 缓存供 F3 循环（`queryHits`/`queryCursor`）。视图切换保留各 doc 的 list 实例，子集态自然持久。
+**验证:** `npm --prefix app/frontend run build`（tsc 通过，41 modules，openQueryPanel 已接）+ `npm test` 46 pass；grep 确认 `openSearchFlow/runSearch/renderSearchShell/appendHits/searchBusy` 已清除、`jumpToLine` 仍被 Ctrl+G 复用；无新单测（DOM/IPC 密集，GUI 手工验收留 Task 8）。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。
