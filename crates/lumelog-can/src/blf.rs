@@ -183,6 +183,13 @@ impl BlfSource {
     fn parse_container(&mut self, data: &[u8]) -> Result<(), CanError> {
         let mut buf = std::mem::take(&mut self.tail);
         buf.extend_from_slice(data);
+        // A single object may span containers, but a partial object cannot be
+        // larger than the object cap: refuse instead of growing without bound.
+        if buf.len() as u64 > MAX_OBJECT_SIZE + 8 {
+            return Err(CanError::SourceFormat(
+                "blf: container tail exceeds object limit".into(),
+            ));
+        }
         let mut pos = 0usize;
         loop {
             let search_end = (pos + 8).min(buf.len());
