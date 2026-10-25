@@ -2038,6 +2038,7 @@ name = "lumelog-core"
 version = "0.1.0"
 dependencies = [
  "chardetng",
+ "chrono",
  "criterion",
  "encoding_rs",
  "memchr",
