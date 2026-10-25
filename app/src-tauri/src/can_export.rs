@@ -18,7 +18,7 @@ const CSV_META: [&str; 7] = [
     "lineNumber",
     "timestampMs",
     "channel",
-    "canId",
+    "canIdHex",
     "msgName",
     "dlc",
     "dataHex",
@@ -98,7 +98,7 @@ pub fn csv_row(fj: &FrameJson, col_index: &HashMap<String, usize>, ncols: usize)
     cells[0] = fj.line_number.to_string();
     cells[1] = fj.timestamp_ms.map(fmt_ts).unwrap_or_default();
     cells[2] = fj.channel.to_string();
-    cells[3] = fj.can_id.to_string();
+    cells[3] = fj.can_id_hex.clone();
     cells[4] = fj.msg_name.clone().unwrap_or_default();
     cells[5] = fj.dlc.to_string();
     cells[6] = fj.data_hex.clone();
@@ -468,7 +468,7 @@ mod tests {
     fn csv_header_meta_only_without_db() {
         assert_eq!(
             csv_header(None),
-            "lineNumber,timestampMs,channel,canId,msgName,dlc,dataHex\r\n"
+            "lineNumber,timestampMs,channel,canIdHex,msgName,dlc,dataHex\r\n"
         );
     }
 
@@ -487,7 +487,7 @@ mod tests {
         }
         let ncols = CSV_META.len() + sig_cols.len();
         let fj = frame(1, Some("A"), Some(1000.0), vec![sig("Speed", 500.0), sig("Temp", 90.0)]);
-        assert_eq!(csv_row(&fj, &index, ncols), "1,1000,0,1,A,8,,500,90,\r\n");
+        assert_eq!(csv_row(&fj, &index, ncols), "1,1000,0,0x1,A,8,,500,90,\r\n");
     }
 
     #[test]
@@ -496,8 +496,8 @@ mod tests {
         let ncols = CSV_META.len();
         let mut fj = frame(3, None, None, vec![]);
         fj.data_hex = "a,b".into(); // comma triggers quoting
-        // `frame()` helper pins lineNumber=1, channel=0, dlc=8; canId=3, msgName empty.
-        assert_eq!(csv_row(&fj, &index, ncols), "1,,0,3,,8,\"a,b\"\r\n");
+        // `frame()` helper pins lineNumber=1, channel=0, dlc=8; canIdHex=0x3, msgName empty.
+        assert_eq!(csv_row(&fj, &index, ncols), "1,,0,0x3,,8,\"a,b\"\r\n");
     }
 
     #[test]
@@ -556,11 +556,11 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let s = export_can(&arc, None, "candump", &None, &flt, &mut out, &mut |_| {}, &|| false, true);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("lineNumber,timestampMs,channel,canId,msgName,dlc,dataHex\r\n"));
+        assert!(text.starts_with("lineNumber,timestampMs,channel,canIdHex,msgName,dlc,dataHex\r\n"));
         // only the 0x101 (257) frame survives the id filter
         assert_eq!(s.written, 1);
         assert_eq!(s.scanned, 2);
-        assert!(text.contains(",257,"), "{text}");
+        assert!(text.contains(",0x101,"), "{text}");
     }
 
     #[test]
@@ -571,7 +571,7 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let s = export_can(&arc, Some(&db), "candump", &None, &f(), &mut out, &mut |_| {}, &|| false, true);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("lineNumber,timestampMs,channel,canId,msgName,dlc,dataHex,A.Speed,A.Temp,B.Speed\r\n"), "{text}");
+        assert!(text.starts_with("lineNumber,timestampMs,channel,canIdHex,msgName,dlc,dataHex,A.Speed,A.Temp,B.Speed\r\n"), "{text}");
         assert_eq!(s.written, 1);
     }
 

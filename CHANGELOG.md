@@ -6,6 +6,10 @@
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
 
+### 终审修复波（CodeReview 全分支 0 Critical / 0 Important / 1 Minor）
+**Files:** Modify `app/src-tauri/src/can_export.rs`（CSV meta 第 4 列由十进制 `canId` 改为 `canIdHex`（`fj.can_id_hex`）以对齐 spec §2 与面板显示；同步 5 个测试断言）。
+**Why:** 终审唯一发现：实现与 spec §2 规定的列不一致。采纳“代码跟 spec”（面板一贯 hex）。**验证:** `cargo test -p lumelog-app can_export::` 20 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ### Task 1. `can_export::frame_matches`（canfilter.ts 端口）
 **Files:** Create `app/src-tauri/src/can_export.rs`（`frame_matches(fj:&FrameJson,f:&CanFilterJson)->bool` + 8 单测）；Modify `app/src-tauri/src/dto.rs`（`SignalOp`{Gt,Lt,Ge,Le,Eq → ">"/"<"/">="/"<="/"=="} + `CanFilterJson` camelCase/`default`/`skip_serializing_if`）；Modify `app/src-tauri/src/lib.rs`（`mod can_export;`）。`frame_matches`/`CanFilterJson`/`SignalOp` 暂加带注释 `#[allow(dead_code)]`（Task4/5 接入后剥）。
 **Why:** 后端导出需与 CanPanel 视图过滤一致。作用在 `FrameJson`（与前端同结构）逐字端口 `canfilter.ts`；ID 闭/反向不匹配、msgName 精确、信号三要素齐才判、`Eq` 用 `to_bits()` 复现 JS `Object.is`（NaN==NaN 真、+0≠-0）、时间窗缺 ts 不匹配。
