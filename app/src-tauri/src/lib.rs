@@ -3,6 +3,7 @@
 //! pure-Rust crate, reused by the CLI in Task 7 and this shell). Streams that
 //! the front end consumes are delivered over `tauri::ipc::Channel`s.
 
+mod can_export;
 mod commands;
 mod dto;
 mod state;
@@ -31,6 +32,9 @@ pub fn run() {
             commands::doc_lines_at,
             commands::export_lines,
             commands::export_cancel,
+            commands::export_csv,
+            commands::export_jsonl,
+            commands::export_can_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");

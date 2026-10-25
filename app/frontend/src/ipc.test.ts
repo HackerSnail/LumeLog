@@ -11,6 +11,9 @@ import {
   docLinesAt,
   exportLines,
   exportCancel,
+  exportCsv,
+  exportJsonl,
+  exportCanCancel,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -100,6 +103,12 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("export_wrappers_are_functions", () => {
     for (const fn of [exportLines, exportCancel]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("can_export_wrappers_are_functions", () => {
+    for (const fn of [exportCsv, exportJsonl, exportCanCancel]) {
       expect(typeof fn).toBe("function");
     }
   });

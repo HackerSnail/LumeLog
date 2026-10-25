@@ -9,6 +9,7 @@ use lumelog_can::error::CanError;
 use lumelog_can::frame::{Frame, SignalValue};
 use lumelog_core::error::{CoreError, OpenReject};
 use lumelog_core::export::ExportStats as CoreExportStats;
+use crate::can_export::CanExportStats;
 use lumelog_core::filter::{CondKind, CondMode, CondSpec, Cu16Range, TimeFormat, TimeSpec};
 use serde::{Deserialize, Serialize};
 
@@ -254,6 +255,76 @@ pub struct DbcInfo {
 pub struct CanStatsJson {
     pub decoded: u64,
     pub skipped: u64,
+}
+
+// ---- CAN export DTOs (spec §7.5 / §9). camelCase to match ipc.ts -------------
+
+/// Signal comparison operator for the CanPanel signal condition (mirrors the
+/// `signalOp` string values used by `canfilter.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignalOp {
+    #[serde(rename = ">")]
+    Gt,
+    #[serde(rename = "<")]
+    Lt,
+    #[serde(rename = ">=")]
+    Ge,
+    #[serde(rename = "<=")]
+    Le,
+    #[serde(rename = "==")]
+    Eq,
+}
+
+/// The CanPanel view filter, mirrored server-side so `export_csv`/`export_jsonl`
+/// reproduce exactly what the panel shows. Field-for-field equal to
+/// `canfilter.ts`'s `CanFilter`; every axis optional (absent = not applied).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CanFilterJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_from: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_to: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_op: Option<SignalOp>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_from_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_to_ms: Option<f64>,
+}
+
+/// Throttled CAN-export progress (`export_csv`/`export_jsonl` `on_progress`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanExportProgress {
+    pub written: u64,
+}
+
+/// Terminal CAN-export tally (`on_done`), mirroring core `CanExportStats`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanExportStatsJson {
+    pub written: u64,
+    pub scanned: u64,
+    pub cancelled: bool,
+    pub errored: bool,
+}
+
+impl From<CanExportStats> for CanExportStatsJson {
+    fn from(s: CanExportStats) -> Self {
+        CanExportStatsJson {
+            written: s.written,
+            scanned: s.scanned,
+            cancelled: s.cancelled,
+            errored: s.errored,
+        }
+    }
 }
 
 // ---- M3 filter DTOs (spec §6.4 / §9). camelCase to match ipc.ts ------------

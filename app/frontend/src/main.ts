@@ -24,6 +24,9 @@ import {
   docLinesAt,
   exportLines,
   exportCancel,
+  exportCsv,
+  exportJsonl,
+  exportCanCancel,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -33,6 +36,7 @@ import {
   type LineHit,
   type IndexedText,
   type TimeFormat,
+  type CanExportStats,
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { openEditable, type EditorHandle } from "./editor";
@@ -95,6 +99,12 @@ let canSrcSel: HTMLSelectElement | null = null;
 let canRegexInput: HTMLInputElement | null = null;
 let canRegexRow: HTMLElement | null = null;
 let canDbcLine: HTMLElement | null = null;
+// CAN export (spec §7.5): shares the dock's single-flight with parsing.
+let canExportBusy = false;
+let canExportReqId: number | null = null;
+let canExportStatus: HTMLElement | null = null;
+let canExportCancelBtn: HTMLButtonElement | null = null;
+let canExportBtns: HTMLButtonElement[] = [];
 let canRunBtn: HTMLButtonElement | null = null;
 let canHostEl: HTMLElement | null = null;
 // filter inputs (per-active-doc view filter)
@@ -442,6 +452,13 @@ function buildCanDock(): HTMLElement {
 
   canRunBtn = mkBtn("解析报文", "解码当前文档为报文表格", () => void onCanRunClick());
   const decodeBtn = mkBtn("识别选中", "把编辑器选中文本识别为一条报文", () => void decodeSelection());
+  const csvBtn = mkBtn("导出 CSV", "把当前过滤的报文导出为宽表 CSV", () => void onCanExport("csv"));
+  const jsonlBtn = mkBtn("导出 JSONL", "把当前过滤的报文导出为 JSONL", () => void onCanExport("jsonl"));
+  canExportBtns = [csvBtn, jsonlBtn];
+  canExportCancelBtn = mkBtn("取消导出", "停止正在进行的导出", () => cancelCanExport());
+  canExportCancelBtn.style.display = "none";
+  canExportStatus = document.createElement("span");
+  canExportStatus.className = "can-export-status";
 
   bar.append(
     document.createTextNode("源 "),
@@ -451,6 +468,10 @@ function buildCanDock(): HTMLElement {
     canDbcLine,
     canRunBtn,
     decodeBtn,
+    csvBtn,
+    jsonlBtn,
+    canExportCancelBtn,
+    canExportStatus,
   );
 
   dock.append(bar, buildCanFilterRow(), (canHostEl = mkHost()));
@@ -649,12 +670,78 @@ function onCanRunClick(): void {
   void parseActive();
 }
 
+function updateCanExportUi(busy: boolean): void {
+  canExportBusy = busy;
+  for (const b of canExportBtns) b.disabled = busy || canParsing;
+  if (canExportCancelBtn) canExportCancelBtn.style.display = busy ? "" : "none";
+}
+
+/** Export the active doc's CAN frame set (backend re-decode + filter, spec §7.5). */
+async function onCanExport(format: "csv" | "jsonl"): Promise<void> {
+  const a = tabs.active();
+  if (!a) {
+    toastMsg("请先打开一个文档");
+    return;
+  }
+  if (canExportBusy || canParsing) {
+    toastMsg("CAN 任务进行中，请稍候…");
+    return;
+  }
+  const docId = a.info.docId;
+  const ds = docStates.get(docId);
+  const base = ds ? basenameOf(ds.path) : "can";
+  const path = await save({
+    defaultPath: `${base}.${format}`,
+    filters: [{ name: format === "csv" ? "CSV" : "JSONL", extensions: [format] }],
+  });
+  if (typeof path !== "string") return;
+  const sourceKind = canSrcSel!.value;
+  const regex = sourceKind === "regex" ? canRegexInput!.value : null;
+  const filter = canFilters.get(docId) ?? {};
+  updateCanExportUi(true);
+  canExportReqId = null;
+  if (canExportStatus) canExportStatus.textContent = "导出中…";
+  try {
+    const args = {
+      docId,
+      dbcId: lastDbcId,
+      sourceKind,
+      regex,
+      filter,
+      targetPath: path,
+      onProgress: (p: { written: number }) => {
+        if (canExportStatus) canExportStatus.textContent = `导出中… ${p.written} 帧`;
+      },
+      onDone: (s: CanExportStats) => {
+        updateCanExportUi(false);
+        const msg = s.errored
+          ? `导出中断（已写 ${s.written} 帧）`
+          : s.cancelled
+            ? `已取消，导出 ${s.written} 帧`
+            : `已导出 ${s.written} 帧 → ${basenameOf(path)}`;
+        if (canExportStatus) canExportStatus.textContent = msg;
+        toastMsg(msg);
+      },
+    };
+    canExportReqId = format === "csv" ? await exportCsv(args) : await exportJsonl(args);
+  } catch (err) {
+    updateCanExportUi(false);
+    reportError(err);
+  }
+}
+
+function cancelCanExport(): void {
+  if (canExportReqId !== null) {
+    exportCanCancel(canExportReqId).catch((e) => reportError(e));
+  }
+}
+
 async function parseActive(): Promise<void> {
   // Re-entrancy guard lives here (not only in the button handler) so the command
   // palette's `can-parse` entry can't start a second run that double-fills the
-  // table while one is already streaming.
-  if (canParsing) {
-    toastMsg("解析进行中，请稍候…");
+  // table while one is already streaming. Shares the dock's single-flight with export.
+  if (canParsing || canExportBusy) {
+    toastMsg(canParsing ? "解析进行中，请稍候…" : "导出进行中，请稍候…");
     return;
   }
   const a = tabs.active();

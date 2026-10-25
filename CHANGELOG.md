@@ -2,6 +2,49 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
+
+**依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
+
+### 终审修复波（CodeReview 全分支 0 Critical / 0 Important / 1 Minor）
+**Files:** Modify `app/src-tauri/src/can_export.rs`（CSV meta 第 4 列由十进制 `canId` 改为 `canIdHex`（`fj.can_id_hex`）以对齐 spec §2 与面板显示；同步 5 个测试断言）。
+**Why:** 终审唯一发现：实现与 spec §2 规定的列不一致。采纳“代码跟 spec”（面板一贯 hex）。**验证:** `cargo test -p lumelog-app can_export::` 20 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 1. `can_export::frame_matches`（canfilter.ts 端口）
+**Files:** Create `app/src-tauri/src/can_export.rs`（`frame_matches(fj:&FrameJson,f:&CanFilterJson)->bool` + 8 单测）；Modify `app/src-tauri/src/dto.rs`（`SignalOp`{Gt,Lt,Ge,Le,Eq → ">"/"<"/">="/"<="/"=="} + `CanFilterJson` camelCase/`default`/`skip_serializing_if`）；Modify `app/src-tauri/src/lib.rs`（`mod can_export;`）。`frame_matches`/`CanFilterJson`/`SignalOp` 暂加带注释 `#[allow(dead_code)]`（Task4/5 接入后剥）。
+**Why:** 后端导出需与 CanPanel 视图过滤一致。作用在 `FrameJson`（与前端同结构）逐字端口 `canfilter.ts`；ID 闭/反向不匹配、msgName 精确、信号三要素齐才判、`Eq` 用 `to_bits()` 复现 JS `Object.is`（NaN==NaN 真、+0≠-0）、时间窗缺 ts 不匹配。
+**验证:** `cargo test -p lumelog-app can_export::` 8 pass（逐字对应 canfilter.test.ts：空过滤/ID 闭/反向/msgName/信号 gt+缺失/`Eq` Object.is 语义/时间窗/AND 组合）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 2. 抽 `build_frame_source` + `validate_source_kind_regex`（can_parse 行为不变重构）
+**Files:** Modify `app/src-tauri/src/commands.rs`（新 `pub(crate) validate_source_kind_regex(kind,regex)`（candump/asc OK；regex 缺 pattern→`bad_regex`、非法正则经一次性 `RegexSource::new(empty)`→`from_can`；未知 kind→`source_format`）+ `build_frame_source(kind,regex,lines)`（worker 用，返回 `Box<dyn FrameSource>`）；`can_parse` 两段内联逻辑改调用两函数（行为逐字一致）；+`source_validation_tests` 5 例）。
+**Why:** spec §5—导出命令与 `can_parse` 共用同一源解析/校验，不第三套。`validate` 供 prologue、`build_frame_source` 供 worker，regex 编译校验集中在 validate（worker `expect("validated")`）。
+**验证:** `cargo test -p lumelog-app` 43 pass（新 5：candump/asc 通过、缺 pattern、合法正则、非法正则拒、未知 kind；`can_parse` 相关测不回归）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 3. CSV 宽表 / JSONL 纯文本构造器
+**Files:** Modify `app/src-tauri/src/can_export.rs`（新 `qualified_columns`/`db_signal_columns`/`csv_header`/`csv_row`/`jsonl_line` + `csv_escape`/`fmt_physical`/`fmt_ts` 私有 + `CSV_META` 常量）+ 8 测）。
+**Why:** spec §2/§3。列名 `消息名.信号名` 去重 `#n`；meta 7 列固定 + DBC 信号列；物理值 `{:.6}` 裁尾零（非有限→空）；CSV 仅在含 `,"\r\n` 时加引号；jsonl 复用 `serde_json::to_string`（FrameJson 本就 camelCase）。纯文本构造与文件 I/O 解耦→无盘可测。
+**验证:** `cargo test -p lumelog-app can_export::` 16 pass（+8：列限定去重、db_signal_columns、header meta/含信号、row 填列与空列、转义、无 msg、浮点稳定/非有限、jsonl 合法回读）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 4. `export_can` 扫描核
+**Files:** Modify `app/src-tauri/src/can_export.rs`（新 `CanExportStats{written,scanned,cancelled,errored}` + `export_can<W:Write>(doc_arc,dbc,kind,regex,filter,writer,on_progress,cancel,wide)`：`DocLines::new`+`build_frame_source`→逐帧`next_frame`→`frame_json`→`frame_matches`→CSV/JSONL 行；读写错→`errored`、每帧判 `cancel`）+ 4 测；Modify `app/src-tauri/src/commands.rs`（`DocLines::new` 改 `pub(crate)` 供 can_export 复用）。
+**Why:** spec §5。**优于计划草拟**：`export_can` 走 `DocLines` 按块加解锁（同 `can_parse`/`filter_run`），不持整轮 doc 锁→并发 `doc_chunk` 不饥死；`frame_json` 解码一次兼供过滤与取值。build/write 错吸收为 `errored`不返 Result。
+**验证:** `cargo test -p lumelog-app can_export::` 20 pass（+4：jsonl 有数帧、CSV header+id 过滤、DBC 信号列、取消早停且 written<total）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 5. `export_csv` / `export_jsonl` / `export_can_cancel` 命令
+**Files:** Modify `app/src-tauri/src/commands.rs`（新 `run_can_export` 共享体 + `#[tauri::command] export_csv`/`export_jsonl`（wide 真/假）+ `export_can_cancel`；导入 `export_can`）；Modify `dto.rs`（`CanExportProgress`、`CanExportStatsJson`+`From<can_export::CanExportStats>`）；Modify `lib.rs`（注册三命令）；剥 `export_can` 的 `#[allow(dead_code)]`；+1 DTO 测。
+**Why:** spec §5。prologue 同步校验源 + `File::create`（坏路径→`io` 不建 worker）→ `spawn_blocking` 跑 `export_can`、`on_progress` 节流、`on_done` 必发、`end_search`；早返 req_id。两命令共用 `run_can_export`。
+**验证:** `cargo test -p lumelog-app` 56 pass（+`can_export_stats_json_from_and_camel_case`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 6. 前端 IPC 桥（CAN 导出）
+**Files:** Modify `app/frontend/src/ipc.ts`（`import type CanFilter`；新 `CanExportStats` 类型 + 内部 `exportCan` 共用体 + `exportCsv`/`exportJsonl`（Omit cmd）/`exportCanCancel`）；Modify `app/frontend/src/ipc.test.ts`（+`can_export_wrappers_are_functions`）。
+**Why:** spec §4.2；两导出共用一个包装只发不同 cmd 名。filter 直接用 canfilter 的 `CanFilter`（与 Rust `CanFilterJson` camelCase 对齐）。
+**验证:** `npm --prefix app/frontend test` 55 pass（ipc 10→11）+ `run build`（tsc 通过）；Rust 未改。
+
+### Task 7. dock 导出按钮 + main.ts 流程
+**Files:** Modify `app/frontend/src/main.ts`（CAN 态加 `canExportBusy/canExportReqId/canExportStatus/canExportCancelBtn/canExportBtns`；dock 工具条加“导出 CSV”/“导出 JSONL”/“取消导出”（隐）+ 状态 span；新 `onCanExport(format)`（save 对话框默认 `<docname>.csv/.jsonl`，取 dock `sourceKind/regex/lastDbcId/canFilters.get(docId)` → `exportCsv/exportJsonl`，进度写状态、`onDone` 区分 cancelled/errored/成功 toast）/`cancelCanExport`/`updateCanExportUi`；`parseActive` 守卫改为 `canParsing||canExportBusy` 共享单飞）。
+**Why:** spec §4.1。导出与解析共用 dock 单任务互斥；filter 取当前面板组装值（与显示一致）。（tsc 修：`onDone` 参数标注 `CanExportStats`，对象字面量无上下文推导）
+**验证:** `npm --prefix app/frontend run build`（tsc 通过，42 modules）+ `npm test` 55 pass；无新单测（DOM/IPC 密集，GUI 手工留 Task 8）。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。

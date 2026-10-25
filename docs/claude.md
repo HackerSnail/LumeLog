@@ -41,8 +41,8 @@
       ↳ M2 引擎已交付（Plan 2 `feat/m2-can-engine`，纯 Rust `lumelog-can`）：DBC 子集解析 + Intel/Motorola 信号位序解码（cantools golden 对拍）+ candump/ASC/正则三源 + 解码 CLI（10 万帧验收）。Plan 3 `feat/m2-can-panel` 已交付 IPC 命令层与 CanPanel 报文表格 UI：`can_parse` 后台流式解码（`spawn_blocking` + 惰性分块，边解边填、可中途 `can_cancel`）+ `dbc_import` 宽容导入 + `can_decode_snippet` 选中识别；前端 TanStack table-core 虚拟表格 + ID/消息/信号条件/时间窗视图过滤 + 行号双向跳转（列表闪烁 / 编辑器定位）
 - [x] 日志行过滤、高亮标记、时序筛选
       ↳ M3 子项目 A 已全部交付：增量1（Plan 4 `feat/m3-filter-highlight`）只读视图多条件 AND 行过滤（包含/排除 × 字面/正则 × 大小写）+ 命中区 cu16 背景高亮 + F3/Shift+F3 跳转 + 实时取消（`filter_run` 异步流式、`doc_lines_at` 按需取子集文本），统一“查询面板”取代旧单框搜索；增量2（Plan 5 `feat/m3-timeline-export`）**时序筛选**：时间戳抽取正则 + 内置格式（ISO8601/epoch s/ms，chrono）按区间过滤，无抽取正则时退化为行号区间。
-- [ ] 导出筛选后的报文/日志片段
-      ↳ 日志片段导出已交付（Plan 5 `feat/m3-timeline-export` `export_lines`）：把当前过滤/时序/行号选中的行按**原始字节**（精确保编码与行尾）流式写入目标文件，可取消。CAN **报文 CSV/JSONL** 导出（信号宽表）尚未实现（属后续 CAN 增量）。
+- [x] 导出筛选后的报文/日志片段
+      ↳ 已全部交付：日志片段导出（Plan 5 `feat/m3-timeline-export` `export_lines`，按行号取原始字节流式写、保编码/行尾） + CAN 报文导出（Plan 6 `feat/m3-can-export` `export_csv` 宽表（meta+DBC 信号列、物理值）/`export_jsonl`（每帧对象），后端重解码并套用与 CanPanel 一致的 `frame_matches` 视图过滤，流式可取消）。
 - [x] 自定义主题（浅 / 暗 / Dracula 三主题 + 跟随系统 + localStorage 持久化；无边框自绘标题栏；Ctrl+Shift+P 命令面板）
       ↳ UI 重构 `feat/m-ui-notelume`（参考 NoteLume）已交付：主题 token 体系、三栏外壳（侧栏/检查器/可拖分栏）、命令面板、工具条即标题栏
 - [ ] 快捷键配置同步（当前内置固定快捷键；用户自定义与跨设备同步为后续）
