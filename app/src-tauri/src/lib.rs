@@ -22,6 +22,7 @@ pub fn run() {
             commands::doc_open,
             commands::doc_chunk,
             commands::doc_reload,
+            commands::doc_tail_append,
             commands::doc_set_encoding,
             commands::doc_close,
             commands::watch_subscribe,

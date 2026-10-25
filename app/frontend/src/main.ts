@@ -39,6 +39,7 @@ import {
   keymapGet,
   keymapSet,
   keymapReset,
+  docTailAppend,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -57,7 +58,7 @@ import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
 import { openKeymapModal } from "./keymap-ui";
 import { openEditable, type EditorHandle } from "./editor";
-import { ListView } from "./listview";
+import { ListView, isNearBottom } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
 import { type CanFilter } from "./canfilter";
 import { TabStrip } from "./tabs";
@@ -111,6 +112,12 @@ const watchReloading = new Set<number>();
 const watchPending = new Set<number>();
 let extBarEl: HTMLElement | null = null;
 let extBarDocId: number | null = null;
+// Tail follow (Roadmap): per-doc on/paused state + one owner-bound "back to bottom" chip.
+const followStates = new Map<number, { on: boolean; paused: boolean }>();
+let followResumeEl: HTMLButtonElement | null = null;
+let followResumeOwner: number | null = null;
+const tailToast = new Map<number, { pending: number; at: number }>();
+const tailSeenSize = new Map<number, number>();
 // Keymap: raw config overrides + the merged view used for dispatch/palette hints.
 let keymapOverrides: Record<string, string> = {};
 let keymapState = mergeBindings({});
@@ -187,6 +194,7 @@ const status = new Statusbar(statusEl, {
     const a = tabs.active();
     if (a) applyMode(a.info.docId, mode);
   },
+  onFollow: (on) => setFollow(on),
 });
 
 function layout(): void {
@@ -1141,6 +1149,10 @@ function handleExternalEvent(e: ExternalEvent): void {
       showExtBar(docId, e.path);
       continue;
     }
+    if (lists.has(docId)) {
+      void handleReadonlyAppend(docId, e.path);
+      continue;
+    }
     void reloadDocFromDisk(docId, e.path);
   }
 }
@@ -1293,7 +1305,9 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
       queryHits.delete(docId);
       queryCursor.delete(docId);
       listNow.refresh();
-      listNow.setScrollTop(scroll);
+      const st = followStates.get(docId);
+      if (st?.on) listNow.scrollToBottom();
+      else listNow.setScrollTop(scroll);
     }
     syncStatus(docId);
     updateInspector(docId);
@@ -1311,6 +1325,7 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
 }
 
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
+  followStates.delete(info.docId); // edit mode never follows
   const total = info.totalLines ?? info.lineCountEstimate;
   indexed.set(info.docId, total);
   docStates.set(info.docId, {
@@ -1370,7 +1385,10 @@ function mountList(info: DocInfo, path: string): void {
         updateInspector(info.docId);
       }
     },
+    onScrollTop: (top, maxScroll) => onListScroll(info.docId, top, maxScroll),
   });
+  followStates.set(info.docId, { on: false, paused: false });
+  tailSeenSize.set(info.docId, info.size);
   lists.set(info.docId, list);
   tabs.add({ docId: info.docId, path }, list);
   syncStatus(info.docId);
@@ -1596,6 +1614,10 @@ async function handleClose(docId: number): Promise<boolean> {
   const closing = docStates.get(docId);
   if (closing) cancelRecovery(docId, closing.path);
   hideExtBar(docId);
+  followStates.delete(docId);
+  tailToast.delete(docId);
+  tailSeenSize.delete(docId);
+  if (followResumeOwner === docId) hideFollowResume();
   tabs.remove(docId);
   docStates.delete(docId);
   editors.delete(docId);
@@ -1621,6 +1643,129 @@ function syncStatus(docId: number): void {
   const handle = editors.get(docId); // line/col only for editable docs
   if (handle) updatePos(handle);
   else status.setReadonly(ds.totalLines);
+  // Follow UI belongs to the ACTIVE doc only (syncStatus also runs for
+  // background reloads); a hidden tab may be followed but its chip stays hidden.
+  if (docId !== tabs.active()?.info.docId) return;
+  if (handle) {
+    status.setFollowAvailable(false);
+    hideFollowResume();
+    return;
+  }
+  const st = followStates.get(docId);
+  status.setFollowAvailable(true);
+  status.setFollow(st?.on ?? false);
+  if (st?.on && st.paused) {
+    showFollowResume(docId);
+  } else {
+    hideFollowResume();
+    if (st?.on) lists.get(docId)?.scrollToBottom();
+  }
+}
+
+// ---- tail follow (Roadmap: 监控 tail 与滚动截断) ---------------------------
+
+function setFollow(on: boolean): void {
+  const a = tabs.active();
+  if (!a) return;
+  const docId = a.info.docId;
+  const st = followStates.get(docId) ?? { on: false, paused: false };
+  st.on = on;
+  st.paused = false;
+  followStates.set(docId, st);
+  status.setFollow(on);
+  if (on) lists.get(docId)?.scrollToBottom();
+  else hideFollowResume();
+}
+
+function onListScroll(docId: number, top: number, maxScroll: number): void {
+  const st = followStates.get(docId);
+  if (!st || !st.on) return;
+  if (docId !== tabs.active()?.info.docId) return;
+  if (isNearBottom(top, maxScroll)) {
+    if (st.paused) {
+      st.paused = false;
+      hideFollowResume();
+    }
+  } else if (!st.paused) {
+    st.paused = true;
+    showFollowResume(docId);
+  }
+}
+
+function showFollowResume(docId: number): void {
+  if (!followResumeEl) {
+    followResumeEl = mkBtn("回到底部 ↓", "恢复跟随最新行", () => {
+      const owner = followResumeOwner;
+      if (owner === null) return;
+      const st = followStates.get(owner);
+      if (st) st.paused = false;
+      lists.get(owner)?.scrollToBottom();
+      hideFollowResume();
+    });
+    followResumeEl.className = "follow-resume";
+    document.body.append(followResumeEl);
+  }
+  followResumeOwner = docId;
+  followResumeEl.style.display = "";
+}
+
+function hideFollowResume(): void {
+  followResumeOwner = null;
+  if (followResumeEl) followResumeEl.style.display = "none";
+}
+
+/** Read-only external change: extend in place, falling back to a full reload. */
+async function handleReadonlyAppend(docId: number, path: string): Promise<void> {
+  try {
+    const r = await docTailAppend(docId);
+    const ds = docStates.get(docId);
+    const list = lists.get(docId);
+    if (!ds || !list) return; // closed while polling
+    const prevSize = tailSeenSize.get(docId);
+    tailSeenSize.set(docId, r.size);
+    if (r.rotated) {
+      await reloadDocFromDisk(docId, path);
+      if (followStates.get(docId)?.on) lists.get(docId)?.scrollToBottom();
+      return;
+    }
+    if (r.linesAdded === 0) {
+      // A half-written tail (no LF yet): no new line, but the last line grew.
+      if (prevSize !== undefined && r.size > prevSize) {
+        list.invalidate();
+        list.refresh();
+        const st = followStates.get(docId);
+        if (st?.on && !st.paused) list.scrollToBottom();
+      }
+      return;
+    }
+    ds.totalLines = r.totalLines;
+    indexed.set(docId, r.totalLines);
+    list.refresh();
+    const st = followStates.get(docId);
+    if (st?.on && !st.paused) list.scrollToBottom();
+    if (docId === tabs.active()?.info.docId) {
+      status.setReadonly(r.totalLines);
+      updateInspector(docId);
+    }
+    const t = tailToast.get(docId) ?? { pending: 0, at: 0 };
+    t.pending += r.linesAdded;
+    const now = Date.now();
+    if (now - t.at >= 1000) {
+      toastMsg(`已追加 ${t.pending} 行：${basenameOf(path)}`);
+      t.at = now;
+      t.pending = 0;
+    }
+    tailToast.set(docId, t);
+  } catch (err) {
+    reportError(err);
+    const st = followStates.get(docId);
+    if (st) {
+      st.on = false;
+      st.paused = false;
+    }
+    if (docId === tabs.active()?.info.docId) status.setFollow(false);
+    if (followResumeOwner === docId) hideFollowResume();
+  }
 }
 
 // ---- Query panel: multi-condition line filter + highlight (M3 spec §4.1).

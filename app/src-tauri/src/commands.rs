@@ -12,7 +12,7 @@ use std::time::UNIX_EPOCH;
 use lumelog_can::dbc::{parse_lenient, ParseOutcome};
 use lumelog_can::error::CanError;
 use lumelog_can::source::{AscSource, CandumpSource, FrameSource, Line, RegexSource};
-use lumelog_core::doc::{save_text, DocFile, EolStyle, OverwritePolicy, SaveOptions};
+use lumelog_core::doc::{save_text, AppendOutcome, DocFile, EolStyle, OverwritePolicy, SaveOptions};
 use lumelog_core::encoding::EncodingLabel;
 use lumelog_core::search::{search_stream, Mode, SearchQuery};
 use lumelog_core::filter::LineFilter;
@@ -147,6 +147,50 @@ pub fn doc_reload(
         done: true,
     });
     Ok(info)
+}
+
+/// Tail poll (Roadmap): extend the line index in place when the file only grew,
+/// or report `rotated` so the front end falls back to `doc_reload`.
+fn tail_append(state: &AppDocs, doc_id: u64) -> Result<TailAppendJson, IpcError> {
+    let arc = state
+        .get(doc_id)
+        .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
+    let mut doc = arc
+        .lock()
+        .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+    let total = doc.line_count() as u64;
+    let size = doc.size();
+    match doc.try_append().map_err(IpcError::from_core)? {
+        AppendOutcome::NoChange => Ok(TailAppendJson {
+            rotated: false,
+            lines_added: 0,
+            total_lines: total,
+            size,
+        }),
+        AppendOutcome::Appended {
+            lines_added,
+            total_lines,
+        } => Ok(TailAppendJson {
+            rotated: false,
+            lines_added,
+            total_lines,
+            size: doc.size(),
+        }),
+        AppendOutcome::Rotated => Ok(TailAppendJson {
+            rotated: true,
+            lines_added: 0,
+            total_lines: total,
+            size,
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn doc_tail_append(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+) -> Result<TailAppendJson, IpcError> {
+    tail_append(&state, doc_id)
 }
 
 /// Decode `[line_start, line_start+line_count)` and stream it to the front end.
@@ -1336,6 +1380,43 @@ mod reload_tests {
         let state = AppDocs::default();
         let err = reload_doc(&state, 42).unwrap_err();
         assert_eq!(err.code, "unknown_doc");
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    #[test]
+    fn tail_append_grows_then_no_change() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"a\n").unwrap();
+        f.flush().unwrap();
+        let path = f.path().to_path_buf();
+        let state = AppDocs::default();
+        let id = state.insert(DocFile::open(&path, 1 << 20).unwrap());
+
+        {
+            let mut w = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            w.write_all(b"b\nc").unwrap();
+            w.flush().unwrap();
+        }
+        let r = tail_append(&state, id).unwrap();
+        assert!(!r.rotated);
+        assert_eq!(r.lines_added, 1);
+        assert_eq!(r.total_lines, 3);
+        assert_eq!(r.size, std::fs::metadata(&path).unwrap().len());
+
+        let again = tail_append(&state, id).unwrap();
+        assert!(!again.rotated);
+        assert_eq!(again.lines_added, 0);
+        assert_eq!(again.total_lines, 3);
+    }
+
+    #[test]
+    fn tail_append_unknown_doc() {
+        let state = AppDocs::default();
+        assert_eq!(tail_append(&state, 9).unwrap_err().code, "unknown_doc");
     }
 }
 

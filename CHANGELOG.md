@@ -2,6 +2,45 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
+
+**依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。
+
+### 终审修复波（CodeReview 全分支 0 Critical / 4 Important / 5 Minor，全修）
+**Files:** `file.rs`（**I1**：`try_append` 改用**路径新开探测句柄**读头/追加，成功后重绑 `self.file`（旧句柄在 rename 后指向旧 inode，导致更大新文件永远无法识别轮转）；新增 `try_append_rename_growth_is_rotated`；**I2**：`sig_len/head_len` 与实际 `head.len()` 取 min（stat 与读之间被截断不再 slice panic）；**M4**：按 `READ_CHUNK` 分块读+逐块 extend，避免巨型分配；预检 `new_size>u32::MAX`）；`line_index.rs`（**I3**：`extend` 先收集再一次性提交（失败不留部分偏移）+ 总大小越界拒绝）；`main.ts`（**I4**：chip 绑 owner docId、点击不再误操作活动文档；`syncStatus` 仅对活动文档刷 follow 并在切回 `on&&!paused` 时滚底；**M1**：追加后活动文档同步 `setReadonly/updateInspector`；**M2**：`tailSeenSize` 检测半行增长并 `invalidate/refresh`；**M3**：toast 改为按 docId 计数；关闭仅清自己的 chip/计数）；`listview.ts`（`scrollToBottom` 在 `clientHeight==0` 时返回，隐藏标签不再丢失跟随位置）；`statusbar.ts`（`clear()` 隐藏跟随按钮）；spec/plan 同步。
+**Why:** rename 轮转漏检会让跟随静默停在旧文件；短读 panic、扩展失败留下不一致索引均属正确性缺陷；chip 跨标签误操作/隐藏标签被夹到顶部是明显 UX 错误。
+**验证:** `cargo test --workspace`（app 89 / core 89，含 rename 新测）+ `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm test` 88 pass + `run build` tsc 通过。
+
+### Task 1. core `LineIndex::extend`
+**Files:** Modify `crates/lumelog-core/src/doc/line_index.rs`（`extend(appended,base_offset)`：只扫追加字节 `0x0A`，推 `base+i+1`；越界→`TooLarge`；更新 `file_size`）+ 5 单测。
+**Why:** tail 追加不应重建全文；尾有/无 LF 两种旧状态均只需推 LF+1（不重复起点）。
+**验证:** `cargo test -p lumelog-core line_index::` 14 pass（+5：尾有 LF/尾无 LF/空追加/多 LF/4GB 越界）+ `cargo clippy -p lumelog-core --all-targets -- -D warnings` 净。
+
+### Task 2. core `DocFile::try_append` + 头签名
+**Files:** Modify `crates/lumelog-core/src/doc/file.rs`（`head_sig`（FNV-1a64, 前 `min(512, old_size)`）；`AppendOutcome{NoChange,Appended{lines_added,total_lines},Rotated}`；`try_append`：缩小/头签名变→Rotated，同尺寸→NoChange，增长→`LineIndex::extend`+刷新 `size/mtime/head_sig`；`reload_after_save` 同步签名）+ 5 单测。
+**Why:** tail 增量不重建全文；签名长度必须用**旧 size 的前缀**（否则增长过 512 后哈希窗口变化会误判轮转—— 首版测试即捕获）；`try_append` 刷新快照避免 B2 watcher 重复触发。
+**验证:** `cargo test -p lumelog-core` 88 pass（+5：追加/无变化/截断/同大小改头/尾 LF）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 3. `doc_tail_append` 命令 + DTO
+**Files:** Modify `crates/lumelog-core/src/doc/file.rs`（修正：`head_sig` 窗口长度改为**打开时冻结的 `head_len`**——否则文件增长后哈希窗口变化会把正常追加误判为 Rotated；`reload_after_save` 同步 `head_len`）；`crates/lumelog-core/src/doc/mod.rs`（re-export `AppendOutcome`）；`app/src-tauri/src/dto.rs`（`TailAppendJson`）；`commands.rs`（可测 `tail_append` helper + `doc_tail_append` 命令 + `tail_tests` 2 例）；`lib.rs`（注册）。
+**Why:** spec §3；`Rotated` 不修改索引、交给前端 `doc_reload`；`NoChange` 返回当前行数。
+**验证:** `cargo test --workspace`（app 89 / core 88）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 4. 前端 IPC 桥 + ListView 滚动辅助
+**Files:** Modify `app/frontend/src/ipc.ts`（`TailAppend` 类型 + `docTailAppend`）；`listview.ts`（`isNearBottom` 纯函数、`scrollToBottom()/maxScrollTop()`、`ListViewOpts.onScrollTop` 在现有 `onScroll` 中回调）；Tests `ipc.test.ts`(+1)、`listview.test.ts`(+3)。
+**Why:** spec §4。`onScrollTop` 从现有滚动路径回调（不另加监听，避免双触发）；`isNearBottom` 兼容不可滚动视图（max≤0→真）。
+**验证:** `npm test` 86 pass（listview 10→13、ipc 14→15）+ `run build` tsc 通过。
+
+### Task 5. 状态栏“跟随尾部”开关
+**Files:** Modify `app/frontend/src/statusbar.ts`（`onFollow` 回调；`.status-follow` 按钮 + `setFollowAvailable/setFollow`（`active`/`aria-pressed`））；`styles.css`（`.status-follow/.active`、备用 `.follow-resume`）；Test `statusbar.test.ts`（+2）。
+**Why:** spec §4—只读才显示；离开只读文档时自动清除 active；点击切换回调。
+**验证:** `npm test` 88 pass（statusbar 2→4）+ `run build` tsc 通过。
+
+### Task 6. `main.ts` 跟随状态 + 只读 `changed` 增量分流
+**Files:** Modify `app/frontend/src/main.ts`（`followStates`/`followResumeEl`/提示节流；状态栏 `onFollow`；`syncStatus` 按编辑/只读切换按钮与状态；`setFollow`/`onListScroll`（`isNearBottom`）/`showFollowResume`/`hideFollowResume`；`handleReadonlyAppend`：`docTailAppend`→`rotated` 走 `reloadDocFromDisk`，否则更新 `totalLines/indexed`+`refresh`，follow&&!paused→`scrollToBottom`，≥1s 节流 toast；`reloadDocFromDisk` 只读分支按 follow 决定滚底/保位；`handleClose`/`mountDoc` 清理状态）。
+**Why:** spec §4/§5。“回到底部”点击恢复跟随；滚动离底暂停；只读外的路径保持 B2 整档重载。
+**验证:** `run build` tsc 通过 + `npm test` 88 pass（无回归；DOM 交互留 GUI 手工）。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。

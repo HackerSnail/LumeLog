@@ -28,9 +28,26 @@ pub struct DocFile {
     eol_style: EolStyle,
     mtime: SystemTime,
     size: u64,
+    /// FNV-1a64 of the first `head_len` bytes: detects rename/rotation even when
+    /// the replacement is the same size or larger. The length is frozen at open
+    /// time so growth does not change the hashed window.
+    head_sig: u64,
+    head_len: usize,
     /// Decoded-chunk LRU: front = least-recently-used (evicted), back = most.
     cache: VecDeque<(u64, Chunk)>,
     cache_bytes: usize,
+}
+
+/// Result of a tail poll (`try_append`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendOutcome {
+    /// File unchanged since the last snapshot.
+    NoChange,
+    /// Bytes were appended and the line index was extended in place.
+    Appended { lines_added: u64, total_lines: u64 },
+    /// The path no longer holds the file we indexed (truncated or replaced):
+    /// the caller must reopen it.
+    Rotated,
 }
 
 impl DocFile {
@@ -51,6 +68,8 @@ impl DocFile {
         // Record the dominant line-ending style from the decoded leading window
         // (spec §4.4: on open we detect CRLF/LF and store it as document metadata).
         let eol_style = detect_eol(&encoding::decode_all(label, &head).text);
+        let sig_len = (size.min(512) as usize).min(head.len());
+        let sig = head_sig(&head[..sig_len]);
 
         let index = build_index(&mut file, size, label)?;
 
@@ -62,6 +81,8 @@ impl DocFile {
             eol_style,
             mtime,
             size,
+            head_sig: sig,
+            head_len: sig_len,
             cache: VecDeque::new(),
             cache_bytes: 0,
         })
@@ -89,6 +110,54 @@ impl DocFile {
     /// `(size, mtime)` snapshot for external-modification / conflict checks.
     pub fn disk_meta(&self) -> (u64, SystemTime) {
         (self.size, self.mtime)
+    }
+
+    /// Tail poll: cheaply detect "unchanged / appended / replaced". On append the
+    /// line index is extended in place (only the new bytes are scanned) and the
+    /// `(size, mtime)` snapshot is refreshed so the external watcher does not
+    /// re-report the same growth.
+    pub fn try_append(&mut self) -> Result<AppendOutcome, CoreError> {
+        // Probe through the PATH, not our old handle: after `mv new log` the old
+        // handle still points at the discarded inode. Rebinding on append keeps
+        // the index and the handle on the same file.
+        let mut probe = File::open(&self.path)?;
+        let meta = probe.metadata()?;
+        let new_size = meta.len();
+        if new_size < self.size {
+            return Ok(AppendOutcome::Rotated);
+        }
+        if new_size > u32::MAX as u64 {
+            return Err(CoreError::TooLarge);
+        }
+        // Rotation fingerprint over the SAME prefix length used at open
+        // (`head_len` frozen at open time): growth must not change the window.
+        let head_len = self.head_len;
+        let head = read_at(&mut probe, 0, head_len)?;
+        if head_sig(&head) != self.head_sig {
+            return Ok(AppendOutcome::Rotated);
+        }
+        if new_size == self.size {
+            return Ok(AppendOutcome::NoChange);
+        }
+        let before = self.index.line_count();
+        let mut off = self.size;
+        while off < new_size {
+            let want = (new_size - off).min(READ_CHUNK) as usize;
+            let buf = read_at(&mut probe, off, want)?;
+            if buf.is_empty() {
+                break; // concurrent truncate: the next poll sees Rotated
+            }
+            self.index.extend(&buf, off)?;
+            off += buf.len() as u64;
+        }
+        self.file = probe;
+        self.size = off;
+        self.mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        self.head_sig = head_sig(&head);
+        Ok(AppendOutcome::Appended {
+            lines_added: (self.index.line_count() - before) as u64,
+            total_lines: self.index.line_count() as u64,
+        })
     }
 
     // --- crate-internal surface for the search scanner (crate::search) ---
@@ -134,6 +203,8 @@ impl DocFile {
         self.file = file;
         self.size = size;
         self.mtime = mtime;
+        self.head_len = (size.min(512) as usize).min(head.len());
+        self.head_sig = head_sig(&head[..self.head_len]);
         self.label = encoding;
         self.eol_style = eol_style;
         self.index = index;
@@ -270,6 +341,17 @@ pub fn validate_open_path(path: &Path, size_limit: u64) -> Result<(), OpenReject
     Ok(())
 }
 
+/// FNV-1a64 over the first up-to-512 bytes (rotation fingerprint).
+fn head_sig(head: &[u8]) -> u64 {
+    let n = head.len().min(512);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in &head[..n] {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Read exactly `len` bytes (or to EOF) starting at `pos` without disturbing
 /// the caller's cursor more than needed. `seek` + `read` loop; serialization is
 /// the caller's responsibility (`DocFile` holds a single handle).
@@ -403,5 +485,103 @@ mod ipc_logic_tests {
         .unwrap();
         assert_eq!(progress, vec![size]); // one chunk => exactly one report at EOF
         fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write as _;
+
+    fn setup(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lumelog-append-{name}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("log.txt");
+        fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    fn append(p: &std::path::Path, bytes: &[u8]) {
+        let mut f = fs::OpenOptions::new().append(true).open(p).unwrap();
+        f.write_all(bytes).unwrap();
+        f.flush().unwrap();
+    }
+
+    #[test]
+    fn try_append_grows_and_chunks() {
+        let p = setup("grow", b"a\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        append(&p, b"b\nc");
+        let out = doc.try_append().unwrap();
+        assert_eq!(
+            out,
+            AppendOutcome::Appended {
+                lines_added: 1,
+                total_lines: 3
+            }
+        );
+        assert_eq!(doc.chunk_at(2, 1).unwrap().text, "c");
+        assert_eq!(doc.disk_meta().0, fs::metadata(&p).unwrap().len());
+        fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn try_append_no_change() {
+        let p = setup("same", b"a\nb\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        assert_eq!(doc.try_append().unwrap(), AppendOutcome::NoChange);
+        fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn try_append_truncated_is_rotated() {
+        let p = setup("trunc", b"aaa\nbbb\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        fs::write(&p, b"x\n").unwrap();
+        assert_eq!(doc.try_append().unwrap(), AppendOutcome::Rotated);
+        fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn try_append_head_change_is_rotated() {
+        let p = setup("head", b"aaaa\nbbbb\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        fs::write(&p, b"XXXX\nbbbb\n").unwrap(); // same size, different head
+        assert_eq!(doc.try_append().unwrap(), AppendOutcome::Rotated);
+        fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn try_append_rename_growth_is_rotated() {
+        let p = setup("rename", b"a\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap();
+        let other = p.with_file_name("replacement.txt");
+        fs::write(&other, b"x\ny\nz\n").unwrap();
+        fs::remove_file(&p).unwrap(); // rotation by replace (works on Windows)
+        fs::rename(&other, &p).unwrap();
+        // The old handle still points at "a\n"; the probe must notice.
+        assert_eq!(doc.try_append().unwrap(), AppendOutcome::Rotated);
+        fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn try_append_after_trailing_lf_extends_lines() {
+        let p = setup("trail", b"a\nb\n");
+        let mut doc = DocFile::open(&p, 1 << 20).unwrap(); // 3 lines
+        append(&p, b"c\n");
+        let out = doc.try_append().unwrap();
+        assert_eq!(
+            out,
+            AppendOutcome::Appended {
+                lines_added: 1,
+                total_lines: 4
+            }
+        );
+        assert!(doc.chunk_at(2, 1).unwrap().text.starts_with('c'));
+        fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 }

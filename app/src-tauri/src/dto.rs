@@ -327,6 +327,17 @@ impl From<CanExportStats> for CanExportStatsJson {
     }
 }
 
+/// Result of a tail poll (`doc_tail_append`, Roadmap: tail 跟随).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TailAppendJson {
+    /// The file was truncated/replaced: the caller must `doc_reload`.
+    pub rotated: bool,
+    pub lines_added: u64,
+    pub total_lines: u64,
+    pub size: u64,
+}
+
 // ---- M3 filter DTOs (spec §6.4 / §9). camelCase to match ipc.ts ------------
 
 /// One filter condition as it arrives from the query panel. `mode` is
