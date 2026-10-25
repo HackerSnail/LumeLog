@@ -41,6 +41,12 @@
 **Why:** spec §4.1。面板统一走 `filter_run`（单条包含=原单模式搜索+高亮），**Ruling：旧 `search_run` 保留注册但退出前端主路径**（不重复异步化，避免两套正则链路）；`queryBusy` 仅在 `onDone`/catch 置否（filterRun 提前解 id）；hits 每 doc 缓存供 F3 循环（`queryHits`/`queryCursor`）。视图切换保留各 doc 的 list 实例，子集态自然持久。
 **验证:** `npm --prefix app/frontend run build`（tsc 通过，41 modules，openQueryPanel 已接）+ `npm test` 46 pass；grep 确认 `openSearchFlow/runSearch/renderSearchShell/appendHits/searchBusy` 已清除、`jumpToLine` 仍被 Ctrl+G 复用；无新单测（DOM/IPC 密集，GUI 手工验收留 Task 8）。
 
+### Task 8. 样式 + 全量验收
+**Files:** Modify `app/frontend/src/styles.css`（查询面板 `.query-conds`/`.query-cond`/`.query-chk` 与高亮 `.line-hl`（半透明琥珀色，三主题通用无需 per-theme token）；旧 `.search-head input` flex 仅作用文本框，新增 `.query-chk input{flex:0 0 auto}` 防勾选框拉伸）。
+**Why:** spec §7。面板复用 `#search-panel`（未改 index.html）；条件行走 `.query-conds` 独立滚动列，行多不顶走动作栏。
+**手工验收清单（需 `tauri dev`，headless 以单测+tsc 为门）：**① 打开 >200MB 只读日志→Ctrl+Shift+F 查询面板→加 1 条包含正则→勾“过滤到命中行”→只显命中行、行号原值；② 叠加排除字面→AND 生效、计数对；③ “高亮命中”开→命中区间背景色 + F3/Shift+F3 循环；④ 扫描中点“停止”→及时中止保留已得、按钮复位；⑤ 切标签回原 doc→子集视图保留。
+**验证（全量四门）:** `cargo test --workspace` 全绿（lumelog-app 23含 scan_filter 4+gather_lines 3、lumelog-core 68含 filter 10、lumelog-can 集成套件、cli_smoke 9/1 ignored、docfile/proptest）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 46 pass + `run build`（tsc 通过）。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。

@@ -444,6 +444,47 @@ html.has-custom-titlebar .win-btns {
   background: var(--bg-hover);
 }
 
+/* M3 query panel (spec §4.1) + line highlight (spec §4.2). The panel reuses
+ * `#search-panel`; conditions live in their own scroll column so a long list of
+ * rows never pushes the action bar off-screen. */
+.query-conds {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 10px 6px;
+}
+.query-cond {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.query-cond input {
+  flex: 1 1 auto;
+  padding: 3px 6px;
+}
+.query-cond select {
+  flex: 0 0 auto;
+}
+.query-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.query-chk input {
+  flex: 0 0 auto;
+}
+/* Matched range highlight: translucent amber reads on light/dark/Dracula alike
+ * without a per-theme token; the text color stays inherited. */
+.line-hl {
+  background: rgba(255, 204, 0, 0.38);
+  border-radius: 2px;
+}
+
 /* Ctrl+G go-to-line: a small floating box anchored top-center. */
 .jump-panel {
   position: fixed;
