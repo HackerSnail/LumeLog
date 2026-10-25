@@ -21,6 +21,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use crate::dto::*;
+use crate::can_export::export_can;
 use crate::state::AppDocs;
 
 /// 4 GiB u32 line-index ceiling (spec §4.1/A9). `validate_open_path` rejects at
@@ -911,6 +912,136 @@ pub fn export_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Resul
     }
 }
 
+/// Shared body of `export_csv`/`export_jsonl` (spec §5): validate + create the
+/// target synchronously (bad path -> `io`, never a half-written worker), then
+/// scan+write on a blocking task and return `req_id` immediately so
+/// `export_can_cancel` works. `wide` picks CSV vs JSONL.
+#[allow(clippy::too_many_arguments)] // IPC: doc + source + filter + path + 2 channels + handles
+fn run_can_export(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    dbc_id: Option<u64>,
+    source_kind: String,
+    regex: Option<String>,
+    filter: CanFilterJson,
+    target_path: String,
+    on_progress: Channel<CanExportProgress>,
+    on_done: Channel<CanExportStatsJson>,
+    wide: bool,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    validate_source_kind_regex(&source_kind, &regex).map_err(fail)?;
+    let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
+    let file = open_export_target(&target_path).map_err(fail)?;
+    let kind = source_kind.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut writer = BufWriter::new(file);
+        let mut prog = |written: u64| {
+            let _ = on_progress.send(CanExportProgress { written });
+        };
+        let stats = export_can(
+            &doc_arc,
+            db_arc.as_deref(),
+            &kind,
+            &regex,
+            &filter,
+            &mut writer,
+            &mut prog,
+            &|| cancel.load(Ordering::Relaxed),
+            wide,
+        );
+        let _ = writer.flush();
+        let _ = on_done.send(stats.into());
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+/// Export the CanPanel-filtered frame set as a wide CSV (raw re-decode, spec §7.5).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn export_csv(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    dbc_id: Option<u64>,
+    source_kind: String,
+    regex: Option<String>,
+    filter: CanFilterJson,
+    target_path: String,
+    on_progress: Channel<CanExportProgress>,
+    on_done: Channel<CanExportStatsJson>,
+) -> Result<u64, IpcError> {
+    run_can_export(
+        state,
+        app,
+        doc_id,
+        dbc_id,
+        source_kind,
+        regex,
+        filter,
+        target_path,
+        on_progress,
+        on_done,
+        true,
+    )
+}
+
+/// Export the CanPanel-filtered frame set as JSONL (one `FrameJson` per line).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn export_jsonl(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    dbc_id: Option<u64>,
+    source_kind: String,
+    regex: Option<String>,
+    filter: CanFilterJson,
+    target_path: String,
+    on_progress: Channel<CanExportProgress>,
+    on_done: Channel<CanExportStatsJson>,
+) -> Result<u64, IpcError> {
+    run_can_export(
+        state,
+        app,
+        doc_id,
+        dbc_id,
+        source_kind,
+        regex,
+        filter,
+        target_path,
+        on_progress,
+        on_done,
+        false,
+    )
+}
+
+/// Ask an in-flight `export_csv`/`export_jsonl` to stop (shared cancel registry).
+#[tauri::command]
+pub fn export_can_cancel(
+    state: tauri::State<'_, AppDocs>,
+    request_id: u64,
+) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod filter_run_tests {
     use super::*;
@@ -1081,6 +1212,22 @@ mod export_cmd_tests {
         let f = open_export_target(p.to_str().unwrap());
         assert!(f.is_ok(), "valid temp path creates the target");
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn can_export_stats_json_from_and_camel_case() {
+        let json: CanExportStatsJson = crate::can_export::CanExportStats {
+            written: 2,
+            scanned: 5,
+            cancelled: true,
+            errored: false,
+        }
+        .into();
+        let v = serde_json::to_value(&json).unwrap();
+        assert_eq!(v.get("written").unwrap(), 2);
+        assert_eq!(v.get("scanned").unwrap(), 5);
+        assert_eq!(v.get("cancelled").unwrap(), true);
+        assert_eq!(v.get("errored").unwrap(), false);
     }
 }
 

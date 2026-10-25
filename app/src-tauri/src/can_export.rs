@@ -152,7 +152,6 @@ const CAN_EXPORT_BATCH: u64 = 512;
 /// interleave). `frame_json` decodes each frame once; `frame_matches` decides
 /// inclusion. Source-build or write failure sets `errored` and stops (no `Result`);
 /// `cancel` is checked per frame.
-#[allow(dead_code)] // consumed by the export commands (Task 5)
 #[allow(clippy::too_many_arguments)] // scan inputs (doc/dbc/source/filter/sink/callbacks)
 pub fn export_can<W: Write>(
     doc_arc: &Arc<Mutex<DocFile>>,

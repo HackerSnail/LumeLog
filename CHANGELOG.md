@@ -26,6 +26,11 @@
 **Why:** spec §5。**优于计划草拟**：`export_can` 走 `DocLines` 按块加解锁（同 `can_parse`/`filter_run`），不持整轮 doc 锁→并发 `doc_chunk` 不饥死；`frame_json` 解码一次兼供过滤与取值。build/write 错吸收为 `errored`不返 Result。
 **验证:** `cargo test -p lumelog-app can_export::` 20 pass（+4：jsonl 有数帧、CSV header+id 过滤、DBC 信号列、取消早停且 written<total）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 5. `export_csv` / `export_jsonl` / `export_can_cancel` 命令
+**Files:** Modify `app/src-tauri/src/commands.rs`（新 `run_can_export` 共享体 + `#[tauri::command] export_csv`/`export_jsonl`（wide 真/假）+ `export_can_cancel`；导入 `export_can`）；Modify `dto.rs`（`CanExportProgress`、`CanExportStatsJson`+`From<can_export::CanExportStats>`）；Modify `lib.rs`（注册三命令）；剥 `export_can` 的 `#[allow(dead_code)]`；+1 DTO 测。
+**Why:** spec §5。prologue 同步校验源 + `File::create`（坏路径→`io` 不建 worker）→ `spawn_blocking` 跑 `export_can`、`on_progress` 节流、`on_done` 必发、`end_search`；早返 req_id。两命令共用 `run_can_export`。
+**验证:** `cargo test -p lumelog-app` 56 pass（+`can_export_stats_json_from_and_camel_case`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。
