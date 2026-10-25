@@ -11,6 +11,7 @@
 **Why:** Critical 使一个字节即可 panic 并让解析/导出 UI 永久卡死；I2/I3/I4 分别影响合法文件判定、FD64 数据正确性与“已解析帧丢失”；I5 与解压上限设计自相矛盾。
 **验证:** `cargo test -p lumelog-can blf::` 19 pass + `cargo test -p lumelog-app` 90 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
 **Parks（Minor，推迟）：** M4 容器仍整段解压/复制（已有 256MiB 上限，逐块流式留待后续）；M5 `BlfStats.error` 仍透出英文 `Display`（与文本源错误码体系统一留待后续）。
+**定向复审补充（W1/S1/S2）：** I2/I3 的新测原本未真正越过边界（夹具恒 136B/valid=3 新旧同值）→ 改为 75B 对象带 3B 填充、valid=8 + 0xEE 扩展字节（修复前必红）；spec 补“容器末尾 <16B 全零=填充丢弃”规则；`open` 头部扩展截断也映射为 `source_format`。
 
 ### Task 1. core `lumelog-can/src/blf.rs`
 **Files:** Create `crates/lumelog-can/src/blf.rs`（`BlfSource: FrameSource`；`LOGG` 头/`SYSTEMTIME`、`LOG_CONTAINER`（无压缩/zlib2、256MiB 上限）、v1/v2 对象、类型 1/86/100/101、跨容器 tail、`take_error`、Hinnant 日历、10µs/1ns）；Modify `lib.rs`（`pub mod blf` + `pub use BlfSource`）、`Cargo.toml`/`Cargo.lock`（`flate2 = "1"`）；spec 同步 FD64 data 偏移（payload@40，ext 边界 `ext-(16+ext_len+40)`）。
