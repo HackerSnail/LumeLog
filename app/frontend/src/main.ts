@@ -36,6 +36,7 @@ import {
   watchSubscribe,
   docReload,
   watchStatus,
+  keymapGet,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -51,6 +52,7 @@ import {
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
+import { eventToAccel, mergeBindings, type ActionId } from "./keymap";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -106,6 +108,10 @@ const watchReloading = new Set<number>();
 const watchPending = new Set<number>();
 let extBarEl: HTMLElement | null = null;
 let extBarDocId: number | null = null;
+// Keymap: raw config overrides + the merged view used for dispatch/palette hints.
+let keymapOverrides: Record<string, string> = {};
+let keymapState = mergeBindings({});
+let keymapModalOpen = false;
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -2038,29 +2044,75 @@ function openJumpPrompt(): void {
   input.select();
 }
 
+/** Single action source: palette rows, the keymap modal and dispatch all use it. */
+type ActionDef = { id: ActionId; title: string; run: () => void };
+const ACTION_DEFS: ActionDef[] = [
+  { id: "open", title: "打开文件…", run: () => void openFile() },
+  { id: "save", title: "保存", run: () => void saveActive(false) },
+  { id: "save-as", title: "另存为…", run: () => void saveActive(true) },
+  { id: "query", title: "行过滤 / 高亮命中…", run: () => openQueryPanel() },
+  { id: "jump", title: "跳转到行…", run: () => openJumpPrompt() },
+  { id: "palette", title: "命令面板", run: () => openPalette() },
+  {
+    id: "close",
+    title: "关闭当前文档",
+    run: () => {
+      const a = tabs.active();
+      if (a) void handleClose(a.info.docId);
+    },
+  },
+  { id: "sidebar", title: "显示 / 隐藏侧栏", run: () => toggleSidebar() },
+  { id: "inspector", title: "显示 / 隐藏文档信息栏", run: () => toggleInspector() },
+  { id: "can-panel", title: "报文面板：显示 / 隐藏", run: () => toggleCanDock() },
+  { id: "can-import", title: "导入 DBC…", run: () => void importDbc() },
+  { id: "can-parse", title: "解析当前文档为报文", run: () => void parseActive() },
+  { id: "can-snippet", title: "识别选中为报文", run: () => void decodeSelection() },
+];
+
+function actionTitle(id: string): string {
+  return ACTION_DEFS.find((d) => d.id === id)?.title ?? id;
+}
+
+/** Load `[keymap]` overrides once at startup and surface conflicts/unknown ids. */
+async function initKeymap(): Promise<void> {
+  try {
+    keymapOverrides = await keymapGet();
+  } catch {
+    keymapOverrides = {};
+    toastMsg("快捷键配置读取失败，已使用默认值");
+    keymapState = mergeBindings({});
+    return;
+  }
+  applyKeymapState();
+}
+
+/** Recompute the dispatch tables from the current overrides (default defaults). */
+function applyKeymapState(): void {
+  keymapState = mergeBindings(keymapOverrides);
+  const notes: string[] = [];
+  const c = keymapState.conflicts[0];
+  if (c) {
+    notes.push(
+      `快捷键冲突：${c.accel} 已绑给《${actionTitle(c.other)}》，《${actionTitle(c.action)}》未生效`,
+    );
+  }
+  if (keymapState.unknown.length) {
+    notes.push(`配置文件含未知动作：${keymapState.unknown.join("、")}`);
+  }
+  if (notes.length) toastMsg(notes.join("；"));
+}
+
 /** The command set offered by the palette, rebuilt per open so it reflects
  *  live state (e.g. hints). Titles are what `fuzzyScore` matches. */
 function buildCommands(): Command[] {
+  const bound: Command[] = ACTION_DEFS.map((d) => ({
+    id: d.id,
+    title: d.title,
+    hint: keymapState.bindings[d.id],
+    run: d.run,
+  }));
   return [
-    { id: "open", title: "打开文件…", hint: "Ctrl+O", run: () => void openFile() },
-    { id: "save", title: "保存", hint: "Ctrl+S", run: () => void saveActive(false) },
-    { id: "save-as", title: "另存为…", hint: "Ctrl+Shift+S", run: () => void saveActive(true) },
-    { id: "query", title: "行过滤 / 高亮命中…", hint: "Ctrl+Shift+F", run: () => openQueryPanel() },
-    { id: "jump", title: "跳转到行…", hint: "Ctrl+G", run: () => openJumpPrompt() },
-    {
-      id: "close",
-      title: "关闭当前文档",
-      run: () => {
-        const a = tabs.active();
-        if (a) void handleClose(a.info.docId);
-      },
-    },
-    { id: "sidebar", title: "显示 / 隐藏侧栏", run: () => toggleSidebar() },
-    { id: "inspector", title: "显示 / 隐藏文档信息栏", run: () => toggleInspector() },
-    { id: "can-panel", title: "报文面板：显示 / 隐藏", run: () => toggleCanDock() },
-    { id: "can-import", title: "导入 DBC…", run: () => void importDbc() },
-    { id: "can-parse", title: "解析当前文档为报文", run: () => void parseActive() },
-    { id: "can-snippet", title: "识别选中为报文", run: () => void decodeSelection() },
+    ...bound,
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
     { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },
@@ -2182,6 +2234,7 @@ function setBusy(b: boolean): void {
 
 function registerShortcuts(): void {
   window.addEventListener("keydown", (e) => {
+    if (keymapModalOpen) return; // the settings modal owns the keyboard
     if (e.key === "F3") {
       // Only the read-only list view cycles query hits; in an editor let
       // CodeMirror's own searchKeymap handle F3 (avoids a double response).
@@ -2192,25 +2245,14 @@ function registerShortcuts(): void {
       }
       return;
     }
-    const mod = e.ctrlKey || e.metaKey;
-    if (!mod) return;
-    const key = e.key.toLowerCase();
-    if (key === "s") {
-      e.preventDefault();
-      void saveActive(e.shiftKey); // Ctrl+S save, Ctrl+Shift+S save-as (spec §12 M1)
-    } else if (key === "o") {
-      e.preventDefault();
-      void openFile();
-    } else if (key === "g") {
-      e.preventDefault();
-      openJumpPrompt(); // Ctrl+G jump-to-line (spec §8)
-    } else if (key === "f" && e.shiftKey) {
-      e.preventDefault();
-      openQueryPanel();
-    } else if (key === "p" && e.shiftKey) {
-      e.preventDefault();
-      openPalette(); // Ctrl+Shift+P command palette (UI reference: NoteLume)
-    }
+    const accel = eventToAccel(e);
+    if (!accel) return;
+    const action = keymapState.accelToAction[accel];
+    if (!action) return;
+    const def = ACTION_DEFS.find((d) => d.id === action);
+    if (!def) return;
+    e.preventDefault();
+    def.run();
   });
 }
 
@@ -2223,3 +2265,4 @@ registerShortcuts();
 void appPing().catch(() => {});
 void initRecovery();
 void initWatch();
+void initKeymap();
