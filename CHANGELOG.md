@@ -31,6 +31,11 @@
 **Why:** spec §4—只读才显示；离开只读文档时自动清除 active；点击切换回调。
 **验证:** `npm test` 88 pass（statusbar 2→4）+ `run build` tsc 通过。
 
+### Task 6. `main.ts` 跟随状态 + 只读 `changed` 增量分流
+**Files:** Modify `app/frontend/src/main.ts`（`followStates`/`followResumeEl`/提示节流；状态栏 `onFollow`；`syncStatus` 按编辑/只读切换按钮与状态；`setFollow`/`onListScroll`（`isNearBottom`）/`showFollowResume`/`hideFollowResume`；`handleReadonlyAppend`：`docTailAppend`→`rotated` 走 `reloadDocFromDisk`，否则更新 `totalLines/indexed`+`refresh`，follow&&!paused→`scrollToBottom`，≥1s 节流 toast；`reloadDocFromDisk` 只读分支按 follow 决定滚底/保位；`handleClose`/`mountDoc` 清理状态）。
+**Why:** spec §4/§5。“回到底部”点击恢复跟随；滚动离底暂停；只读外的路径保持 B2 整档重载。
+**验证:** `run build` tsc 通过 + `npm test` 88 pass（无回归；DOM 交互留 GUI 手工）。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。

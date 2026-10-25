@@ -39,6 +39,7 @@ import {
   keymapGet,
   keymapSet,
   keymapReset,
+  docTailAppend,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -57,7 +58,7 @@ import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
 import { openKeymapModal } from "./keymap-ui";
 import { openEditable, type EditorHandle } from "./editor";
-import { ListView } from "./listview";
+import { ListView, isNearBottom } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
 import { type CanFilter } from "./canfilter";
 import { TabStrip } from "./tabs";
@@ -111,6 +112,11 @@ const watchReloading = new Set<number>();
 const watchPending = new Set<number>();
 let extBarEl: HTMLElement | null = null;
 let extBarDocId: number | null = null;
+// Tail follow (Roadmap): per-doc on/paused state + one "back to bottom" chip.
+const followStates = new Map<number, { on: boolean; paused: boolean }>();
+let followResumeEl: HTMLButtonElement | null = null;
+let tailToastAt = 0;
+let tailToastPending = 0;
 // Keymap: raw config overrides + the merged view used for dispatch/palette hints.
 let keymapOverrides: Record<string, string> = {};
 let keymapState = mergeBindings({});
@@ -187,6 +193,7 @@ const status = new Statusbar(statusEl, {
     const a = tabs.active();
     if (a) applyMode(a.info.docId, mode);
   },
+  onFollow: (on) => setFollow(on),
 });
 
 function layout(): void {
@@ -1141,6 +1148,10 @@ function handleExternalEvent(e: ExternalEvent): void {
       showExtBar(docId, e.path);
       continue;
     }
+    if (lists.has(docId)) {
+      void handleReadonlyAppend(docId, e.path);
+      continue;
+    }
     void reloadDocFromDisk(docId, e.path);
   }
 }
@@ -1293,7 +1304,9 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
       queryHits.delete(docId);
       queryCursor.delete(docId);
       listNow.refresh();
-      listNow.setScrollTop(scroll);
+      const st = followStates.get(docId);
+      if (st?.on) listNow.scrollToBottom();
+      else listNow.setScrollTop(scroll);
     }
     syncStatus(docId);
     updateInspector(docId);
@@ -1311,6 +1324,7 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
 }
 
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
+  followStates.delete(info.docId); // edit mode never follows
   const total = info.totalLines ?? info.lineCountEstimate;
   indexed.set(info.docId, total);
   docStates.set(info.docId, {
@@ -1370,7 +1384,9 @@ function mountList(info: DocInfo, path: string): void {
         updateInspector(info.docId);
       }
     },
+    onScrollTop: (top, maxScroll) => onListScroll(info.docId, top, maxScroll),
   });
+  followStates.set(info.docId, { on: false, paused: false });
   lists.set(info.docId, list);
   tabs.add({ docId: info.docId, path }, list);
   syncStatus(info.docId);
@@ -1596,6 +1612,8 @@ async function handleClose(docId: number): Promise<boolean> {
   const closing = docStates.get(docId);
   if (closing) cancelRecovery(docId, closing.path);
   hideExtBar(docId);
+  followStates.delete(docId);
+  hideFollowResume();
   tabs.remove(docId);
   docStates.delete(docId);
   editors.delete(docId);
@@ -1619,8 +1637,102 @@ function syncStatus(docId: number): void {
   const view = tabs.get(docId);
   if (view) status.setDirty(view.isDirty());
   const handle = editors.get(docId); // line/col only for editable docs
-  if (handle) updatePos(handle);
-  else status.setReadonly(ds.totalLines);
+  if (handle) {
+    status.setFollowAvailable(false);
+    updatePos(handle);
+  } else {
+    status.setFollowAvailable(true);
+    status.setFollow(followStates.get(docId)?.on ?? false);
+    status.setReadonly(ds.totalLines);
+  }
+}
+
+// ---- tail follow (Roadmap: 监控 tail 与滚动截断) ---------------------------
+
+function setFollow(on: boolean): void {
+  const a = tabs.active();
+  if (!a) return;
+  const docId = a.info.docId;
+  const st = followStates.get(docId) ?? { on: false, paused: false };
+  st.on = on;
+  st.paused = false;
+  followStates.set(docId, st);
+  status.setFollow(on);
+  if (on) lists.get(docId)?.scrollToBottom();
+  else hideFollowResume();
+}
+
+function onListScroll(docId: number, top: number, maxScroll: number): void {
+  const st = followStates.get(docId);
+  if (!st || !st.on) return;
+  if (docId !== tabs.active()?.info.docId) return;
+  if (isNearBottom(top, maxScroll)) {
+    if (st.paused) {
+      st.paused = false;
+      hideFollowResume();
+    }
+  } else if (!st.paused) {
+    st.paused = true;
+    showFollowResume();
+  }
+}
+
+function showFollowResume(): void {
+  if (!followResumeEl) {
+    followResumeEl = mkBtn("回到底部 ↓", "恢复跟随最新行", () => {
+      const a = tabs.active();
+      if (!a) return;
+      const docId = a.info.docId;
+      const st = followStates.get(docId);
+      if (st) st.paused = false;
+      lists.get(docId)?.scrollToBottom();
+      hideFollowResume();
+    });
+    followResumeEl.className = "follow-resume";
+    document.body.append(followResumeEl);
+  }
+  followResumeEl.style.display = "";
+}
+
+function hideFollowResume(): void {
+  if (followResumeEl) followResumeEl.style.display = "none";
+}
+
+/** Read-only external change: extend in place, falling back to a full reload. */
+async function handleReadonlyAppend(docId: number, path: string): Promise<void> {
+  try {
+    const r = await docTailAppend(docId);
+    const ds = docStates.get(docId);
+    const list = lists.get(docId);
+    if (!ds || !list) return; // closed while polling
+    if (r.rotated) {
+      await reloadDocFromDisk(docId, path);
+      if (followStates.get(docId)?.on) lists.get(docId)?.scrollToBottom();
+      return;
+    }
+    if (r.linesAdded === 0) return;
+    ds.totalLines = r.totalLines;
+    indexed.set(docId, r.totalLines);
+    list.refresh();
+    const st = followStates.get(docId);
+    if (st?.on && !st.paused) list.scrollToBottom();
+    tailToastPending += r.linesAdded;
+    const now = Date.now();
+    if (now - tailToastAt >= 1000) {
+      toastMsg(`已追加 ${tailToastPending} 行：${basenameOf(path)}`);
+      tailToastAt = now;
+      tailToastPending = 0;
+    }
+  } catch (err) {
+    reportError(err);
+    const st = followStates.get(docId);
+    if (st) {
+      st.on = false;
+      st.paused = false;
+    }
+    if (docId === tabs.active()?.info.docId) status.setFollow(false);
+    hideFollowResume();
+  }
 }
 
 // ---- Query panel: multi-condition line filter + highlight (M3 spec §4.1).
