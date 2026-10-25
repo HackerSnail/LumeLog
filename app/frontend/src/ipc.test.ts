@@ -6,6 +6,9 @@ import {
   canParse,
   canCancel,
   canDecodeSnippet,
+  filterRun,
+  filterCancel,
+  docLinesAt,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -82,6 +85,23 @@ describe("CAN ipc bridge (spec §9)", () => {
   it("can_wrappers_are_functions", () => {
     for (const fn of [dbcImport, canParse, canCancel, canDecodeSnippet]) {
       expect(typeof fn).toBe("function");
+    }
+  });
+});
+
+describe("M3 filter ipc bridge (spec §6.4)", () => {
+  it("filter_wrappers_are_functions", () => {
+    for (const fn of [filterRun, filterCancel, docLinesAt]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("filter_error_codes_have_zh_text", () => {
+    // reused codes: invalid_pattern (compiled condition), unknown_request
+    // (filter_cancel stale id), invalid_argument (doc_lines_at over cap).
+    for (const code of ["invalid_pattern", "unknown_request", "invalid_argument"]) {
+      expect(IPC_ERROR_CODES).toContain(code);
+      expect(/[\u4e00-\u9fff]/.test(ipcErrorZh(code))).toBe(true);
     }
   });
 });

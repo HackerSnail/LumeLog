@@ -26,6 +26,11 @@
 **Why:** 过滤子集视图只渲染命中行，需按稀疏原始行号批量取文本（守 §3，不驻留全文）。`gather_lines` 逐行 `chunk_at(i,1)` 并按 `loadWindow` 同法去尾换行（`\n` 然 `\r`），与 `filter_run` 的 cu16 区间逐字符对齐；`indices.len()>MAX_CHUNK_LINES` → `invalid_argument`。
 **验证:** `cargo test -p lumelog-app` 23 pass（新 3 个 `gather_lines_*`：子集取回、CRLF 去尾、超 cap 拒）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端无改动。
 
+### Task 5. 前端 IPC 桥接（`ipc.ts`）
+**Files:** Modify `app/frontend/src/ipc.ts`（新增 5 个类型 `FilterCondition`/`Cu16Range`/`LineHit`/`FilterStats`/`IndexedText` + 3 个包装 `filterRun`（双 Channel、解为 req_id）/`filterCancel`/`docLinesAt`，均 camelCase 对齐 dto.rs）；Modify `app/frontend/src/ipc.test.ts`（+2 例：包装为函数、三复用错误码有中文）。
+**Why:** spec §4.3—镜像 `canParse` 双 Channel 形状；`invalid_pattern`/`unknown_request`/`invalid_argument` 已在既有联合与中文表，无需新增错误码。
+**验证:** `npm --prefix app/frontend test` 41 pass（ipc 7→9）+ `run build`（tsc 通过，41 modules）。
+
 ## 2026-10-25 — 收尾核查：修复 `main` 上 canpanel.ts 回归（build 断）
 
 **背景：** Plan 3 合入 main 后的全量回归核查。发现 `main`（merge `7d8c79b`）的 `app/frontend/src/canpanel.ts` 中 `onScroll` 调用 `this.paintNow()`，但 `paintNow()` 方法定义未写入——修复波后续提交 `90278a5` 当时只持久化了 onScroll 那一行、`render()`+`paintNow` 定义那半因编辑器保存间歇失败未落盘（当时“build 42 modules”为陈旧内存视图，非提交 blob），导致 `tsc` 报 TS2551（vitest 不跑 DOM 路径故未拦）。**验证发现：**`npm run build` 在 main 上失败。
