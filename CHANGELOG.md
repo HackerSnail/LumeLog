@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
+
+**依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。
+
+### Task 1. 后端 `keymap` 存储层
+**Files:** Create `app/src-tauri/src/keymap.rs`（`read_keymap`/`set_binding`/`reset_keymap` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod keymap;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
+**Why:** spec §4—`[keymap]` 表：缺失→默认、`""`→解绑、`set_binding(None)`→删键回默认；保留 `recovery_enabled`/`theme` 等其它配置键；删空表时不写空 `[keymap]`；坏 TOML 重建。
+**验证:** `cargo test -p lumelog-app keymap::` 7 pass（缺表/非串跳过、保留其它键、None 删键、删空表、`""` 解绑、reset 只删表、坏文本重建）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — 测试基建：jsdom DOM 单测
 
 **Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。

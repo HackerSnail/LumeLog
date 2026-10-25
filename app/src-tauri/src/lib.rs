@@ -6,6 +6,7 @@
 mod can_export;
 mod commands;
 mod dto;
+mod keymap;
 mod recovery;
 mod state;
 mod watch;
