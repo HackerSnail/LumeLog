@@ -26,6 +26,11 @@
 **Why:** spec §4；导出包装用 `path` 而非 `docId`，其余形状与现有 CAN 包装一致（双 Channel）。
 **验证:** `npm test` 89 pass（ipc 15→16）+ `run build` tsc 通过。
 
+### Task 5. `main.ts` BLF 视图
+**Files:** Modify `app/frontend/src/main.ts`（工具栏“打开 BLF…”；`BLF_KEY=-2`+`blfView`；`openBlfFile/startBlfParse`（重置 store、同步过滤器、`canParseBlf` 流式推入、统计/错误 toast、停止复用 `can_cancel`）；`switchCanView`/`applyFilterFromInputs` 按 BLF 视图键；行激活提示无源文本；切标签退出 BLF；导出按视图走 `exportBlf*`，默认名取 BLF 基名；解析按钮文案随视图切换）。
+**Why:** spec §4；复用 CanPanel/FrameStore/过滤器，不新增视图组件；坏文件 catch 后回到文档视图。
+**验证:** `run build` tsc 通过 + `npm test` 89 pass（DOM 交互留 GUI 手工）。
+
 ## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。
