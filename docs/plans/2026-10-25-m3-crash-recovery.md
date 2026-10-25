@@ -6,7 +6,7 @@
 
 **Architecture:** 后端 `app/src-tauri/src/recovery.rs` 纯存储层（首行 JSON meta + `\n` + 原文；`doc_key=FNV-1a64(path)`；tmp→rename）+ 4 命令（**全以 `path` 为键**，后端推 key）。前端 `recovery.ts` 提供 `Debouncer`（2s 按 docId 合并）+ `humanSize`/`formatSavedAt`；`main.ts` 在 `onDirty` 排影、`afterSave`/`handleClose`/`changeEncoding` 清理、启动 `recoveryList()` 显示 banner 并恢复/丢弃。
 
-**Tech Stack:** Rust（Tauri v2 `app.path().app_config_dir()`，零新依赖、FNV 手写、`serde_json` 已在）+ TypeScript 原生 DOM。门：`cargo test` / `cargo clippy --workspace --all-targets -- -D warnings` / `npm --prefix app/frontend test` / `run build`。
+**Tech Stack:** Rust（Tauri v2 `app.path().app_config_dir()`；新增 `toml`（仅 `config.toml` 的 `recovery_enabled`）；FNV 手写；`serde_json` 已在）+ TypeScript 原生 DOM。门：`cargo test` / `cargo clippy --workspace --all-targets -- -D warnings` / `npm --prefix app/frontend test` / `run build`。
 
 **Spec:** `docs/specs/2026-10-25-m3-crash-recovery-design.md`。承接 M1–M3（`doc_save` 原子写、`EditorHandle.getText()`（已存在）、`DocState{path,encoding,eol,mode}`、`afterSave`/`handleClose`/`changeEncoding`）。
 
@@ -16,6 +16,7 @@
 - 影子目录 `app_config_dir()/LumeLog/recovery/`；文件 `<doc_key>.lumelog` = 首行 JSON meta + `\n` + 原始 UTF-8 文本；`write_shadow` 用 `.tmp`→rename（不强制 fsync）。
 - 命令以 `path` 为键（前端不算 FNV）；`recovery_discard` 幂等；目录缺失 list→空。
 - 只读文档不写影子；恢复后文档必须**仍脏**；恢复即丢弃旧影子。
+- **最小配置开关**：`$APP_CONFIG/LumeLog/config.toml` 顶层 `recovery_enabled: bool`（缺失/坏→true）；`set_recovery_enabled` 保留其它键；禁用时 `recovery_save` no-op、`recovery_list` 空、前端不排影；禁用**不删**既有影子。新增 `toml` 依赖。
 - 逐任务 TDD；四门绿再提交；commit 前追加 `CHANGELOG.md`；commit 消息无空格；commit 后 push；分支 `--no-ff` 合 `main`。
 - 分支基：从 `main`（当前 `7e88a5f`，+ 本计划提交）新建 `feat/m3-crash-recovery`。
 
@@ -27,6 +28,7 @@
 4. **debounce 语义**：连发只写一次、`cancel` 后不再触发、按 docId 隔离；只脏编辑文档排影（只读不排）。
 5. **清理时机**：`afterSave`（含 Save-As 前旧 path + 新 path）、`handleClose`、`changeEncoding` 丢弃重载后都清影 + 清定时器。
 6. **恢复正确性**：原文件缺失→提示不删条目；恢复后 `docStates.encoding/eol` 取影子元数据且文档脏；恢复后旧影子被删。
+7. **配置开关**：缺文件/坏 TOML→默认开；写回保留其它键（如 `theme="dark"`）；禁用时 save no-op + list 空且既有影子保留；侧栏勾选失败回滚。
 
 ---
 
@@ -58,27 +60,31 @@
 
 ---
 
-## Task 2: 四命令 + 注册
+## Task 2: 存储命令 + 最小配置命令 + 注册
 
 **Files:**
-- Modify: `app/src-tauri/src/commands.rs`（`recovery_dir(app)->Result<PathBuf,IpcError>` + `recovery_save/list/load/discard`）
-- Modify: `app/src-tauri/src/lib.rs`（注册 4 命令）
-- Modify: `app/src-tauri/src/recovery.rs`（剥模块 `#![allow(dead_code)]`）
-- Test: `commands.rs`（`recovery_cmd_tests`：DTO camelCase、`recovery_dir` 拼接）
+- Modify: `app/src-tauri/src/commands.rs`（`recovery_dir(app)` + `config_path(app)` + `recovery_save/list/load/discard` + `recovery_enabled`/`recovery_set_enabled`）
+- Modify: `app/src-tauri/src/recovery.rs`（新增 `read_recovery_enabled(text)`/`set_recovery_enabled(text,enabled)->String` 纯函数 + 单测；剥模块 `#![allow(dead_code)]`）
+- Modify: `app/src-tauri/Cargo.toml`（`toml = "0.8"`）
+- Modify: `app/src-tauri/src/lib.rs`（注册 6 命令）
+- Test: `commands.rs`（`recovery_cmd_tests`：DTO camelCase）；`recovery.rs`（配置纯函数）
 
 **Interfaces:**
-- `fn recovery_dir(app:&AppHandle) -> Result<PathBuf,IpcError>`：`app.path().app_config_dir()`→join `"LumeLog"`/`"recovery"`，`io` 错误映射。
-- `#[tauri::command] recovery_save(app, path:String, encoding:String, eol:String, text:String) -> Result<(),IpcError>`
-- `#[tauri::command] recovery_list(app) -> Result<Vec<recovery::RecoveryEntry>,IpcError>`
-- `#[tauri::command] recovery_load(app, path:String) -> Result<recovery::RecoveryContent,IpcError>`
-- `#[tauri::command] recovery_discard(app, path:String) -> Result<(),IpcError>`
-- 均同步命令（无重活，文本大时也仅一次写/读；不 spawn）。
+- `fn recovery_dir(app:&AppHandle) -> Result<PathBuf,IpcError>`：`app_config_dir()`→`LumeLog`/`recovery`。
+- `fn config_path(app:&AppHandle) -> Result<PathBuf,IpcError>`：`app_config_dir()`→`LumeLog`/`config.toml`。
+- `pub fn read_recovery_enabled(text:&str)->bool`（`toml::from_str::<toml::Table>`；取 `recovery_enabled` 为 bool，否则 true）。
+- `pub fn set_recovery_enabled(text:&str, enabled:bool)->String`（解析失败→仅写该键；成功→改键后 `to_string_pretty`）。
+- `#[tauri::command] recovery_save(app, path, encoding, eol, text)`（禁用时 no-op Ok）
+- `#[tauri::command] recovery_list(app)`（禁用时 `Ok(vec![])`）
+- `#[tauri::command] recovery_load(app, path)` / `recovery_discard(app, path)`
+- `#[tauri::command] recovery_enabled(app) -> Result<bool,IpcError>` / `recovery_set_enabled(app, enabled:bool) -> Result<(),IpcError>`（读→改→create_dir_all+写）
+- 均同步命令（无重活）。
 
-- [ ] **Step 1：写失败测试**：`recovery_entry_camel_case`（`serde_json::to_value(RecoveryEntry)` 键 `savedAtMs/sizeBytes` + `path/encoding/eol`）；`recovery_content_camel_case`。
-- [ ] **Step 2：** `cargo test -p lumelog-app recovery_cmd` → FAIL。
-- [ ] **Step 3：实现** `recovery_dir` + 4 命令（`recovery_save` 构造 `RecoveryMeta` 取当前 ms；`list` 调 `list_shadows`；`load` 组装 `RecoveryContent`；`discard` 调 `discard_shadow`）；`lib.rs` 注册；剥 recovery 模块 allow。
-- [ ] **Step 4：** `cargo test -p lumelog-app` PASS + `cargo clippy --workspace --all-targets -- -D warnings` 净。
-- [ ] **Step 5：** CHANGELOG；commit `feat:recovery-commands` + push。
+- [ ] **Step 1：写失败测试**：`recovery_entry_camel_case`/`recovery_content_camel_case`；`cfg_default_true_when_missing_or_bad`（`""`/坏文本→true）；`cfg_set_preserves_other_keys`（`theme="dark"` 保留 + 新键 false + 幂等）；`cfg_set_on_bad_text_rewrites`。
+- [ ] **Step 2：** `cargo test -p lumelog-app recovery` → FAIL。
+- [ ] **Step 3：实现** 上述函数/命令（`set` 路径 `fs::read_to_string` 容错缺失为空串→改→写；`recovery_save` 开头 `if !read_recovery_enabled(现有配置文本) { return Ok(()) }`）；Cargo.toml 加 `toml`；`lib.rs` 注册；剥 recovery 模块 allow。
+- [ ] **Step 4：** `cargo test -p lumelog-app` PASS + `cargo clippy --workspace --all-targets -- -D warnings` 净（`Cargo.lock` 随本提交）。
+- [ ] **Step 5：** CHANGELOG；commit `feat:recovery-commands-and-config` + push。
 
 ---
 
@@ -97,8 +103,8 @@
 ## Task 4: `ipc.ts` 桥
 
 **Files:** Modify `app/frontend/src/ipc.ts`；Test `ipc.test.ts`
-**Interfaces:** `RecoveryEntry{path,encoding,eol,savedAtMs,sizeBytes}`、`RecoveryContent{path,encoding,eol,text}`；`recoverySave(args:{path,encoding,eol,text})`、`recoveryList():Promise<RecoveryEntry[]>`、`recoveryLoad(path:string):Promise<RecoveryContent>`、`recoveryDiscard(path:string):Promise<void>`。
-- [ ] **Step 1：写失败测试**：四函数 typeof；`recoverySave` mock invoke 断言 payload 键（`path/encoding/eol/text`）；`recoveryLoad/recoveryDiscard` 传 `{path}`。
+**Interfaces:** `RecoveryEntry{path,encoding,eol,savedAtMs,sizeBytes}`、`RecoveryContent{path,encoding,eol,text}`；`recoverySave(args:{path,encoding,eol,text})`、`recoveryList():Promise<RecoveryEntry[]>`、`recoveryLoad(path:string):Promise<RecoveryContent>`、`recoveryDiscard(path:string):Promise<void>`、`recoveryEnabled():Promise<boolean>`、`recoverySetEnabled(enabled:boolean):Promise<void>`。
+- [ ] **Step 1：写失败测试**：六函数 typeof；`recoverySave` mock invoke 断言 payload 键（`path/encoding/eol/text`）；`recoveryLoad/recoveryDiscard` 传 `{path}`；`recoverySetEnabled` 传 `{enabled}`。
 - [ ] **Step 2：** FAIL → **Step 3：实现** → **Step 4：** PASS + build → **Step 5：** CHANGELOG；commit `feat:ipc-recovery-bridge` + push。
 
 ---
@@ -106,7 +112,7 @@
 ## Task 5: `main.ts` 排影 + 清理
 
 **Files:** Modify `app/frontend/src/main.ts`
-**Interfaces:** 复用 `editors`/`docStates`/`afterSave`/`handleClose`/`changeEncoding`；新增 `const recoveryDebounce = new Debouncer(2000, fireRecovery)`；`function scheduleRecovery(docId:number)`（handle 脏才 schedule）；`function cancelRecovery(docId:number, path:string)`（cancel + `recoveryDiscard(path).catch`）。
+**Interfaces:** 复用 `editors`/`docStates`/`afterSave`/`handleClose`/`changeEncoding`；新增 `let recoveryOn = true`（启动由配置回填）；`const recoveryDebounce = new Debouncer(2000, fireRecovery)`；`function scheduleRecovery(docId:number)`（`recoveryOn` 且 handle 脏才 schedule）；`function cancelRecovery(docId:number, path:string)`（cancel + `recoveryDiscard(path).catch`）。
 - [ ] **Step 1：实现**：
   - `mountDoc` 的 `onDirty` 回调追加 `scheduleRecovery(info.docId)`（在 `tabs.refreshDirty` 之后）。
   - `fireRecovery(docId)`：取 `ds=docStates.get`、`h=editors.get`；缺或 `!h.isDirty()` 则 return；`recoverySave({path:ds.path,encoding:ds.encoding,eol:ds.eol,text:h.getText()}).catch(() => {/* best-effort，状态栏一次提示可省 */})`。
@@ -118,13 +124,13 @@
 
 ---
 
-## Task 6: 启动横幅 + 恢复/丢弃
+## Task 6: 侧栏勾选框 + 启动横幅 + 恢复/丢弃
 
-**Files:** Modify `app/frontend/src/main.ts`（`checkRecovery()` + banner DOM + `restoreRecovery`）、`app/frontend/src/styles.css`（`.recovery-banner`）
-**Interfaces:** 启动在 `appPing` 之后调 `void checkRecovery()`；`recoveryList()` 非空→渲染 `.recovery-banner`（标题 + 列表：`basenameOf(path)` 尾段、`formatSavedAt(savedAtMs)`、`humanSize(sizeBytes)`、每行"恢复"/"丢弃" + "全部丢弃" + 关闭）。恢复：`docOpen(entry.path)`→`recoveryLoad(entry.path)`→`editors.get(docId)!.replaceText(content.text)`→`ds.encoding=content.encoding; ds.eol=content.eol`；`recoveryDiscard(entry.path)`；移除行；空则移除 banner。打开失败（IpcError）→`toastMsg("原文件已缺失，无法恢复：…")` 且**不删条目**。
-- [ ] **Step 1：实现** `checkRecovery`/`buildRecoveryBanner`/`restoreOne`/`discardOne`/`discardAll` + CSS（固定右下/顶部条，`role="status"`、可滚动列表、按钮复用 `.btn` 风格）。
+**Files:** Modify `app/frontend/src/main.ts`（侧栏 `.side-option` 复选框 + `checkRecovery()` + banner DOM + `restoreOne`）、`app/frontend/src/styles.css`（`.side-option` / `.recovery-banner`）
+**Interfaces:** 侧栏在 `aside.append(asideTitle, sidebarListEl, ...)` 追加 `<label class="side-option"><input type="checkbox" id="recovery-enabled"> 崩溃恢复</label>`；启动 `recoveryEnabled()`→`recoveryOn` 回填勾选（失败→true）；change→`recoverySetEnabled(v)` 成功则 `recoveryOn=v`（关时 `recoveryDebounce.cancelAll()`），失败→回滚勾选 + toast。`appPing` 之后：若 `recoveryOn` 则 `void checkRecovery()`；`recoveryList()` 非空→渲染 `.recovery-banner`（标题 + 列表：`basenameOf` 尾段、`formatSavedAt`、`humanSize`、每行"恢复"/"丢弃" + "全部丢弃" + 关闭）。恢复：`docOpen(entry.path)`→`recoveryLoad(entry.path)`→`editors.get(docId)!.replaceText(content.text)`→`ds.encoding=content.encoding; ds.eol=content.eol`；`recoveryDiscard(entry.path)`；移除行；空则移除 banner。打开失败（IpcError）→`toastMsg("原文件已缺失，无法恢复：…")` 且**不删条目**。
+- [ ] **Step 1：实现** 侧栏勾选框 + `checkRecovery`/`buildRecoveryBanner`/`restoreOne`/`discardOne`/`discardAll` + CSS（`.side-option` 小号复选框；banner 固定条、`role="status"`、列表可滚动、按钮复用 `.btn`）。
 - [ ] **Step 2：** `npm test` 不回归 + `run build` tsc PASS。
-- [ ] **Step 3：** CHANGELOG；commit `feat:recovery-banner-restore` + push。
+- [ ] **Step 3：** CHANGELOG；commit `feat:recovery-toggle-and-banner` + push。
 
 ---
 
@@ -141,5 +147,5 @@
 - `EditorHandle.getText()` 已存在（`app/frontend/src/editor.ts:35`），无需改 editor。
 - 命令以 `path` 为键（spec 已按此修订）：前端不实现 FNV；`afterSave` 新增 `prevPath` 参数（Save-As 前旧 path 也要清影）。
 - 影子写失败 best-effort：不弹模态、不中断编辑；下一次停输重试。
-- `recovery_enabled`/`config.toml` 不在本增量（spec Ruling，v1 恒开）。
+- 最小配置开关（`config.toml` `recovery_enabled` + 侧栏勾选）：本增量交付；其余配置键不做。禁用不删既有影子（重开后可恢复）。
 - 恢复后用影子 `encoding/eol` 覆盖 `DocState`，使后续保存按原编码/行尾落盘；`replaceText` 触发 `onDirty` 保证"恢复后仍脏"。

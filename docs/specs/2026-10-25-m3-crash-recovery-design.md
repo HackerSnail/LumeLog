@@ -6,11 +6,11 @@
 
 **Architecture:** 后端 `lumelog-app` 新增 `recovery` 模块（路径 `app_config_dir()/LumeLog/recovery`，每文档一影子 `<doc_key>.lumelog`：首行 JSON 元数据 + `\n` + 原始 UTF-8 文本；`doc_key = FNV-1a64(path)` hex；tmp→rename 覆盖），四命令 `recovery_save/list/load/discard`。前端 `main.ts` 每 docId 一个 2s debounce（`onDirty` 且编辑器脏时重置；到点取 `handle.getText()` + `ds.encoding/eol` 调 `recovery_save`），启动后 `recovery_list()` 非空则显示固定横幅列表；恢复=打开原文件→`replaceText(shadow)`→套影子 encoding/eol→标脏→丢弃旧影子。保存成功与关闭丢弃时 `recovery_discard`。
 
-**Tech Stack:** Rust（Tauri v2 `app.path().app_config_dir()`；无新 crate：FNV-1a 手写）、TypeScript 原生 DOM。门：`cargo test`、`cargo clippy --workspace --all-targets -- -D warnings`、`npm test`、`run build`。
+**Tech Stack:** Rust（Tauri v2 `app.path().app_config_dir()`；新增 `toml`（仅读/写 `config.toml` 的 `recovery_enabled`）；FNV-1a 手写）+ TypeScript 原生 DOM。门：`cargo test`、`cargo clippy --workspace --all-targets -- -D warnings`、`npm test`、`run build`。
 
 ## 1. 范围与非目标
-- 做：编辑模式脏文档影子（2s 节流、全量文本、编码/行尾元数据）；启动单列表横幅 + 恢复/丢弃（含"全部丢弃"）；恢复回填并保持脏；保存/丢弃生命周期清理；后端四命令 + 可测的存储层。
-- 不做：外部修改监听（B2）；`config.toml` 配置系统与 `recovery_enabled`（v1 恒开，见 §11 Ruling）；只读文档恢复（spec：只读无可恢复内容）；恢复多版本/历史（只保留最新一次影子）。
+- 做：编辑模式脏文档影子（2s 节流、全量文本、编码/行尾元数据）；启动单列表横幅 + 恢复/丢弃（含“全部丢弃”）；恢复回填并保持脏；保存/丢弃生命周期清理；后端四命令 + 可测的存储层；**最小配置开关** `config.toml` 的 `recovery_enabled` 单键 + 侧栏勾选框。
+- 不做：外部修改监听（B2）；完整 `config.toml` 配置系统（只做 `recovery_enabled` 单键，其余键留待后续）；只读文档恢复（spec：只读无可恢复内容）；恢复多版本/历史（只保留最新一次影子）。
 
 ## 2. 存储格式（后端）
 - 目录：`app_config_dir()/LumeLog/recovery/`，命令首次使用时 `create_dir_all`。
@@ -27,12 +27,19 @@
 - `recovery_discard(path:String) -> Result<(),IpcError>`：删除；不存在视为成功（幂等）。
 - 纯逻辑（可测）：`fn fnv1a64(bytes:&[u8])->u64`、`fn doc_key(path:&str)->String`（16 位小写 hex）、`fn shadow_path(dir:&Path, path:&str)->PathBuf`、`fn write_shadow(dir:&Path, meta:&RecoveryMeta, text:&str)->io::Result<()>`、`fn read_shadow(dir:&Path, path:&str)->io::Result<(RecoveryMeta,String)>`、`fn list_shadows(dir:&Path)->Vec<RecoveryEntry>`（损坏跳过）、`fn discard_shadow(dir:&Path, path:&str)`（幂等）。命令薄壳用 `app.path().app_config_dir()` 拼 `LumeLog/recovery`。
 
+### 3.1 最小配置开关（`config.toml`）
+- 文件 `$APP_CONFIG/LumeLog/config.toml`，顶层 `recovery_enabled: bool`；缺失/解析失败→视为 `true`（默认开启）。
+- 纯逻辑：`fn read_recovery_enabled(text:&str)->bool`（`toml` 解析，缺失/坏→true）、`fn set_recovery_enabled(text:&str, enabled:bool)->String`（保留其它键：`toml::Table` 读→改键→`toml::to_string_pretty`；原文本坏则重写为仅该键）。
+- 命令：`recovery_enabled() -> Result<bool,IpcError>`、`recovery_set_enabled(enabled:bool) -> Result<(),IpcError>`（读→改→写，`create_dir_all`）。
+- 禁用时行为：`recovery_save` **no-op Ok**（防御）；`recovery_list` 返回空（不显示横幅）；**既有影子不删**（重新开启后可恢复）；前端也不排定时器。
+
 ## 4. 前端（`main.ts`）
-- **节流**：`const recoveryTimers = new Map<number, number>()`。在 `mountDoc` 的 `onDirty` 回调里：先 `tabs.refreshDirty(docId)`（保留），若 `editors.has(docId)` 且该 handle `isDirty()` → 清并重置 `setTimeout(2000)`；到点 `recovery_save(ds.path, ds.encoding, ds.eol, handle.getText()).catch(...)`（失败仅 `status`/toast 提示一次，不阻塞）。
+- **节流**：`const recoveryDebounce = new Debouncer(2000, fireRecovery)`（`recovery.ts`，按 docId 合并）。在 `mountDoc` 的 `onDirty` 回调里：先 `tabs.refreshDirty(docId)`（保留），若 `editors` 有该 doc 且 handle `isDirty()` 且开关开启 → `recoveryDebounce.schedule(docId)`；到点 `recovery_save(ds.path, ds.encoding, ds.eol, handle.getText()).catch(...)`（失败仅 `status`/toast 提示一次，不阻塞）。
 - **清理**：保存成功（`afterSave` 内，Save-As 前后 path 都清）→ `recovery_discard(path)` + 清定时器；`handleClose` 用户选择丢弃/保存后关闭 → 同样清理；`changeEncoding` 丢弃脏改动重载后（内容回到磁盘态）也清定时器并 `recovery_discard`。
 - **启动**：`layout()` 完成、`appPing` 之后 `recovery_list()`；非空 → 右上/底部固定**横幅**：`发现 N 个未保存恢复项` + 展开列表（`path` 尾部 + `savedAtMs` 本地时间 + `sizeBytes` 人类可读）每行"恢复"/"丢弃"，另有"全部丢弃"。横幅用原生 DOM（复用现有 `.banner`/`toast` 样式或新增 `.recovery-banner`）；不阻塞交互。
 - **恢复**：点“恢复”→ `docOpen(entry.path)`（走既有打开流程；`unknown`/不存在→该项提示“原文件已缺失，无法恢复”，保留条目让用户显式丢弃）；成功→用 `recovery_load(entry.path)` 取文本→`editors.get(docId)!.replaceText(content.text)`→`docStates.encoding/eol = meta`→保证脏标记（`replaceText` 已触发 `onDirty`）→`recovery_discard(entry.path)`→从横幅移除该项。
 - **丢弃**：`recovery_discard(entry.path)` 后移除；全部丢弃清空横幅。
+- **开关 UI**：侧栏（`aside`）底部新增 `.side-option` 复选框“崩溃恢复”（`#recovery-enabled`）。启动时 `recoveryEnabled()` 回填（失败→勾上，默认开）；变更时 `recoverySetEnabled(v)`（失败→回滚勾选 + toast），并在关闭时 `recoveryDebounce.cancelAll()`；关闭状态不排新影、不显示横幅。
 - 只读文档：`editors` 无该项 → 不排定时器、不写影子。
 
 ## 5. 错误 / 边界
@@ -51,18 +58,19 @@
 - `discard` 删除且幂等。
 **前端：**
 - 抽 `recovery.ts` 纯 helper（`humanSize(bytes)`、`formatSavedAt(ms)`、debounce 调度器）→ vitest。至少测 debounce 调度器（fake timers：连发只写一次、清定时器不写）与 `humanSize`/时间格式边界。
-- `ipc.ts` 四包装 typeof + 参数透传 camelCase（均以 `path` 为键）。
+- `ipc.ts` 四包装 typeof + 参数透传 camelCase（均以 `path` 为键）+ `recoveryEnabled`/`recoverySetEnabled`。
+- 配置：`read_recovery_enabled` 缺失/坏文本→true；`set_recovery_enabled` 保留不相关键（如 `theme="dark"`）且幂等；真写盘后再读回一致。
 **GUI 手工（`tauri dev`）：**编辑脏文档→停 2s→`recovery/` 出现影子；`kill -9` 重启→横幅列出→恢复→文本回填且仍脏→保存后影子消失；丢弃→影子删；只读文档不产影子；坏影子被跳过。
 
 ## 7. 全局约束（沿用）
 简体中文 UI；DTO camelCase + Option `skip_serializing_if`；命令驼峰↔下划线自动；逐任务 TDD；四门绿再提交；commit 前追加 CHANGELOG；无空格 commit 消息；commit 后 push；分支 `--no-ff` 合 main。
 
 ## 8. 分期（计划切分预告）
-① 后端 `recovery` 存储层（fnv1a64/write/read/list/discard + 单测）→ ② 四命令 + DTO + 注册 + `app_config_dir` 解析 → ③ 前端 `recovery.ts` 调度器 + 测 → ④ `ipc.ts` 桥 + 测 → ⑤ `main.ts` 接节流/保存/关闭清理 → ⑥ 启动横幅 + 恢复/丢弃流程（含样式）→ ⑦ 收尾四门 + 终审 + 合 main。
+① 后端 `recovery` 存储层（fnv1a64/write/read/list/discard + 单测）+ 最小配置读写（`read/set_recovery_enabled` + 单测，加 `toml`）→ ② 四 recovery 命令 + 两个配置命令 + DTO + 注册 + `app_config_dir` 解析 → ③ 前端 `recovery.ts` 调度器 + 测 → ④ `ipc.ts` 桥 + 测 → ⑤ `main.ts` 接节流/保存/关闭清理 + 启用门控 → ⑥ 侧栏勾选框 + 启动横幅 + 恢复/丢弃流程（含样式）→ ⑦ 收尾四门 + 终审 + 合 main。
 
 ## 9. 关键取舍（已定案）
-- 影子格式：首行 JSON meta + 余下原文（避免大文本 JSON 转义）；`doc_key` 用 FNV-1a64 hex（稳定、零新依赖），不用 sha256。
+- 影子格式：首行 JSON meta + 余下原文（避免大文本 JSON 转义）；`doc_key` 用 FNV-1a64 hex（FNV 自身零依赖），不用 sha256。
 - 启动 UX：单列表横幅（你选），非逐个 `ask`；不阻塞启动。
 - 恢复后即丢弃旧影子（编辑器下次停输重写），避免"陈旧双份"。
-- `recovery_enabled` 开关与 `config.toml` 系统**不在本增量**：v1 恒开；启用即写影子。**Ruling**：主 spec §10 的开关随配置系统（未来）交付，本增量不造半成品配置层。
+- **最小配置开关**（你选）：只实现 `config.toml` 的 `recovery_enabled` 单键 + 侧栏勾选框；其余配置系统（主题/快捷键/阈值）不在本增量。新增 `toml` 依赖仅用于该键的读/写（保留其它键）。禁用时既有影子保留、可重开后恢复。
 - 影子文本恒 UTF-8/LF；`encoding`/`eol` 仅元数据，恢复后按原值保存。
