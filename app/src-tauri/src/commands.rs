@@ -518,6 +518,96 @@ fn parse_frames(
     (s.decoded, s.skipped)
 }
 
+/// Validate a CAN source request synchronously (spec §9): reject an unknown
+/// `kind`, a `regex` source with no pattern, and an uncompilable pattern — all
+/// before any worker/scan so a bad request rejects the promise rather than
+/// streaming zero frames. Shared by `can_parse` and the CAN export commands.
+pub(crate) fn validate_source_kind_regex(
+    kind: &str,
+    regex: &Option<String>,
+) -> Result<(), IpcError> {
+    match kind {
+        "candump" | "asc" => Ok(()),
+        "regex" => match regex {
+            Some(p) => RegexSource::new(std::iter::empty::<Line>(), p)
+                .map(|_| ())
+                .map_err(IpcError::from_can),
+            None => Err(IpcError::new("bad_regex", "regex source requires a pattern")),
+        },
+        other => Err(IpcError::new(
+            "source_format",
+            format!("unknown source kind '{other}'"),
+        )),
+    }
+}
+
+/// Build a `FrameSource` over `lines` for the given source kind. `validate_source_kind_regex`
+/// must have run first (the regex is compile-checked there). Created and consumed
+/// entirely on one blocking thread, so the returned `Box<dyn FrameSource>` never
+/// needs to be `Send`. Shared by `can_parse` and the export commands.
+pub(crate) fn build_frame_source(
+    kind: &str,
+    regex: &Option<String>,
+    lines: DocLines,
+) -> Result<Box<dyn FrameSource>, IpcError> {
+    match kind {
+        "asc" => Ok(Box::new(AscSource::new(lines))),
+        "regex" => {
+            let pat = regex
+                .as_ref()
+                .ok_or_else(|| IpcError::new("bad_regex", "regex source requires a pattern"))?;
+            Ok(Box::new(
+                RegexSource::new(lines, pat).map_err(IpcError::from_can)?,
+            ))
+        }
+        "candump" => Ok(Box::new(CandumpSource::new(lines))),
+        other => Err(IpcError::new(
+            "source_format",
+            format!("unknown source kind '{other}'"),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod source_validation_tests {
+    use super::*;
+
+    #[test]
+    fn candump_and_asc_ok() {
+        assert!(validate_source_kind_regex("candump", &None).is_ok());
+        assert!(validate_source_kind_regex("asc", &None).is_ok());
+    }
+
+    #[test]
+    fn regex_needs_pattern() {
+        let err = validate_source_kind_regex("regex", &None).unwrap_err();
+        assert_eq!(err.code, "bad_regex");
+    }
+
+    #[test]
+    fn regex_valid_pattern_ok() {
+        // RegexSource requires the `id` and `data` named groups; a complete
+        // pattern must validate.
+        assert!(
+            validate_source_kind_regex("regex", &Some(r"(?<id>[0-9A-Fa-f]+)#(?<data>[0-9A-Fa-f]+)".to_string()))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn regex_invalid_pattern_rejected() {
+        // "(" is an invalid regex; the code comes from lumelog-can's error map
+        // (bad_regex / regex_compile) — assert it's a rejection, not a specific code.
+        assert!(validate_source_kind_regex("regex", &Some("(".to_string())).is_err());
+    }
+
+    #[test]
+    fn unknown_kind_rejected() {
+        let err = validate_source_kind_regex("xyz", &None).unwrap_err();
+        assert_eq!(err.code, "source_format");
+    }
+}
+
 /// Stream a CAN decode of `doc_id` over `on_batch` (spec §9 `can_parse`). Returns
 /// the job id used to `can_cancel` BEFORE the scan runs: the command's synchronous
 /// prologue only validates the request, then hands the heavy decode to a blocking
@@ -550,31 +640,7 @@ pub fn can_parse(
     };
     // Validate the request synchronously before spawning: a bad source kind or an
     // uncompilable pattern must reject the promise, not stream zero frames.
-    let pattern = match source_kind.as_str() {
-        "candump" | "asc" => None,
-        "regex" => match &regex {
-            Some(p) => Some(p.clone()),
-            None => {
-                return Err(fail(IpcError::new(
-                    "bad_regex",
-                    "regex source requires a pattern",
-                )))
-            }
-        },
-        other => {
-            return Err(fail(IpcError::new(
-                "source_format",
-                format!("unknown source kind '{other}'"),
-            )))
-        }
-    };
-    if let Some(p) = &pattern {
-        // Compile-check via a throwaway source over an empty stream: surfaces
-        // `bad_regex`/`regex_compile` now rather than inside the worker.
-        if let Err(e) = RegexSource::new(std::iter::empty::<Line>(), p) {
-            return Err(fail(IpcError::from_can(e)));
-        }
-    }
+    validate_source_kind_regex(&source_kind, &regex).map_err(fail)?;
     let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
     // `AppHandle` is `'static` + `Clone`, so the worker can re-fetch the managed
     // `AppDocs` to `end_search` when it finishes (a borrowed `State<'_>` cannot
@@ -584,11 +650,7 @@ pub fn can_parse(
         let lines = DocLines::new(doc_arc);
         // The `Box<dyn FrameSource>` is created and consumed entirely on this one
         // blocking thread, so it never needs to be `Send` across the boundary.
-        let mut src: Box<dyn FrameSource> = match kind.as_str() {
-            "asc" => Box::new(AscSource::new(lines)),
-            "regex" => Box::new(RegexSource::new(lines, &pattern.expect("validated above")).expect("regex compiled above")),
-            _ => Box::new(CandumpSource::new(lines)),
-        };
+        let mut src = build_frame_source(&kind, &regex, lines).expect("validated in prologue");
         let db = db_arc.as_deref();
         let mut emit = |batch: Vec<FrameJson>| {
             // A send error means the front end detached; the per-frame
