@@ -11,6 +11,11 @@
 **Why:** spec §2—`classify` 用式样：`disk==snapshot`→None（自我写入/无变化）、`None`→Removed、否则 Changed；监视单位=父目录，同目录 refcount 归零才停；裸文件名退化为 `.`。
 **验证:** `cargo test -p lumelog-app watch::` 7 pass（等值忽略/size或mtime变/缺失/同目录只 watch 一次/refcount 归零/相对名 `.`/事件 lowercase 往返）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 2. `AppWatch` 运行态 + 订阅 + 文档生命周期挂钩
+**Files:** Modify `app/src-tauri/src/watch.rs`（`WatchStatus`、`Inner`、`AppWatch{start/watch_path/unwatch_path/retarget}`、`debounce_loop`（Condvar 500ms 静默窗）、`WatchRegistry::dirs`）；Modify `state.rs`（`snapshot_for_path` + 测）；Modify `commands.rs`（`watch_subscribe`/`watch_retarget`；`doc_open` 成功后 `watch_path`、`doc_close` 前 `unwatch_path`）；Modify `lib.rs`（manage `AppWatch` + 注册 2 命令）；Modify `Cargo.toml`（`notify="6"`）+ `Cargo.lock`。
+**Why:** spec §2。watcher 回调只入 `pending` 并唤醒；去抖线程等首个事件后持续等到 500ms 无新事件才 drain；drain 时按 `snapshot_for_path` 逐 doc `classify`（Removed 优先、每 path 只发一条）；watcher 创建失败→`degraded` 不阻塞。
+**验证:** `cargo test -p lumelog-app` 76 pass（+2：`snapshot_for_path` 同 path 两 doc/未知 path；`watch_status_starts_not_degraded`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（notify 6.1.1 编译通过）。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。

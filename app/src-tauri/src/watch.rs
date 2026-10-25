@@ -1,15 +1,21 @@
-//! External-file watch bookkeeping (spec §4.4/A10, M3 子项目 B2). This is the
-//! pure half: deciding whether a disk change is real (vs. our own save) and
-//! tracking which parent directories need a `notify` watch. The runtime
-//! (watcher + 500ms debounce thread + channel) lives below once commands wire it
-//! up (Task 2).
-#![allow(dead_code)] // consumed by the AppWatch runtime (Task 2)
+//! External-file watch bookkeeping (spec §4.4/A10, M3 子项目 B2): deciding
+//! whether a disk change is real (vs. our own save), tracking parent-directory
+//! watches, and the runtime watcher + 500 ms quiet-window debounce thread that
+//! turns `notify` events into `ExternalEvent`s for the front end.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, SystemTime};
 
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager};
+
+use crate::state::AppDocs;
 
 /// What a watched path's on-disk state means for an open document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +86,11 @@ impl WatchRegistry {
     pub fn tracked(&self, path: &Path) -> bool {
         self.paths.contains(path)
     }
+
+    /// Directories currently watched (used to replay them into a new watcher).
+    pub fn dirs(&self) -> Vec<PathBuf> {
+        self.dirs.keys().cloned().collect()
+    }
 }
 
 /// The directory to watch: the file's parent, falling back to `.` for a bare
@@ -96,6 +107,200 @@ fn parent_dir(path: &Path) -> PathBuf {
 pub struct ExternalEvent {
     pub path: String,
     pub kind: ExternalKind,
+}
+
+/// Subscription result: a non-`None` reason means watching degraded to
+/// save-time-only checks (the app still works, the status bar says so).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchStatus {
+    pub degraded: Option<String>,
+}
+
+/// Debounce window: emit only after this much quiet.
+const DEBOUNCE: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct Inner {
+    watcher: Option<RecommendedWatcher>,
+    registry: WatchRegistry,
+    channel: Option<Channel<ExternalEvent>>,
+    pending: HashSet<PathBuf>,
+    degraded: Option<String>,
+    stop: bool,
+}
+
+/// App-managed runtime: one directory watcher and one debounce thread per app.
+pub struct AppWatch {
+    shared: Arc<(Mutex<Inner>, Condvar)>,
+    started: AtomicBool,
+}
+
+impl Default for AppWatch {
+    fn default() -> Self {
+        Self {
+            shared: Arc::new((Mutex::new(Inner::default()), Condvar::new())),
+            started: AtomicBool::new(false),
+        }
+    }
+}
+
+impl AppWatch {
+    /// Bind the event channel, create the watcher (once), and start the debounce
+    /// thread (once). A watcher that cannot be created degrades to save-time
+    /// checks only — it never fails this call.
+    pub fn start(&self, app: &AppHandle, channel: Channel<ExternalEvent>) -> WatchStatus {
+        let (lock, _cv) = &*self.shared;
+        let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
+        inner.channel = Some(channel);
+        if inner.watcher.is_none() {
+            let shared = self.shared.clone();
+            let handler = move |res: notify::Result<notify::Event>| {
+                let Ok(ev) = res else { return };
+                let (l, cv) = &*shared;
+                let mut g = l.lock().unwrap_or_else(|p| p.into_inner());
+                let mut any = false;
+                for p in ev.paths {
+                    if g.registry.tracked(&p) {
+                        g.pending.insert(p);
+                        any = true;
+                    }
+                }
+                drop(g);
+                if any {
+                    cv.notify_all();
+                }
+            };
+            match RecommendedWatcher::new(handler, notify::Config::default()) {
+                Ok(mut w) => {
+                    for dir in inner.registry.dirs() {
+                        if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
+                            inner.degraded = Some(format!("文件监听不可用：{e}"));
+                        }
+                    }
+                    inner.watcher = Some(w);
+                }
+                Err(e) => inner.degraded = Some(format!("文件监听不可用：{e}")),
+            }
+        }
+        let status = WatchStatus {
+            degraded: inner.degraded.clone(),
+        };
+        drop(inner);
+        if !self.started.swap(true, Ordering::SeqCst) {
+            let app = app.clone();
+            let shared = self.shared.clone();
+            std::thread::spawn(move || debounce_loop(app, shared));
+        }
+        status
+    }
+
+    /// Track `path` (a document opened). Safe before `start`: the registry keeps
+    /// the directory and `start` replays it into the fresh watcher.
+    pub fn watch_path(&self, path: &Path) {
+        let (lock, _cv) = &*self.shared;
+        let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(dir) = inner.registry.watch(path) {
+            if let Some(w) = inner.watcher.as_mut() {
+                if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
+                    inner.degraded = Some(format!("文件监听不可用：{e}"));
+                }
+            }
+        }
+    }
+
+    /// Stop tracking `path` (a document closed). Stops the directory watch once
+    /// its last document is gone.
+    pub fn unwatch_path(&self, path: &Path) {
+        let (lock, _cv) = &*self.shared;
+        let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(dir) = inner.registry.unwatch(path) {
+            if let Some(w) = inner.watcher.as_mut() {
+                let _ = w.unwatch(&dir);
+            }
+        }
+    }
+
+    /// Save-As moved a document: unwatch the old path, watch the new one.
+    pub fn retarget(&self, old: &Path, new: &Path) {
+        if old == new {
+            return;
+        }
+        self.unwatch_path(old);
+        self.watch_path(new);
+    }
+
+    /// Current degradation state (test-only: the command returns it from `start`).
+    #[cfg(test)]
+    pub fn status(&self) -> WatchStatus {
+        let (lock, _cv) = &*self.shared;
+        let inner = lock.lock().unwrap_or_else(|p| p.into_inner());
+        WatchStatus {
+            degraded: inner.degraded.clone(),
+        }
+    }
+}
+
+/// Wait for pending events, then for 500 ms of silence, then classify each path
+/// against the open docs' `(size, mtime)` and emit one event per path.
+fn debounce_loop(app: AppHandle, shared: Arc<(Mutex<Inner>, Condvar)>) {
+    let (lock, cv) = &*shared;
+    loop {
+        let (batch, channel) = {
+            let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
+            while inner.pending.is_empty() && !inner.stop {
+                inner = cv.wait(inner).unwrap_or_else(|p| p.into_inner());
+            }
+            if inner.stop {
+                return;
+            }
+            // Re-armed by every new event: only a full quiet window flushes.
+            loop {
+                let (guard, timeout) = cv
+                    .wait_timeout(inner, DEBOUNCE)
+                    .unwrap_or_else(|p| p.into_inner());
+                inner = guard;
+                if inner.stop {
+                    return;
+                }
+                if timeout.timed_out() {
+                    break;
+                }
+            }
+            let batch: Vec<PathBuf> = inner.pending.drain().collect();
+            (batch, inner.channel.clone())
+        };
+        let Some(ch) = channel else { continue };
+        let state = app.state::<AppDocs>();
+        for path in batch {
+            let snaps = state.snapshot_for_path(&path);
+            if snaps.is_empty() {
+                continue;
+            }
+            let disk = fs::metadata(&path)
+                .ok()
+                .map(|m| (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+            let mut kind: Option<ExternalKind> = None;
+            for (_id, snap) in snaps {
+                match classify(disk, snap) {
+                    Some(ExternalKind::Removed) => {
+                        kind = Some(ExternalKind::Removed);
+                        break;
+                    }
+                    Some(_) => {
+                        kind.get_or_insert(ExternalKind::Changed);
+                    }
+                    None => {}
+                }
+            }
+            if let Some(kind) = kind {
+                let _ = ch.send(ExternalEvent {
+                    path: path.to_string_lossy().to_string(),
+                    kind,
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -161,5 +366,11 @@ mod tests {
         let r: ExternalEvent =
             serde_json::from_str(r#"{"path":"x","kind":"removed"}"#).unwrap();
         assert_eq!(r.kind, ExternalKind::Removed);
+    }
+
+    #[test]
+    fn watch_status_starts_not_degraded() {
+        let w = AppWatch::default();
+        assert_eq!(w.status().degraded, None);
     }
 }

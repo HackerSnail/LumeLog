@@ -4,6 +4,7 @@
 //! `search_cancel(request_id)` can stop a scan cooperatively.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +51,29 @@ impl AppDocs {
     /// released — repeated open/close no longer leaks documents.
     pub fn remove(&self, id: u64) -> bool {
         self.docs.lock().unwrap().remove(&id).is_some()
+    }
+
+    /// `(doc_id, (size, mtime))` for every open doc whose path equals `path`.
+    /// The external-watch debouncer compares these against the disk to tell our
+    /// own saves from real external changes.
+    pub fn snapshot_for_path(&self, path: &Path) -> Vec<(u64, (u64, std::time::SystemTime))> {
+        let docs: Vec<(u64, Arc<Mutex<DocFile>>)> = self
+            .docs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, arc)| (*id, arc.clone()))
+            .collect();
+        docs.into_iter()
+            .filter_map(|(id, arc)| {
+                let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+                if d.path() == path {
+                    Some((id, d.disk_meta()))
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Begin a search: mint a request id and its (shared) cancel flag.
@@ -100,5 +124,25 @@ mod tests {
         assert!(s.get_dbc(a).is_some());
         assert!(s.get_dbc(b).is_some());
         assert!(s.get_dbc(9_999).is_none(), "unknown id misses");
+    }
+
+    #[test]
+    fn snapshot_for_path_matches_open_docs() {
+        let s = AppDocs::default();
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut f, b"one\ntwo\n").unwrap();
+        let path = f.path().to_path_buf();
+        let a = s.insert(DocFile::open(&path, 1 << 20).unwrap());
+        let b = s.insert(DocFile::open(&path, 1 << 20).unwrap());
+        let mut got: Vec<u64> = s
+            .snapshot_for_path(&path)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        got.sort_unstable();
+        let mut want = vec![a, b];
+        want.sort_unstable();
+        assert_eq!(got, want);
+        assert!(s.snapshot_for_path(Path::new("C:/nope/x.log")).is_empty());
     }
 }

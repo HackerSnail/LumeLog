@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::dto::*;
 use crate::can_export::export_can;
+use crate::watch::{AppWatch, ExternalEvent, WatchStatus};
 use crate::state::AppDocs;
 
 /// 4 GiB u32 line-index ceiling (spec §4.1/A9). `validate_open_path` rejects at
@@ -55,6 +56,7 @@ pub fn app_ping() -> &'static str {
 #[tauri::command]
 pub fn doc_open(
     state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
     path: String,
     on_progress: Channel<IndexProgress>,
 ) -> Result<DocInfo, IpcError> {
@@ -72,6 +74,8 @@ pub fn doc_open(
         .unwrap_or_default()
         .as_millis() as u64;
     let doc_id = state.insert(doc);
+    // Watch the document's directory so external modifications reach the UI.
+    app.state::<AppWatch>().watch_path(Path::new(&path));
 
     let info = DocInfo {
         doc_id,
@@ -325,7 +329,18 @@ pub fn doc_set_encoding(
 /// open). Drops the `DocFile` (closes the handle, frees the line index + cache)
 /// so opening/closing repeatedly does not leak documents (I5).
 #[tauri::command]
-pub fn doc_close(state: tauri::State<'_, AppDocs>, doc_id: u64) -> Result<(), IpcError> {
+pub fn doc_close(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+) -> Result<(), IpcError> {
+    if let Some(arc) = state.get(doc_id) {
+        let path = {
+            let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+            d.path().to_path_buf()
+        };
+        app.state::<AppWatch>().unwatch_path(&path);
+    }
     if state.remove(doc_id) {
         Ok(())
     } else {
@@ -334,6 +349,35 @@ pub fn doc_close(state: tauri::State<'_, AppDocs>, doc_id: u64) -> Result<(), Ip
             format!("no document {doc_id}"),
         ))
     }
+}
+
+/// Subscribe to external-change events (spec §4.4). Returns the degradation
+/// state: a non-`None` reason means only save-time checks remain.
+#[tauri::command]
+pub fn watch_subscribe(
+    app: AppHandle,
+    on_event: Channel<ExternalEvent>,
+) -> Result<WatchStatus, IpcError> {
+    Ok(app.state::<AppWatch>().start(&app, on_event))
+}
+
+/// Save-As moved `doc_id` to `path`: migrate the directory watch.
+#[tauri::command]
+pub fn watch_retarget(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    path: String,
+) -> Result<(), IpcError> {
+    let arc = state
+        .get(doc_id)
+        .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
+    let old = {
+        let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+        d.path().to_path_buf()
+    };
+    app.state::<AppWatch>().retarget(&old, Path::new(&path));
+    Ok(())
 }
 
 /// Read + lenient-parse a DBC file. Lenient so a single bad construct does not
