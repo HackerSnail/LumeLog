@@ -5,12 +5,15 @@
 //! Plan 2 grows this crate task by task: `decode` is added in Task 3, `source` in
 //! Task 4. Only modules that exist are declared here.
 
+pub mod blf;
 pub mod dbc;
 pub mod decode;
 pub mod error;
 pub mod frame;
 pub mod source;
 pub mod tests_common;
+
+pub use blf::BlfSource;
 
 #[cfg(test)]
 mod tests {

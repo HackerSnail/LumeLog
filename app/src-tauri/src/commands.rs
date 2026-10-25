@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::io::{BufWriter, Write};
 use std::time::UNIX_EPOCH;
 
+use lumelog_can::BlfSource;
 use lumelog_can::dbc::{parse_lenient, ParseOutcome};
 use lumelog_can::error::CanError;
 use lumelog_can::source::{AscSource, CandumpSource, FrameSource, Line, RegexSource};
@@ -21,7 +22,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
 use crate::dto::*;
-use crate::can_export::export_can;
+use crate::can_export::{export_can, export_frames};
 use crate::watch::{AppWatch, ExternalEvent, WatchStatus};
 use crate::state::AppDocs;
 
@@ -877,6 +878,45 @@ pub fn can_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(
     }
 }
 
+/// Parse a Vector BLF file directly (no source document). Frames stream through
+/// the same `parse_frames` path as `can_parse`; `BlfStatsJson.error` carries a
+/// mid-stream fatal error (frames already sent are kept). Cancel via `can_cancel`.
+#[tauri::command]
+pub fn can_parse_blf(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    path: String,
+    dbc_id: Option<u64>,
+    on_batch: Channel<Vec<FrameJson>>,
+    on_done: Channel<BlfStatsJson>,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    // Open synchronously so a bad/missing file rejects the promise instead of
+    // streaming zero frames; the reader itself is `Send` for the worker.
+    let mut src = BlfSource::open(Path::new(&path)).map_err(|e| fail(IpcError::from_can(e)))?;
+    let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
+    tauri::async_runtime::spawn_blocking(move || {
+        let db = db_arc.as_deref();
+        let mut emit = |batch: Vec<FrameJson>| {
+            let _ = on_batch.send(batch);
+        };
+        let cancelled = || cancel.load(Ordering::Relaxed);
+        let (decoded, skipped) = parse_frames(&mut src, db, &mut emit, &cancelled);
+        let error = src.take_error().map(|e| e.to_string());
+        let _ = on_done.send(BlfStatsJson {
+            decoded,
+            skipped,
+            error,
+        });
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
 /// Decode a single editor selection as a frame (spec §7.4 "识别为报文"). The text
 /// is fed through the chosen source; the first frame it yields is decoded. A
 /// selection the source cannot parse returns `source_format`, never a panic.
@@ -1215,6 +1255,104 @@ pub fn export_jsonl(
         dbc_id,
         source_kind,
         regex,
+        filter,
+        target_path,
+        on_progress,
+        on_done,
+        false,
+    )
+}
+
+/// Shared skeleton for the two BLF export commands (CSV/JSONL).
+#[allow(clippy::too_many_arguments)]
+fn run_blf_export(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    path: String,
+    dbc_id: Option<u64>,
+    filter: CanFilterJson,
+    target_path: String,
+    on_progress: Channel<CanExportProgress>,
+    on_done: Channel<CanExportStatsJson>,
+    wide: bool,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let src = BlfSource::open(Path::new(&path)).map_err(|e| fail(IpcError::from_can(e)))?;
+    let db_arc = dbc_id.and_then(|i| state.get_dbc(i));
+    let file = open_export_target(&target_path).map_err(fail)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut src = src;
+        let mut writer = BufWriter::new(file);
+        let mut prog = |written: u64| {
+            let _ = on_progress.send(CanExportProgress { written });
+        };
+        let mut stats = export_frames(
+            &mut src,
+            db_arc.as_deref(),
+            &filter,
+            &mut writer,
+            &mut prog,
+            &|| cancel.load(Ordering::Relaxed),
+            wide,
+        );
+        if src.take_error().is_some() {
+            stats.errored = true; // corrupt source after some rows were written
+        }
+        let _ = writer.flush();
+        let _ = on_done.send(stats.into());
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+/// Export a BLF's filtered frames as a wide CSV (DBC signal columns).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC args: path/dbc/filter/sink/channels
+pub fn can_export_blf_csv(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    path: String,
+    dbc_id: Option<u64>,
+    filter: CanFilterJson,
+    target_path: String,
+    on_progress: Channel<CanExportProgress>,
+    on_done: Channel<CanExportStatsJson>,
+) -> Result<u64, IpcError> {
+    run_blf_export(
+        state,
+        app,
+        path,
+        dbc_id,
+        filter,
+        target_path,
+        on_progress,
+        on_done,
+        true,
+    )
+}
+
+/// Export a BLF's filtered frames as JSONL (one object per frame).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC args: path/dbc/filter/sink/channels
+pub fn can_export_blf_jsonl(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    path: String,
+    dbc_id: Option<u64>,
+    filter: CanFilterJson,
+    target_path: String,
+    on_progress: Channel<CanExportProgress>,
+    on_done: Channel<CanExportStatsJson>,
+) -> Result<u64, IpcError> {
+    run_blf_export(
+        state,
+        app,
+        path,
+        dbc_id,
         filter,
         target_path,
         on_progress,

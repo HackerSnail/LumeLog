@@ -53,6 +53,8 @@
       ↳ M3 子项目 C（Plan 9 `feat/m3-keymap`）：命令面板“快捷键设置…”（及侧栏免快捷键入口）可为 13 个动作录制/清除/恢复默认，覆盖存 `config.toml` 的 `[keymap]`；非法/冲突/保留键（F3、Ctrl+F）被拒绝；旧硬编码快捷键改为查表分发，面板 hint 显示生效键。跨设备同步仍为后续。
 - [x] Roadmap：tail 跟随与滚动截断（只读）
       ↳ Plan 10 `feat/roadmap-tail-follow`：只读状态栏“跟随尾部”开关，新增字节**增量扩展行索引**（不重建、不整页重载）并自动滚底；上滚暂停 + “回到底部”；截断/轮转（缩小或头签名变化，含 rename 替换）回退全量重载；编辑模式不跟随。
+- [x] Roadmap：BLF（Vector 二进制日志）报文源（MF4 仍暂缓）
+      ↳ Plan 11 `feat/roadmap-blf`：工具栏“打开 BLF…”直接进 CanPanel；解析 `LOGG` 容器（无压缩/zlib）+ 对象 1/86/100/101；跨容器切分、1ns/10µs 时间；复用过滤/DBC/停止；导出 CSV/JSONL 复用 `export_frames`；无源文本（`lineNumber`=帧序号）。
 - [ ] 插件接口，支持用户扩展解析器
 
 ## Git

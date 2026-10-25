@@ -27,6 +27,9 @@ import {
   keymapSet,
   keymapReset,
   docTailAppend,
+  canParseBlf,
+  exportBlfCsv,
+  exportBlfJsonl,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -153,6 +156,12 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("tail_wrapper_is_a_function", () => {
     expect(typeof docTailAppend).toBe("function");
+  });
+
+  it("blf_wrappers_are_functions", () => {
+    for (const fn of [canParseBlf, exportBlfCsv, exportBlfJsonl]) {
+      expect(typeof fn).toBe("function");
+    }
   });
 
   it("filter_error_codes_have_zh_text", () => {

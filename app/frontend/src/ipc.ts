@@ -456,6 +456,35 @@ export function canCancel(requestId: number): Promise<void> {
   return call<void>("can_cancel", { requestId });
 }
 
+// ---- BLF (Roadmap-2: Vector binary logs) ------------------------------------
+
+/** Terminal `canParseBlf` tally (Rust `BlfStatsJson`). */
+export interface BlfStats {
+  decoded: number;
+  skipped: number;
+  /** Fatal parse error after the stream stopped (frames already shown stay). */
+  error: string | null;
+}
+
+/** Stream a BLF file's frames (no source document). Cancel with `canCancel`. */
+export function canParseBlf(args: {
+  path: string;
+  dbcId?: number | null;
+  onBatch: (f: FrameJson[]) => void;
+  onDone: (s: BlfStats) => void;
+}): Promise<number> {
+  const batchCh = new Channel<FrameJson[]>();
+  batchCh.onmessage = args.onBatch;
+  const doneCh = new Channel<BlfStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("can_parse_blf", {
+    path: args.path,
+    dbcId: args.dbcId ?? null,
+    onBatch: batchCh,
+    onDone: doneCh,
+  });
+}
+
 /** Decode a single editor selection as one frame ("识别为报文"). */
 export function canDecodeSnippet(args: {
   text: string;
@@ -636,6 +665,38 @@ export function exportJsonl(args: Omit<Parameters<typeof exportCan>[0], "cmd">):
 /** Ask an in-flight CAN export to stop. */
 export function exportCanCancel(requestId: number): Promise<void> {
   return call<void>("export_can_cancel", { requestId });
+}
+
+/** Shared wrapper for the two BLF export commands (`path`, not `docId`). */
+function exportBlf(args: {
+  cmd: "can_export_blf_csv" | "can_export_blf_jsonl";
+  path: string;
+  dbcId?: number | null;
+  filter: CanFilter;
+  targetPath: string;
+  onProgress: (p: { written: number }) => void;
+  onDone: (s: CanExportStats) => void;
+}): Promise<number> {
+  const progCh = new Channel<{ written: number }>();
+  progCh.onmessage = args.onProgress;
+  const doneCh = new Channel<CanExportStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>(args.cmd, {
+    path: args.path,
+    dbcId: args.dbcId ?? null,
+    filter: args.filter,
+    targetPath: args.targetPath,
+    onProgress: progCh,
+    onDone: doneCh,
+  });
+}
+
+export function exportBlfCsv(args: Omit<Parameters<typeof exportBlf>[0], "cmd">): Promise<number> {
+  return exportBlf({ ...args, cmd: "can_export_blf_csv" });
+}
+
+export function exportBlfJsonl(args: Omit<Parameters<typeof exportBlf>[0], "cmd">): Promise<number> {
+  return exportBlf({ ...args, cmd: "can_export_blf_jsonl" });
 }
 
 // ---- Crash recovery (spec §4.4/§10, M3 子项目 B1) --------------------------

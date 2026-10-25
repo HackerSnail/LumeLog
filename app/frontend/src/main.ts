@@ -17,6 +17,7 @@ import {
   appPing,
   dbcImport,
   canParse,
+  canParseBlf,
   canCancel,
   canDecodeSnippet,
   filterRun,
@@ -26,6 +27,8 @@ import {
   exportCancel,
   exportCsv,
   exportJsonl,
+  exportBlfCsv,
+  exportBlfJsonl,
   exportCanCancel,
   recoverySave,
   recoveryDiscard,
@@ -129,6 +132,9 @@ let keymapModalOpen = false;
 // restores that doc's table instead of the previous one's.
 const canStores = new Map<number, FrameStore>();
 const canFilters = new Map<number, CanFilter>();
+// BLF view (Roadmap-2): no source document; its store/filter use a pseudo key.
+const BLF_KEY = -2;
+let blfView: { path: string; store: FrameStore } | null = null;
 let lastDbcId: number | null = null; // most-recently imported DBC, reused per parse
 let canPanel: CanPanel | null = null; // lazily built on first dock open
 let canDockEl: HTMLElement | null = null;
@@ -170,6 +176,10 @@ let inspectorCollapsed = false;
 const tabs = new TabStrip(tabsEl, {
   onActivate: (id) => {
     hideSearchPanel(); // stale hit rows belong to the previous doc — drop the panel
+    if (id >= 0 && blfView) {
+      blfView = null; // switching to a real document leaves the BLF view
+      if (canDockVisible) switchCanView();
+    }
     if (id < 0) status.clear();
     else syncStatus(id);
     refreshPanels();
@@ -505,6 +515,7 @@ function buildCanDock(): HTMLElement {
 
   canRunBtn = mkBtn("解析报文", "解码当前文档为报文表格", () => void onCanRunClick());
   const decodeBtn = mkBtn("识别选中", "把编辑器选中文本识别为一条报文", () => void decodeSelection());
+  const blfBtn = mkBtn("打开 BLF…", "打开 Vector BLF 二进制日志（压缩/未压缩）", () => void openBlfFile());
   const csvBtn = mkBtn("导出 CSV", "把当前过滤的报文导出为宽表 CSV", () => void onCanExport("csv"));
   const jsonlBtn = mkBtn("导出 JSONL", "把当前过滤的报文导出为 JSONL", () => void onCanExport("jsonl"));
   canExportBtns = [csvBtn, jsonlBtn];
@@ -521,6 +532,7 @@ function buildCanDock(): HTMLElement {
     canDbcLine,
     canRunBtn,
     decodeBtn,
+    blfBtn,
     csvBtn,
     jsonlBtn,
     canExportCancelBtn,
@@ -602,8 +614,8 @@ function parseNum(v: string): number | undefined {
 
 /** Rebuild a `CanFilter` from the input row and push it to the panel. */
 function applyFilterFromInputs(): void {
-  const a = tabs.active();
-  if (!a) return;
+  const key = blfView ? BLF_KEY : tabs.active()?.info.docId;
+  if (key === undefined) return;
   const f: CanFilter = {};
   const idFrom = parseNum(canF.idFrom?.value ?? "");
   const idTo = parseNum(canF.idTo?.value ?? "");
@@ -622,7 +634,7 @@ function applyFilterFromInputs(): void {
   }
   if (tFrom !== undefined) f.timeFromMs = tFrom;
   if (tTo !== undefined) f.timeToMs = tTo;
-  canFilters.set(a.info.docId, f);
+  canFilters.set(key, f);
   canPanel?.setFilter(f);
 }
 
@@ -647,6 +659,14 @@ function ensurePanel(): void {
 /** Show the active document's store+filter in the shared panel. */
 function switchCanView(): void {
   if (!canPanel) return;
+  if (blfView) {
+    canPanel.attachStore(blfView.store);
+    const f = canFilters.get(BLF_KEY) ?? {};
+    canPanel.setFilter(f);
+    restoreFilterInputs(f);
+    if (canRunBtn && !canParsing) canRunBtn.textContent = "重新解析 BLF";
+    return;
+  }
   const a = tabs.active();
   const docId = a?.info.docId ?? -1;
   // Reuse the doc's existing store (registered on first parse) instead of
@@ -659,6 +679,7 @@ function switchCanView(): void {
   canPanel.attachStore(store);
   canPanel.setFilter((docId >= 0 && canFilters.get(docId)) || {});
   restoreFilterInputs(docId >= 0 ? canFilters.get(docId) : undefined);
+  if (canRunBtn && !canParsing) canRunBtn.textContent = "解析报文";
 }
 
 /** Reflect a doc's filter back into the input row (blank when none). */
@@ -682,6 +703,10 @@ function restoreFilterInputs(f: CanFilter | undefined): void {
 
 /** Frame row click → jump the matching source line (list 0-based, CM 1-based). */
 function revealSourceLine(lineNumber: number): void {
+  if (blfView) {
+    toastMsg("BLF 无源文本，无法跳转到行");
+    return;
+  }
   const a = tabs.active();
   if (!a) return;
   const list = lists.get(a.info.docId);
@@ -710,7 +735,65 @@ async function importDbc(): Promise<void> {
   }
 }
 
+/** Pick a .blf and stream it into the dock (replacing any previous BLF table). */
+async function openBlfFile(): Promise<void> {
+  const picked = await open({
+    multiple: false,
+    filters: [{ name: "BLF", extensions: ["blf"] }],
+  });
+  if (typeof picked !== "string") return;
+  await startBlfParse(picked);
+}
+
+async function startBlfParse(path: string): Promise<void> {
+  if (canParsing || canExportBusy) {
+    toastMsg(canParsing ? "解析进行中，请稍候…" : "导出进行中，请稍候…");
+    return;
+  }
+  if (!canDockVisible) toggleCanDock();
+  ensurePanel();
+  const store = new FrameStore();
+  blfView = { path, store };
+  store.clear();
+  canPanel!.attachStore(store);
+  const f = canFilters.get(BLF_KEY) ?? {};
+  canPanel!.setFilter(f);
+  restoreFilterInputs(f);
+  setCanParsing(true);
+  canReqId = null;
+  try {
+    canReqId = await canParseBlf({
+      path,
+      dbcId: lastDbcId,
+      onBatch: (frames) => {
+        store.push(frames);
+        canPanel?.render();
+      },
+      onDone: (s) => {
+        toastMsg(`BLF 解码 ${s.decoded} 帧，跳过 ${s.skipped} 个对象`);
+        if (s.error) toastMsg(`BLF 解析中断：${s.error}`);
+        canPanel?.render();
+        setCanParsing(false);
+      },
+    });
+    if (canParsing && canRunBtn) canRunBtn.textContent = "停止";
+  } catch (err) {
+    blfView = null;
+    reportError(err);
+    setCanParsing(false);
+    switchCanView(); // put the previous document's table back
+  }
+}
+
 function onCanRunClick(): void {
+  if (blfView) {
+    if (canParsing) {
+      if (canReqId !== null) canCancel(canReqId).catch((e) => reportError(e));
+    } else {
+      void startBlfParse(blfView.path);
+    }
+    return;
+  }
   if (canParsing) {
     // `can_parse` now returns its job id up front, so Stop is real: flip the
     // shared cancel flag the worker checks per frame. The tally still arrives on
@@ -729,10 +812,11 @@ function updateCanExportUi(busy: boolean): void {
   if (canExportCancelBtn) canExportCancelBtn.style.display = busy ? "" : "none";
 }
 
-/** Export the active doc's CAN frame set (backend re-decode + filter, spec §7.5). */
+/** Export the active view's CAN frames (document re-decode or BLF, spec §7.5). */
 async function onCanExport(format: "csv" | "jsonl"): Promise<void> {
+  const blf = blfView;
   const a = tabs.active();
-  if (!a) {
+  if (!blf && !a) {
     toastMsg("请先打开一个文档");
     return;
   }
@@ -740,43 +824,50 @@ async function onCanExport(format: "csv" | "jsonl"): Promise<void> {
     toastMsg("CAN 任务进行中，请稍候…");
     return;
   }
-  const docId = a.info.docId;
-  const ds = docStates.get(docId);
-  const base = ds ? basenameOf(ds.path) : "can";
+  const docId = a ? a.info.docId : null;
+  const ds = docId !== null ? docStates.get(docId) : undefined;
+  const base = blf ? basenameOf(blf.path) : ds ? basenameOf(ds.path) : "can";
   const path = await save({
     defaultPath: `${base}.${format}`,
     filters: [{ name: format === "csv" ? "CSV" : "JSONL", extensions: [format] }],
   });
   if (typeof path !== "string") return;
-  const sourceKind = canSrcSel!.value;
-  const regex = sourceKind === "regex" ? canRegexInput!.value : null;
-  const filter = canFilters.get(docId) ?? {};
+  const filter = canFilters.get(blf ? BLF_KEY : docId!) ?? {};
   updateCanExportUi(true);
   canExportReqId = null;
   if (canExportStatus) canExportStatus.textContent = "导出中…";
+  const onProgress = (p: { written: number }): void => {
+    if (canExportStatus) canExportStatus.textContent = `导出中… ${p.written} 帧`;
+  };
+  const onDone = (s: CanExportStats): void => {
+    updateCanExportUi(false);
+    const msg = s.errored
+      ? `导出中断（已写 ${s.written} 帧）`
+      : s.cancelled
+        ? `已取消，导出 ${s.written} 帧`
+        : `已导出 ${s.written} 帧 → ${basenameOf(path)}`;
+    if (canExportStatus) canExportStatus.textContent = msg;
+    toastMsg(msg);
+  };
   try {
-    const args = {
-      docId,
-      dbcId: lastDbcId,
-      sourceKind,
-      regex,
-      filter,
-      targetPath: path,
-      onProgress: (p: { written: number }) => {
-        if (canExportStatus) canExportStatus.textContent = `导出中… ${p.written} 帧`;
-      },
-      onDone: (s: CanExportStats) => {
-        updateCanExportUi(false);
-        const msg = s.errored
-          ? `导出中断（已写 ${s.written} 帧）`
-          : s.cancelled
-            ? `已取消，导出 ${s.written} 帧`
-            : `已导出 ${s.written} 帧 → ${basenameOf(path)}`;
-        if (canExportStatus) canExportStatus.textContent = msg;
-        toastMsg(msg);
-      },
-    };
-    canExportReqId = format === "csv" ? await exportCsv(args) : await exportJsonl(args);
+    if (blf) {
+      const args = { path: blf.path, dbcId: lastDbcId, filter, targetPath: path, onProgress, onDone };
+      canExportReqId = format === "csv" ? await exportBlfCsv(args) : await exportBlfJsonl(args);
+    } else {
+      const sourceKind = canSrcSel!.value;
+      const regex = sourceKind === "regex" ? canRegexInput!.value : null;
+      const args = {
+        docId: docId!,
+        dbcId: lastDbcId,
+        sourceKind,
+        regex,
+        filter,
+        targetPath: path,
+        onProgress,
+        onDone,
+      };
+      canExportReqId = format === "csv" ? await exportCsv(args) : await exportJsonl(args);
+    }
   } catch (err) {
     updateCanExportUi(false);
     reportError(err);
@@ -854,7 +945,9 @@ async function parseActive(): Promise<void> {
 function setCanParsing(b: boolean): void {
   canParsing = b;
   if (!b) canReqId = null;
-  if (canRunBtn) canRunBtn.textContent = b ? "解析中…" : "解析报文";
+  if (canRunBtn) {
+    canRunBtn.textContent = b ? "解析中…" : blfView ? "重新解析 BLF" : "解析报文";
+  }
 }
 
 /** Editor-selection → one frame, surfaced as a toast ("识别为报文"). */

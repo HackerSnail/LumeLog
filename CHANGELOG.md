@@ -2,6 +2,42 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
+
+**依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
+
+### 终审修复波（CodeReview 全分支 1 Critical / 4 Important / 6 Minor）
+**Files:** `blf.rs`（**C1**：classic `dlc` 钳到 8（未信任输入不得穿透到 `frame_json` 的 `data[..dlc]`）；**I2**：容器末尾 1–3 字节零填充不再当作残缺对象（EOF 误报截断）；**I3**：FD64 `ext_data_offset` 边界补回 `ext_len`（v1/v2 各差 16/24B，会误读扩展数据）；**I4**：`pending` 先出队再报错（容器内出错前的帧保留，spec §5）；**I5**：tail 上限只检查残留本身（不再误拒 >64MiB 合法容器）；**M1**：EOF/损坏 zlib → `source_format`；**M2**：channel u16→u8 钳位；**M3**：SYSTEMTIME 月日/闰秒校验；新增 9 测（dlc 钳位、86、v2 头、padding EOF、错误前帧、FD64 ext、无基准时间、坏 zlib、非法日期））；`dto.rs`（**C1 防御**：`frame_json` 的 `n = min(dlc, data.len())`）；spec 同步（FD64 边界、DIR 丢弃说明、`lineNumber`=帧序号）。
+**Why:** Critical 使一个字节即可 panic 并让解析/导出 UI 永久卡死；I2/I3/I4 分别影响合法文件判定、FD64 数据正确性与“已解析帧丢失”；I5 与解压上限设计自相矛盾。
+**验证:** `cargo test -p lumelog-can blf::` 19 pass + `cargo test -p lumelog-app` 90 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+**Parks（Minor，推迟）：** M4 容器仍整段解压/复制（已有 256MiB 上限，逐块流式留待后续）；M5 `BlfStats.error` 仍透出英文 `Display`（与文本源错误码体系统一留待后续）。
+**定向复审补充（W1/S1/S2）：** I2/I3 的新测原本未真正越过边界（夹具恒 136B/valid=3 新旧同值）→ 改为 75B 对象带 3B 填充、valid=8 + 0xEE 扩展字节（修复前必红）；spec 补“容器末尾 <16B 全零=填充丢弃”规则；`open` 头部扩展截断也映射为 `source_format`。
+
+### Task 1. core `lumelog-can/src/blf.rs`
+**Files:** Create `crates/lumelog-can/src/blf.rs`（`BlfSource: FrameSource`；`LOGG` 头/`SYSTEMTIME`、`LOG_CONTAINER`（无压缩/zlib2、256MiB 上限）、v1/v2 对象、类型 1/86/100/101、跨容器 tail、`take_error`、Hinnant 日历、10µs/1ns）；Modify `lib.rs`（`pub mod blf` + `pub use BlfSource`）、`Cargo.toml`/`Cargo.lock`（`flate2 = "1"`）；spec 同步 FD64 data 偏移（payload@40，ext 边界 `ext-(16+ext_len+40)`）。
+**Why:** 与项目自带 candump/ASC 解析一致、可行性可控；不依赖第三方 BLF crate。FD64 首版按参照实现 `cursor+40` 偏移会错 16B（测试捕获：数据从第 17 字节开始）→ 按真实 40B 结构改为 payload@40。
+**验证:** `cargo test -p lumelog-can blf::` 10 pass（经典字段/时间 1.5s、ext/RTR/channel、FD100 dlc 9→12 + edl/brs/esi、FD64 64B、zlib 等价、跨容器一帧、10µs、未知对象 skipped、坏 magic/截断）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。另加护栏：跨容器 partial tail > 64MiB 直接报错（不无界增长）。
+
+### Task 2. 抽取 `export_frames`（行为不变）
+**Files:** Modify `app/src-tauri/src/can_export.rs`（新增 `export_frames(src:&mut dyn FrameSource, ...)`，把表头/列/循环/统计原样搬移；`export_can` 仅建 `DocLines`+`build_frame_source` 后调用它）。
+**Why:** BLF 无 `DocLines`，需与文本源共用帧→行/过滤/取消/统计逻辑；行为与签名不变。
+**验证:** `cargo test -p lumelog-app can_export::` 20 pass（既有断言零改动）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 3. `can_parse_blf` + `can_export_blf_csv/jsonl`
+**Files:** Modify `app/src-tauri/src/commands.rs`（三个命令 + `run_blf_export` 骨架；`BlfSource::open` 在 prologue 同步校验，坏文件直接 reject；解析复用 `parse_frames`，导出复用 `export_frames`；`take_error` 写 `BlfStatsJson.error` / 置 `errored`；取消复用 `can_cancel`）；`dto.rs`（`BlfStatsJson` + camelCase 测试）；`lib.rs`（注册）。
+**Why:** spec §3；无源文档，BLF 帧仍走同一批处理/过滤/取消链路；大文件不整文件载入。
+**验证:** `cargo test -p lumelog-app` 90 pass（+1 DTO）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 4. 前端 IPC（BLF）
+**Files:** Modify `app/frontend/src/ipc.ts`（`BlfStats`、`canParseBlf`、`exportBlfCsv/Jsonl`）；`ipc.test.ts`（+1 typeof）。
+**Why:** spec §4；导出包装用 `path` 而非 `docId`，其余形状与现有 CAN 包装一致（双 Channel）。
+**验证:** `npm test` 89 pass（ipc 15→16）+ `run build` tsc 通过。
+
+### Task 5. `main.ts` BLF 视图
+**Files:** Modify `app/frontend/src/main.ts`（工具栏“打开 BLF…”；`BLF_KEY=-2`+`blfView`；`openBlfFile/startBlfParse`（重置 store、同步过滤器、`canParseBlf` 流式推入、统计/错误 toast、停止复用 `can_cancel`）；`switchCanView`/`applyFilterFromInputs` 按 BLF 视图键；行激活提示无源文本；切标签退出 BLF；导出按视图走 `exportBlf*`，默认名取 BLF 基名；解析按钮文案随视图切换）。
+**Why:** spec §4；复用 CanPanel/FrameStore/过滤器，不新增视图组件；坏文件 catch 后回到文档视图。
+**验证:** `run build` tsc 通过 + `npm test` 89 pass（DOM 交互留 GUI 手工）。
+
 ## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。
