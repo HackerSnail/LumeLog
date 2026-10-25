@@ -26,6 +26,11 @@
 **Why:** spec §4。`onScrollTop` 从现有滚动路径回调（不另加监听，避免双触发）；`isNearBottom` 兼容不可滚动视图（max≤0→真）。
 **验证:** `npm test` 86 pass（listview 10→13、ipc 14→15）+ `run build` tsc 通过。
 
+### Task 5. 状态栏“跟随尾部”开关
+**Files:** Modify `app/frontend/src/statusbar.ts`（`onFollow` 回调；`.status-follow` 按钮 + `setFollowAvailable/setFollow`（`active`/`aria-pressed`））；`styles.css`（`.status-follow/.active`、备用 `.follow-resume`）；Test `statusbar.test.ts`（+2）。
+**Why:** spec §4—只读才显示；离开只读文档时自动清除 active；点击切换回调。
+**验证:** `npm test` 88 pass（statusbar 2→4）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。

@@ -10,6 +10,8 @@ export interface StatusbarCallbacks {
   onEncoding?: (label: string) => void;
   onEol?: (eol: string) => void;
   onMode?: (mode: ModeChoice) => void;
+  /** Tail follow toggle (read-only docs only). */
+  onFollow?: (on: boolean) => void;
 }
 
 const EOL_CHOICES = EOL_OPTIONS;
@@ -23,6 +25,7 @@ export class Statusbar {
   private readonly posEl: HTMLElement;
   private readonly invalidEl: HTMLElement;
   private readonly watchEl: HTMLElement;
+  private readonly followBtn: HTMLButtonElement;
 
   constructor(root: HTMLElement, cb: StatusbarCallbacks = {}) {
     this.root = root;
@@ -55,12 +58,37 @@ export class Statusbar {
     this.watchEl = mkSpan("status-watch", "");
     this.watchEl.style.display = "none";
 
+    // Tail follow (Roadmap): shown for read-only docs by `setFollowAvailable`.
+    this.followBtn = document.createElement("button");
+    this.followBtn.type = "button";
+    this.followBtn.className = "status-follow";
+    this.followBtn.textContent = "跟随尾部";
+    this.followBtn.title = "自动滚动到最新追加的行";
+    this.followBtn.style.display = "none";
+    this.followBtn.addEventListener("click", () => {
+      const on = !this.followBtn.classList.contains("active");
+      this.setFollow(on);
+      cb.onFollow?.(on);
+    });
+
     root.append(
       mkLabel("编码"), this.encSel, this.invalidEl,
       mkLabel("行尾"), this.eolSel,
       mkLabel("语法"), this.modeSel,
-      this.watchEl, this.dirtyEl, this.posEl,
+      this.followBtn, this.watchEl, this.dirtyEl, this.posEl,
     );
+  }
+
+  /** Show/hide the tail-follow toggle (read-only docs only). */
+  setFollowAvailable(on: boolean): void {
+    this.followBtn.style.display = on ? "" : "none";
+    if (!on) this.setFollow(false);
+  }
+
+  /** Reflect the follow state on the button. */
+  setFollow(on: boolean): void {
+    this.followBtn.classList.toggle("active", on);
+    this.followBtn.setAttribute("aria-pressed", on ? "true" : "false");
   }
 
   /** Report external-watch health; `degraded` shows a warn chip + tooltip. */
