@@ -2,6 +2,12 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — 测试基建：jsdom DOM 单测
+
+**Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。
+**Why:** 上轮 B2 因项目无 jsdom，`TabStrip`/`Statusbar` 只能抽纯函数测（`externalDot`）或留 GUI 手测；补 jsdom 后用 per-file 指令启用，不影响其余 64 个 headless 用例。
+**验证:** `npm --prefix app/frontend test` 68 pass（11 文件；tabs 2→4、statusbar +2）+ `run build`（tsc 通过，43 modules）。
+
 ## 2026-10-25 — Plan 8 M3 外部修改监听（feat/m3-external-watch）
 
 **依据：** spec `docs/specs/2026-10-25-m3-external-watch-design.md`；计划 `docs/plans/2026-10-25-m3-external-watch.md`（M3 子项目 B2：已打开文档的外部修改持续监听 + 干净自动重载 + 脏黄点/三选）。
