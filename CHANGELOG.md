@@ -31,6 +31,11 @@
 **Why:** 回调注入使模态不依赖 ipc、可 jsdom 测；名字规则与服务端一致；运行中禁止切脚本/编辑。
 **验证:** `npm test` 94 pass（14 文件，script-ui 4）+ `run build` tsc 通过。
 
+### Task 6. `main.ts` 脚本接线
+**Files:** Modify `app/frontend/src/main.ts`（`scriptModalOpen`与快捷键短路；工具栏“脚本”+面板“脚本…”；`openScriptManager` 注入 list/read/write/remove/chooseTarget(save 默认 `<doc基名>.out.txt`)/run(解析当前 docId)/cancel/confirm(ask)；与 keymap 模态互斥）。
+**Why:** spec §4；模态保持纯净（仅回调），文档不存在时运行 reject；两模态不能同时抢键盘/inert。
+**验证:** `run build` tsc 通过（46 modules）+ `npm test` 94 pass。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
