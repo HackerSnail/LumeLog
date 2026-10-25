@@ -36,6 +36,11 @@
 **Why:** spec §4.2；镜像 Rust 命令参数（camelCase↔snake）；错误码全复用。
 **验证:** `npm --prefix app/frontend test` 47 pass（ipc 9→10）+ `run build`（tsc 通过，41 modules）；Rust 未改。
 
+### Task 7. 查询面板时序区 + 导出
+**Files:** Create `app/frontend/src/query.ts`（纯函数 `pickTimelineInput`：抽取正则非空→时间轴(from/to可单侧)，否则行号区间(两侧必填/正整数/from≤to)，错误返 `error` 不抛）+ `query.test.ts`（7 例）；Modify `app/frontend/src/main.ts`（`applyQuery` 加 `sel: TimelineSelection` 参、no-op 守卫改为“无任何轴”、传 time/lineFrom/lineTo；新 `exportQuery`；面板加时序行(`query-time`：抽取正则+格式下拉+起止+保留无ts)+“导出…”按钮(save 对话框、无轴时 `ask` 二次确认)；共享“停止”按 `queryKind` 分派 `filterCancel`/`exportCancel`）。
+**Why:** spec §4.1。导出与扫描共用单任务互斥（queryBusy/queryReqId），`queryKind` 决定 Stop 取消哪个；时间轴/行号退化由 `pickTimelineInput` 集中判定（可测）。
+**验证:** `npm --prefix app/frontend test` 54 pass（新 `query.test.ts` 7 + ipc 10）+ `run build`（tsc 通过，42 modules）。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。

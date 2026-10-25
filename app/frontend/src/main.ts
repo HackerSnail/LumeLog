@@ -22,6 +22,8 @@ import {
   filterRun,
   filterCancel,
   docLinesAt,
+  exportLines,
+  exportCancel,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -30,7 +32,9 @@ import {
   type FilterCondition,
   type LineHit,
   type IndexedText,
+  type TimeFormat,
 } from "./ipc";
+import { pickTimelineInput, type TimelineSelection } from "./query";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -1072,6 +1076,7 @@ const queryCursor = new Map<number, number>();
 // concurrent scan would fight over the single Stop/`queryReqId` affordance).
 let queryBusy = false;
 let queryReqId: number | null = null;
+let queryKind: "scan" | "export" = "scan"; // which command the shared Stop button cancels
 
 /** Promise wrapper over the channel-based `doc_lines_at` (the subset view's loader). */
 function fetchLines(
@@ -1141,13 +1146,20 @@ async function applyQuery(
   caseSensitive: boolean,
   hideNon: boolean,
   highlight: boolean,
+  sel: TimelineSelection,
 ): Promise<void> {
   const a = tabs.active();
   if (!a) return;
   const docId = a.info.docId;
   const list = lists.get(docId);
-  if (conditions.length === 0) {
-    toastMsg("请至少添加一条条件");
+  if (sel.error) {
+    toastMsg(sel.error);
+    return;
+  }
+  const hasAxis =
+    conditions.length > 0 || sel.time !== undefined || sel.lineFrom !== undefined || sel.lineTo !== undefined;
+  if (!hasAxis) {
+    toastMsg("请至少添加一条条件或时间/行号约束");
     return;
   }
   if (!list) {
@@ -1159,6 +1171,7 @@ async function applyQuery(
     return;
   }
   queryBusy = true;
+  queryKind = "scan";
   queryReqId = null;
   stopBtn.disabled = false;
   statusEl.textContent = "扫描中…";
@@ -1176,6 +1189,9 @@ async function applyQuery(
       docId,
       conditions,
       caseSensitive,
+      time: sel.time ?? null,
+      lineFrom: sel.lineFrom ?? null,
+      lineTo: sel.lineTo ?? null,
       onBatch: (b) => {
         hits.push(...b);
         statusEl.textContent = `已命中 ${hits.length} 行…`;
@@ -1195,6 +1211,62 @@ async function applyQuery(
   } catch (err) {
     reportError(err);
     finish("查询失败");
+  }
+}
+
+/** Export the currently-selected lines to `targetPath` (raw bytes, spec §7.5). */
+async function exportQuery(
+  statusEl: HTMLElement,
+  stopBtn: HTMLButtonElement,
+  conditions: FilterCondition[],
+  caseSensitive: boolean,
+  sel: TimelineSelection,
+  targetPath: string,
+): Promise<void> {
+  const a = tabs.active();
+  if (!a) return;
+  const docId = a.info.docId;
+  if (queryBusy) {
+    toastMsg("查询进行中，请稍候…");
+    return;
+  }
+  queryBusy = true;
+  queryKind = "export";
+  queryReqId = null;
+  stopBtn.disabled = false;
+  statusEl.textContent = "导出中…";
+  const finish = (text: string) => {
+    queryBusy = false;
+    queryReqId = null;
+    stopBtn.disabled = true;
+    statusEl.textContent = text;
+  };
+  try {
+    queryReqId = await exportLines({
+      docId,
+      conditions,
+      caseSensitive,
+      time: sel.time ?? null,
+      lineFrom: sel.lineFrom ?? null,
+      lineTo: sel.lineTo ?? null,
+      targetPath,
+      onProgress: (p) => {
+        statusEl.textContent = `导出中… ${p.written} 行`;
+      },
+      onDone: (s) => {
+        finish(
+          s.errored
+            ? `导出中断（已写 ${s.written} 行）`
+            : s.cancelled
+              ? `已取消，导出 ${s.written} 行`
+              : `导出 ${s.written} 行`,
+        );
+      },
+    });
+    if (!queryBusy) queryReqId = null;
+  } catch (err) {
+    reportError(err);
+    finish("导出失败");
   }
 }
 
@@ -1243,19 +1315,19 @@ function openQueryPanel(): void {
   const statusEl = document.createElement("span");
   statusEl.className = "search-status";
 
-  const chk = (label: string, on: boolean): HTMLInputElement => {
+  const chk = (label: string, on: boolean, host: HTMLElement): HTMLInputElement => {
     const wrap = document.createElement("label");
     wrap.className = "query-chk";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.checked = on;
     wrap.append(box, document.createTextNode(label));
-    head.append(wrap);
+    host.append(wrap);
     return box;
   };
-  const hideBox = chk("过滤到命中行", true);
-  const hlBox = chk("高亮命中", true);
-  const caseBox = chk("区分大小写", false);
+  const hideBox = chk("过滤到命中行", true, head);
+  const hlBox = chk("高亮命中", true, head);
+  const caseBox = chk("区分大小写", false, head);
 
   let stopBtn: HTMLButtonElement; // assigned before any handler runs
   const btn = (label: string, onClick: () => void): HTMLButtonElement => {
@@ -1266,6 +1338,34 @@ function openQueryPanel(): void {
     head.append(b);
     return b;
   };
+
+  // Timeline axis row (spec §2): extract regex + built-in format + [from,to] +
+  // a keep-no-ts toggle. Blank extract => [from,to] is a 1-based line range.
+  const timeRow = document.createElement("div");
+  timeRow.className = "query-time";
+  timeRow.append(document.createTextNode("时间戳 "));
+  const tsIn = document.createElement("input");
+  tsIn.type = "text";
+  tsIn.placeholder = "抽取正则 (?<ts>…) 空则按行号";
+  const fmtSel = document.createElement("select");
+  for (const [v, t] of [["iso", "ISO"], ["epoch_s", "epoch秒"], ["epoch_ms", "epoch毫秒"]]) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    fmtSel.append(o);
+  }
+  const tFrom = document.createElement("input");
+  tFrom.type = "text";
+  tFrom.placeholder = "起";
+  const tTo = document.createElement("input");
+  tTo.type = "text";
+  tTo.placeholder = "止";
+  const keepChk = chk("保留无时间戳行", false, timeRow);
+  timeRow.append(tsIn, fmtSel, tFrom, tTo);
+
+  const currentSelection = (): TimelineSelection =>
+    pickTimelineInput(tsIn.value, fmtSel.value as TimeFormat, tFrom.value, tTo.value, keepChk.checked);
+
   const apply = () =>
     void applyQuery(
       statusEl,
@@ -1274,18 +1374,45 @@ function openQueryPanel(): void {
       caseBox.checked,
       hideBox.checked,
       hlBox.checked,
+      currentSelection(),
     );
   btn("＋条件", () => addCondRow(conds, apply));
   btn("应用", apply);
   btn("上一个", () => cycleHit(-1));
   btn("下一个", () => cycleHit(1));
+  const doExport = async () => {
+    const sel = currentSelection();
+    if (sel.error) {
+      toastMsg(sel.error);
+      return;
+    }
+    const conditions = collectConditions(conds);
+    const hasAxis =
+      conditions.length > 0 || sel.time !== undefined || sel.lineFrom !== undefined || sel.lineTo !== undefined;
+    if (!hasAxis) {
+      const ok = await ask("当前无筛选，将导出全部行，确定？", {
+        title: "导出",
+        kind: "warning",
+        okLabel: "导出",
+        cancelLabel: "取消",
+      });
+      if (!ok) return;
+    }
+    const path = await save({ defaultPath: "filtered.log" });
+    if (typeof path !== "string") return;
+    void exportQuery(statusEl, stopBtn, conditions, caseBox.checked, sel, path);
+  };
+  btn("导出…", () => void doExport());
   stopBtn = btn("停止", () => {
-    if (queryReqId !== null) void filterCancel(queryReqId).catch(reportError);
+    if (queryReqId !== null) {
+      const p = queryKind === "export" ? exportCancel(queryReqId) : filterCancel(queryReqId);
+      void p.catch(reportError);
+    }
   });
   stopBtn.disabled = true;
   btn("关闭", hideSearchPanel);
 
-  panel.append(head, conds, statusEl);
+  panel.append(head, conds, timeRow, statusEl);
   addCondRow(conds, apply);
   (conds.querySelector("input") as HTMLInputElement | null)?.focus();
 }
