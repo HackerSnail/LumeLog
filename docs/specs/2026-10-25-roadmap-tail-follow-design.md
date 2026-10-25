@@ -14,7 +14,7 @@
 
 ## 2. core（`crates/lumelog-core`）
 - `LineIndex`：
-  - `pub fn extend(&mut self, appended: &[u8], base_offset: u64) -> Result<(), CoreError>`：扫描 `appended` 每个 `0x0A`，偏移 `base_offset + i + 1` 推入；> `u32::MAX` → `CoreError::TooLarge`；`file_size = base_offset + appended.len()`。
+  - `pub fn extend(&mut self, appended: &[u8], base_offset: u64) -> Result<(), CoreError>`：扫描 `appended` 每个 `0x0A`，偏移 `base_offset + i + 1` 推入；**先收集、全部合法后一次性提交**（失败不留部分偏移）；总大小或任一行起点 > `u32::MAX` → `CoreError::TooLarge`；`file_size = base_offset + appended.len()`。
   - 边界已核对：旧文件“尾部有 LF”（末尾空行偏移已存在）与“尾部无 LF”（续写同一行）两种情况都只需按上述规则推入，不产生重复起点。
 - `DocFile`：
   - 新增私有 `head_sig: u64`：打开与 `reload_after_save` 时对前 `min(512, size)` 字节做 FNV-1a64；`set_encoding` 不动（字节未变）。

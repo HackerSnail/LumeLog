@@ -1764,7 +1764,7 @@ async function handleReadonlyAppend(docId: number, path: string): Promise<void> 
       st.paused = false;
     }
     if (docId === tabs.active()?.info.docId) status.setFollow(false);
-    hideFollowResume();
+    if (followResumeOwner === docId) hideFollowResume();
   }
 }
 
