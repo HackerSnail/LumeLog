@@ -29,6 +29,10 @@ import {
   exportCanCancel,
   recoverySave,
   recoveryDiscard,
+  recoveryList,
+  recoveryLoad,
+  recoveryEnabled,
+  recoverySetEnabled,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -39,9 +43,10 @@ import {
   type IndexedText,
   type TimeFormat,
   type CanExportStats,
+  type RecoveryEntry,
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
-import { Debouncer } from "./recovery";
+import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -87,6 +92,9 @@ let busy = false;
 /** Crash-recovery schedule (spec §4.4): 2s idle → write the doc's shadow. */
 let recoveryOn = true; // refreshed from config.toml at startup (Task 6)
 const recoveryDebounce = new Debouncer(2000, (docId) => fireRecovery(docId));
+let recoveryChk: HTMLInputElement | null = null;
+let recoveryBannerEl: HTMLElement | null = null;
+let recoveryEntries: RecoveryEntry[] = [];
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -206,7 +214,15 @@ function layout(): void {
   asideTitle.textContent = "已打开文档";
   sidebarListEl = document.createElement("div");
   sidebarListEl.className = "side-list";
-  aside.append(asideTitle, sidebarListEl);
+  const recoveryOption = document.createElement("label");
+  recoveryOption.className = "side-option";
+  recoveryChk = document.createElement("input");
+  recoveryChk.type = "checkbox";
+  recoveryChk.id = "recovery-enabled";
+  recoveryChk.checked = true;
+  recoveryChk.addEventListener("change", () => void onRecoveryToggle(recoveryChk!.checked));
+  recoveryOption.append(recoveryChk, document.createTextNode("崩溃恢复"));
+  aside.append(asideTitle, sidebarListEl, recoveryOption);
 
   // Right inspector: metadata for the active document + the ⚠ detail.
   const insp = document.createElement("aside");
@@ -898,6 +914,143 @@ function scheduleRecovery(docId: number): void {
 function cancelRecovery(docId: number, path: string): void {
   recoveryDebounce.cancel(docId);
   recoveryDiscard(path).catch(() => {});
+}
+
+// ---- crash recovery UI (spec §4.4/§10, M3 B1) -------------------------------
+
+function removeRecoveryBanner(): void {
+  recoveryBannerEl?.remove();
+  recoveryBannerEl = null;
+}
+
+function renderRecoveryBanner(): void {
+  removeRecoveryBanner();
+  if (recoveryEntries.length === 0) return;
+  const box = document.createElement("div");
+  box.className = "recovery-banner";
+  box.setAttribute("role", "status");
+  const head = document.createElement("div");
+  head.className = "recovery-head";
+  head.textContent = `发现 ${recoveryEntries.length} 个未保存恢复项（崩溃恢复）`;
+  const list = document.createElement("div");
+  list.className = "recovery-list";
+  for (const e of recoveryEntries) {
+    const row = document.createElement("div");
+    row.className = "recovery-row";
+    const label = document.createElement("span");
+    label.className = "recovery-label";
+    label.textContent = `${basenameOf(e.path)} · ${formatSavedAt(e.savedAtMs)} · ${humanSize(e.sizeBytes)}`;
+    label.title = e.path;
+    const ok = mkBtn("恢复", "把影子内容恢复到编辑器（恢复后仍未保存）", () => void restoreRecovery(e));
+    const no = mkBtn("丢弃", "删除该影子，不再提示", () => void discardRecovery(e.path));
+    row.append(label, ok, no);
+    list.append(row);
+  }
+  const foot = document.createElement("div");
+  foot.className = "recovery-foot";
+  foot.append(
+    mkBtn("全部丢弃", "删除全部恢复项", () => void discardAllRecovery()),
+    mkBtn("关闭", "暂时收起（影子保留，下次启动再问）", () => removeRecoveryBanner()),
+  );
+  box.append(head, list, foot);
+  document.body.append(box);
+  recoveryBannerEl = box;
+}
+
+async function checkRecovery(): Promise<void> {
+  if (!recoveryOn) {
+    removeRecoveryBanner();
+    return;
+  }
+  try {
+    recoveryEntries = await recoveryList();
+  } catch {
+    return; // a config/dir problem must never block startup
+  }
+  renderRecoveryBanner();
+}
+
+async function discardRecovery(path: string): Promise<void> {
+  try {
+    await recoveryDiscard(path);
+  } catch {
+    // idempotent backend: failure only means the file is already gone
+  }
+  recoveryEntries = recoveryEntries.filter((e) => e.path !== path);
+  renderRecoveryBanner();
+}
+
+async function discardAllRecovery(): Promise<void> {
+  for (const e of [...recoveryEntries]) {
+    await recoveryDiscard(e.path).catch(() => {});
+  }
+  recoveryEntries = [];
+  renderRecoveryBanner();
+}
+
+/** Open the original file, then replace its text with the shadow (kept dirty). */
+async function restoreRecovery(e: RecoveryEntry): Promise<void> {
+  if (busy) {
+    toastMsg("请稍候…");
+    return;
+  }
+  try {
+    await openPath(e.path);
+  } catch {
+    toastMsg(`原文件已缺失，无法恢复：${basenameOf(e.path)}`);
+    return; // keep the entry: only an explicit discard removes it
+  }
+  const a = tabs.active();
+  const docId = a?.info.docId;
+  const h = docId === undefined ? undefined : editors.get(docId);
+  const ds = docId === undefined ? undefined : docStates.get(docId);
+  if (docId === undefined || !h || !ds || ds.path !== e.path) {
+    toastMsg("恢复失败：未找到刚打开的文档");
+    return;
+  }
+  try {
+    const c = await recoveryLoad(e.path);
+    h.replaceText(c.text); // triggers onDirty -> a fresh shadow after the next idle
+    ds.encoding = c.encoding || ds.encoding;
+    ds.eol = c.eol || ds.eol;
+    status.setEncoding(ds.encoding);
+    status.setEol(ds.eol);
+    tabs.refreshDirty(docId);
+    // Drop the consumed shadow; the dirty editor re-writes it after 2s idle.
+    await recoveryDiscard(e.path).catch(() => {});
+    recoveryEntries = recoveryEntries.filter((x) => x.path !== e.path);
+    renderRecoveryBanner();
+    toastMsg(`已恢复 ${basenameOf(e.path)}（仍未保存）`);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+async function onRecoveryToggle(want: boolean): Promise<void> {
+  try {
+    await recoverySetEnabled(want);
+    recoveryOn = want;
+    if (want) {
+      void checkRecovery();
+    } else {
+      recoveryDebounce.cancelAll();
+      recoveryEntries = [];
+      removeRecoveryBanner();
+    }
+  } catch (err) {
+    if (recoveryChk) recoveryChk.checked = !want; // roll back the checkbox
+    reportError(err);
+  }
+}
+
+async function initRecovery(): Promise<void> {
+  try {
+    recoveryOn = await recoveryEnabled();
+  } catch {
+    recoveryOn = true; // default on when the config cannot be read
+  }
+  if (recoveryChk) recoveryChk.checked = recoveryOn;
+  if (recoveryOn) void checkRecovery();
 }
 
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
@@ -1808,3 +1961,4 @@ registerShortcuts();
 // timing endpoint for the manual GUI cold-start measurement. A headless CI
 // cannot observe real first-paint, so §2 records P1/P2 as human smoke items.
 void appPing().catch(() => {});
+void initRecovery();

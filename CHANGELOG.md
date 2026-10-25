@@ -31,6 +31,11 @@
 **Why:** spec §4。2s 节流只在“编辑模式 + 脏 + 开关开”时排影；保存（含 Save-As 前后两 path）/关闭/换编码丢弃后删影 + 清定时器；写影失败 best-effort 不拖断编辑。
 **验证:** `npm --prefix app/frontend run build`（tsc 通过，43 modules）+ `npm test` 61 pass（无回归；时序逻辑已由 T3 单测覆盖）。
 
+### Task 6. 侧栏勾选框 + 启动横幅 + 恢复/丢弃
+**Files:** Modify `app/frontend/src/main.ts`（侧栏 `.side-option` “崩溃恢复”复选框；`initRecovery` 读配置回填 + 拉起 `checkRecovery`；`onRecoveryToggle` 写配置/回滚/禁用时 `cancelAll`+收横幅；`renderRecoveryBanner`/`discardRecovery`/`discardAllRecovery`/`restoreRecovery`（`openPath`→`recoveryLoad`→`replaceText`→套 encoding/eol→仍脏→删旧影）；启动尾部 `void initRecovery();`）；Modify `styles.css`（`.side-option` + `.recovery-banner/head/list/row/label/foot`，用现有主题 token）。
+**Why:** spec §4。横幅不阻塞启动；原文件缺失时提示且**不删条目**（仅显式丢弃）；禁止/开启与 config.toml 双向一致，写失败回滚勾选。
+**验证:** `run build`（tsc 通过）+ `npm test` 61 pass；GUI 手工清单留 Task 7。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
