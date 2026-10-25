@@ -66,7 +66,7 @@
 - `doc_reload`（集成，tempfile）：改文件内容/行数后 reload → 返回新 `totalLines`，`doc_chunk` 读到新文本，`disk_meta` 已更新。
 **前端：**
 - `tabs.setExternalFlag`（伪 view）：黄点 class 切换、与 `refreshDirty` 独立。
-- `ipc` 包装 typeof（watchSubscribe/docReload/watchRetarget）。
+- `ipc` 包装 typeof（watchSubscribe/docReload/watchStatus）。
 - 纯 helper（如需）：`clampScroll(prev, newMax)`。
 **GUI 手工：**只读日志 `echo >>` 追加→自动重载且滚动保持；编辑干净→外部覆盖→文本更新、光标近似保持；编辑脏→外部覆盖→黄点+提示条→保存弹三选（三种分支）；删除文件→提示；降级状态栏。
 

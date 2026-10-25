@@ -1244,6 +1244,7 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
       if (h && h.isDirty()) h.markSaved();
       const closed = await handleClose(docId);
       if (!closed) return;
+      watchPending.delete(docId); // the tab is gone: never replay onto a dead id
       await openPath(path);
       toastMsg("文件大小变化导致视图模式切换，已重新打开");
       return;
@@ -1490,6 +1491,8 @@ function afterSave(
   // A successful write resolves any external-change warning.
   tabs.setExternalFlag(docId, false);
   hideExtBar(docId);
+  // Save-As may have moved the file to a directory that failed to watch.
+  void refreshWatchStatus();
 }
 
 /**
