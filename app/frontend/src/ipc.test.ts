@@ -23,6 +23,9 @@ import {
   watchSubscribe,
   docReload,
   watchStatus,
+  keymapGet,
+  keymapSet,
+  keymapReset,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -137,6 +140,12 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("external_watch_wrappers_are_functions", () => {
     for (const fn of [watchSubscribe, docReload, watchStatus]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("keymap_wrappers_are_functions", () => {
+    for (const fn of [keymapGet, keymapSet, keymapReset]) {
       expect(typeof fn).toBe("function");
     }
   });

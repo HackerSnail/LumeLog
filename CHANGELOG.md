@@ -2,6 +2,46 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
+
+**依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。
+
+### 终审修复波（CodeReview 全分支 1 Critical / 3 Important / 5 Minor，全修）
+**Files:** `keymap.ts`（**Critical**：`mergeBindings` 先 `normalizeAccel`+`validate`，非法覆盖不遮挡默认并记 `invalid`；`validate` 拒绝保留键 F3（任意修饰）与 Ctrl+F；`+`→`Plus`）；`keymap.test.ts`（+2 用例/改断言）；`commands.rs`（`read_config_text→Result`：NotFound=空、真实 IO 错误上浮，避免读失败后整文件覆写；`recovery_set_enabled` 复用同一读写 helper；`keymap_*` 用 `?`）；`keymap-ui.ts`（`onSet/onResetAll` 返回新合并表、模态据此整表重绘；`#app` inert；初始聚焦关闭钮；说明补系统键/布局）；`keymap-ui.test.ts`（mock 返回合并表）；`main.ts`（`applyKeymapState` 上报 `invalid`；侧栏“快捷键设置…”免快捷键入口；移除查询按钮硬编码键提示；`applyKeymap/resetKeymapAll` 返回合并表）；`styles.css`（`.side-action`）；spec/plan 同步。
+**Why:** Critical 为真安全缺口（手写 `save="S"` 会变成全局裸字母键、劫持输入并反复保存）；Important：F3/Ctrl+F 明明不可自定义却可录制/持久化、读配置失败会静默覆写整个 `config.toml`、`palette` 解绑后设置面板不可达；Minor：无焦点陷阱、`Ctrl++` 不可解析、模态快照与 live 合并不一致、工具栏键提示陈旧、缺系统键提示。
+**验证:** `cargo test -p lumelog-app` 87 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm test` 82 pass（keymap 9→11）+ `npm run build` tsc 通过（45 modules）。
+**定向复审：** 9/9 ADDRESSED、无新增破坏；追加：`invalid` toast 区分“已用默认/已置未绑定”（无默认的 7 个动作不再误报）。
+
+### Task 1. 后端 `keymap` 存储层
+**Files:** Create `app/src-tauri/src/keymap.rs`（`read_keymap`/`set_binding`/`reset_keymap` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod keymap;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
+**Why:** spec §4—`[keymap]` 表：缺失→默认、`""`→解绑、`set_binding(None)`→删键回默认；保留 `recovery_enabled`/`theme` 等其它配置键；删空表时不写空 `[keymap]`；坏 TOML 重建。
+**验证:** `cargo test -p lumelog-app keymap::` 7 pass（缺表/非串跳过、保留其它键、None 删键、删空表、`""` 解绑、reset 只删表、坏文本重建）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 2. `keymap_get` / `keymap_set` / `keymap_reset` 命令
+**Files:** Modify `app/src-tauri/src/commands.rs`（`read_config_text`/`write_config_text` + 3 命令；读写走现有 `config_path`）；Modify `app/src-tauri/src/lib.rs`（注册）；`keymap.rs`（剥模块 allow）。
+**Why:** spec §4；`keymap_set` 的 `accel=None` 回默认、`Some("")` 解绑；写盘前 `create_dir_all`；失败上浮 `io`。
+**验证:** `cargo test -p lumelog-app` 87 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 3. 前端 `keymap.ts`（规范/校验/合并）
+**Files:** Create `app/frontend/src/keymap.ts`（`ActionId`/`ACTION_IDS`/`DEFAULT_BINDINGS`、`eventToAccel`、`parseAccel`/`formatAccel`/`normalizeAccel`、`validate`、`mergeBindings`、`conflictOf`）；Create `keymap.test.ts`（9 测）。
+**Why:** spec §3。Ctrl 同时匹配 Ctrl/Cmd；validate 要求 Ctrl/Alt 或 F1–F24（防劫持）；合并先默认后覆盖（`""`=解绑），冲突先到先得并记录，未知 id 上报。
+**验证:** `npm test` 77 pass（+9）+ `run build` tsc 通过（43 modules）。
+
+### Task 4. 前端 IPC 桥（快捷键）
+**Files:** Modify `app/frontend/src/ipc.ts`（`keymapGet/keymapSet/keymapReset`）；Modify `ipc.test.ts`（+1 typeof）。
+**Why:** spec §4；`keymapSet` 的 `accel=null` 回默认、`""` 解绑。
+**验证:** `npm test` 78 pass（ipc 13→14）+ `run build` tsc 通过。
+
+### Task 5. `ACTION_DEFS` 单一动作源 + 表驱动分发
+**Files:** Modify `app/frontend/src/main.ts`（`ACTION_DEFS`（13 项）+ `actionTitle`；`initKeymap`/`applyKeymapState`（冲突/未知 id toast）；`buildCommands` 由 `ACTION_DEFS` 生成 + 保留 theme-*；`registerShortcuts` 改 `eventToAccel→accelToAction→run`，F3 分支保持首位，模态打开时短路；启动 `initKeymap`）。
+**Why:** spec §2/§3/§5—面板、分发、模态共用一套动作；旧硬编码 Ctrl+S/O/G/Shift+F/Shift+P 全部退出，生效键完全由 `keymapState` 决定。
+**验证:** `run build`（tsc 通过，44 modules）+ `npm test` 78 pass。
+
+### Task 6. 录制模态 + 样式 + 接线
+**Files:** Create `app/frontend/src/keymap-ui.ts`（`openKeymapModal`：行=标题/当前键/录制/清除/默认 + 错误行；录制独占 keydown（capture）+ Esc 取消 + `validate` + `conflictOf` 红字；“全部恢复默认”后本地重置为空默认集）；Create `keymap-ui.test.ts`（2 个 jsdom 用例：冲突拒/裸键拒/Alt+K 落盘/close changed、Esc 取消不落盘）；Modify `main.ts`（`applyKeymap`/`resetKeymapAll`/`openKeymapSettings` + 面板“快捷键设置…”）；`styles.css`（`.keymap-*`）。
+**Why:** spec §5。写盘失败时模态保留旧值并提示；模态打开时 `registerShortcuts` 短路；确认关闭回调只负责落 `keymapModalOpen`。
+**验证:** `npm test` 80 pass（13 文件，+2）+ `run build` tsc 通过（45 modules）。
+
 ## 2026-10-25 — 测试基建：jsdom DOM 单测
 
 **Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。

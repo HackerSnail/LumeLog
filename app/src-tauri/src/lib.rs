@@ -6,6 +6,7 @@
 mod can_export;
 mod commands;
 mod dto;
+mod keymap;
 mod recovery;
 mod state;
 mod watch;
@@ -25,6 +26,9 @@ pub fn run() {
             commands::doc_close,
             commands::watch_subscribe,
             commands::watch_status,
+            commands::keymap_get,
+            commands::keymap_set,
+            commands::keymap_reset,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,

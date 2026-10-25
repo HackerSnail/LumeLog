@@ -724,3 +724,20 @@ export function docReload(
 export function watchStatus(): Promise<WatchStatus> {
   return call<WatchStatus>("watch_status", {});
 }
+
+// ---- Keymap overrides (spec §8/§10, M3 子项目 C) ---------------------------
+
+/** Raw `[keymap]` overrides; absent actions use the built-in defaults. */
+export function keymapGet(): Promise<Record<string, string>> {
+  return call<Record<string, string>>("keymap_get", {});
+}
+
+/** Set (`""` = unbound) or clear (`null` = back to default) one binding. */
+export function keymapSet(action: string, accel: string | null): Promise<void> {
+  return call<void>("keymap_set", { action, accel });
+}
+
+/** Drop the whole `[keymap]` table (all actions back to defaults). */
+export function keymapReset(): Promise<void> {
+  return call<void>("keymap_reset", {});
+}

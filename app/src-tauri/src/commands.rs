@@ -442,6 +442,53 @@ pub fn watch_status(app: AppHandle) -> Result<WatchStatus, IpcError> {
     Ok(app.state::<AppWatch>().status())
 }
 
+// ---- keymap overrides (spec §8/§10, M3 C) -----------------------------------
+
+/// Read `config.toml`: a missing file is empty, but a real I/O error surfaces
+/// so callers never overwrite a config they could not read.
+fn read_config_text(app: &AppHandle) -> Result<String, IpcError> {
+    let path = config_path(app)?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(IpcError::new("io", format!("read config: {e}"))),
+    }
+}
+
+fn write_config_text(app: &AppHandle, text: &str) -> Result<(), IpcError> {
+    let path = config_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| IpcError::new("io", format!("create config dir: {e}")))?;
+    }
+    std::fs::write(&path, text).map_err(|e| IpcError::new("io", format!("write config: {e}")))
+}
+
+/// Current `[keymap]` overrides (absent keys mean defaults).
+#[tauri::command]
+pub fn keymap_get(app: AppHandle) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+    Ok(crate::keymap::read_keymap(&read_config_text(&app)?))
+}
+
+/// Set (`Some(accel)`, `""` = unbound) or clear (`None` = default) one binding.
+#[tauri::command]
+pub fn keymap_set(
+    app: AppHandle,
+    action: String,
+    accel: Option<String>,
+) -> Result<(), IpcError> {
+    let text = read_config_text(&app)?;
+    let next = crate::keymap::set_binding(&text, &action, accel.as_deref());
+    write_config_text(&app, &next)
+}
+
+/// Drop the whole `[keymap]` table (all actions back to defaults).
+#[tauri::command]
+pub fn keymap_reset(app: AppHandle) -> Result<(), IpcError> {
+    let text = read_config_text(&app)?;
+    write_config_text(&app, &crate::keymap::reset_keymap(&text))
+}
+
 /// Read + lenient-parse a DBC file. Lenient so a single bad construct does not
 /// void the whole import — the good messages are kept and warnings surface (spec
 /// §7.1 "跳过坏行继续"). Never panics on non-UTF-8 bytes (lossy).
@@ -1169,10 +1216,7 @@ fn config_path(app: &AppHandle) -> Result<std::path::PathBuf, IpcError> {
 
 /// Current `recovery_enabled` (missing/unreadable config -> true).
 fn recovery_enabled_now(app: &AppHandle) -> bool {
-    let text = config_path(app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .unwrap_or_default();
+    let text = read_config_text(app).unwrap_or_default();
     crate::recovery::read_recovery_enabled(&text)
 }
 
@@ -1245,16 +1289,9 @@ pub fn recovery_enabled(app: AppHandle) -> Result<bool, IpcError> {
 /// Write `recovery_enabled` into `config.toml`, preserving other keys.
 #[tauri::command]
 pub fn recovery_set_enabled(app: AppHandle, enabled: bool) -> Result<(), IpcError> {
-    let path = config_path(&app)?;
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = read_config_text(&app)?;
     let next = crate::recovery::set_recovery_enabled(&text, enabled);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| IpcError::new("io", format!("create config dir: {e}")))?;
-    }
-    std::fs::write(&path, next)
-        .map_err(|e| IpcError::new("io", format!("write config: {e}")))?;
-    Ok(())
+    write_config_text(&app, &next)
 }
 
 #[cfg(test)]
