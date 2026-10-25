@@ -16,6 +16,11 @@
 **Why:** spec §3.2。`export::run<W:Write>(doc, matcher, writer, on_progress, cancel) -> ExportStats{written,scanned,cancelled,errored}` 逐块 `chunk_at`（`chunk_lines` 去尾换行与 filter_run 的 `DocLines` 同法，保证 keep 判定与屏显一致）→保留行用 `line_byte_range`+`read_window` 取**原始字节**写 `writer`（不转码，精确保编码/行尾）；每行判 cancel、每块报进度；读/写错吸收为 `errored` 不返回 Result（落 core 因 `line_byte_range/read_window` 是 `pub(crate)`）。
 **验证:** `cargo test -p lumelog-core export::` 4 pass（字节一致/含选中行“bb\n”、CRLF+无尾换行全量逐字节、GBK 多字节原样拷贝、取消早停且输出为前缀）；`cargo clippy -p lumelog-core --all-targets -- -D warnings` 净。
 
+### Task 3. 时序/导出 DTO（`lumelog-app`）
+**Files:** Modify `app/src-tauri/src/dto.rs`（新增 `TimeSpecJson{extractPattern,format,from?,to?,keepWhenNoTs}`(+`to_core`→`TimeSpec`，未知格式→Iso)、`ExportProgress{written}`、`ExportStatsJson{written,scanned,cancelled,errored}`(+`From<core ExportStats>`)；均 camelCase；+`timeline_export_dto_tests`）。未接入命令前加带注释 `#[allow(dead_code)]`（Task 4/5 剥）。
+**Why:** spec §3.3，为 `filter_run`/`export_lines` 定契约；时间轴编译错误由 core `LineFilter::build`→`IpcError::from_core`→`invalid_pattern`（无新错误码）。
+**验证:** `cargo test -p lumelog-app` 26 pass（新 3：格式映射/驼峰导出/From core）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
