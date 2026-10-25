@@ -33,6 +33,9 @@ import {
   recoveryLoad,
   recoveryEnabled,
   recoverySetEnabled,
+  watchSubscribe,
+  docReload,
+  type ExternalEvent,
   IpcError,
   type DocInfo,
   type IndexProgress,
@@ -97,6 +100,11 @@ const recoveryWrites = new Map<string, Promise<void>>();
 let recoveryChk: HTMLInputElement | null = null;
 let recoveryBannerEl: HTMLElement | null = null;
 let recoveryEntries: RecoveryEntry[] = [];
+// External-watch reload single-flight (per doc) + one non-blocking bar.
+const watchReloading = new Set<number>();
+const watchPending = new Set<number>();
+let extBarEl: HTMLElement | null = null;
+let extBarDocId: number | null = null;
 
 // ---- CanPanel / CAN decode state (spec §7.4) --------------------------------
 // One panel instance is re-attached to whichever document is active; each
@@ -1081,6 +1089,148 @@ async function initRecovery(): Promise<void> {
   if (recoveryOn) void checkRecovery();
 }
 
+// ---- external modification watcher (spec §4.4/A10, M3 B2) -------------------
+
+async function initWatch(): Promise<void> {
+  try {
+    const st = await watchSubscribe(handleExternalEvent);
+    status.setWatch(st.degraded ? "degraded" : "ok", st.degraded ?? undefined);
+  } catch {
+    status.setWatch("degraded", "订阅外部监听失败");
+  }
+}
+
+function handleExternalEvent(e: ExternalEvent): void {
+  const hits: number[] = [];
+  for (const [id, ds] of docStates) {
+    if (ds.path === e.path) hits.push(id);
+  }
+  for (const docId of hits) {
+    if (e.kind === "removed") {
+      tabs.setExternalFlag(docId, true);
+      toastMsg(`文件已被外部删除：${basenameOf(e.path)}`);
+      continue;
+    }
+    const h = editors.get(docId);
+    if (h && h.isDirty()) {
+      tabs.setExternalFlag(docId, true);
+      showExtBar(docId, e.path);
+      continue;
+    }
+    void reloadDocFromDisk(docId, e.path);
+  }
+}
+
+/** Non-blocking bar for a dirty doc whose file changed on disk. */
+function showExtBar(docId: number, path: string): void {
+  if (extBarDocId !== null) hideExtBar(extBarDocId);
+  const box = document.createElement("div");
+  box.className = "ext-bar";
+  box.setAttribute("role", "status");
+  const label = document.createElement("span");
+  label.className = "ext-label";
+  label.textContent = `文件已被外部修改：${basenameOf(path)}`;
+  const reloadBtn = mkBtn("重新加载（丢弃我的修改）", "用磁盘内容覆盖当前编辑", () =>
+    void reloadDirtyFromDisk(docId, path),
+  );
+  const keepBtn = mkBtn("保留我的修改", "黄点保留，保存时再决定", () => hideExtBar(docId));
+  box.append(label, reloadBtn, keepBtn);
+  document.body.append(box);
+  extBarEl = box;
+  extBarDocId = docId;
+}
+
+function hideExtBar(docId: number): void {
+  if (extBarDocId !== docId) return;
+  extBarEl?.remove();
+  extBarEl = null;
+  extBarDocId = null;
+}
+
+/** Dirty "重新加载": confirm discarding local edits, then reload from disk. */
+async function reloadDirtyFromDisk(docId: number, path: string): Promise<void> {
+  const go = await ask("重新加载会丢弃当前未保存的修改，是否继续？", {
+    title: "外部修改",
+    kind: "warning",
+    okLabel: "丢弃并重新加载",
+    cancelLabel: "取消",
+  });
+  if (!go) return;
+  hideExtBar(docId);
+  await reloadDocFromDisk(docId, path);
+}
+
+/** Reload a clean doc from disk, keeping cursor/scroll; dirty callers confirm first. */
+async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
+  if (watchReloading.has(docId)) {
+    watchPending.add(docId);
+    return;
+  }
+  watchReloading.add(docId);
+  const ds = docStates.get(docId);
+  const h = editors.get(docId);
+  const list = lists.get(docId);
+  let scroll = 0;
+  let sel: { anchor: number; head: number } | null = null;
+  if (h) {
+    scroll = h.view.scrollDOM.scrollTop;
+    const m = h.view.state.selection.main;
+    sel = { anchor: m.anchor, head: m.head };
+  } else if (list) {
+    scroll = list.scrollTop();
+  }
+  try {
+    const info = await docReload(docId, () => {});
+    if (!ds) return;
+    if (info.mode !== ds.mode) {
+      // Grew/shrank across the 200 MB threshold: reopen keeps views truthful.
+      watchPending.delete(docId);
+      await handleClose(docId);
+      await openPath(path);
+      toastMsg("文件大小变化导致视图模式切换，已重新打开");
+      return;
+    }
+    ds.encoding = info.encoding;
+    ds.eol = info.eol;
+    ds.totalLines = info.totalLines ?? info.lineCountEstimate;
+    ds.invalid = 0;
+    indexed.set(docId, ds.totalLines);
+    if (h) {
+      const { text, invalidCount } = await loadAllText(docId, ds.totalLines);
+      ds.invalid = invalidCount;
+      h.replaceText(text);
+      h.markSaved();
+      const len = h.view.state.doc.length;
+      if (sel) {
+        h.view.dispatch({
+          selection: { anchor: Math.min(sel.anchor, len), head: Math.min(sel.head, len) },
+        });
+      }
+      h.view.scrollDOM.scrollTop = scroll;
+      tabs.refreshDirty(docId);
+    } else if (list) {
+      list.invalidate();
+      list.setView(null, false, false);
+      queryHits.delete(docId);
+      queryCursor.delete(docId);
+      list.refresh();
+      list.setScrollTop(scroll);
+    }
+    syncStatus(docId);
+    updateInspector(docId);
+    refreshSidebar();
+    tabs.setExternalFlag(docId, false);
+    hideExtBar(docId);
+    toastMsg(`文件已变化，已重新加载：${basenameOf(path)}`);
+  } catch (err) {
+    tabs.setExternalFlag(docId, true); // reload failed (deleted/locked): keep the warning
+    reportError(err);
+  } finally {
+    watchReloading.delete(docId);
+    if (watchPending.delete(docId)) void reloadDocFromDisk(docId, path);
+  }
+}
+
 async function mountDoc(info: DocInfo, path: string): Promise<void> {
   const total = info.totalLines ?? info.lineCountEstimate;
   indexed.set(info.docId, total);
@@ -1262,6 +1412,9 @@ function afterSave(
   // Saved: the shadow is stale — clear both the pre-Save-As and the new path.
   cancelRecovery(docId, prevPath);
   cancelRecovery(docId, ds.path);
+  // A successful write resolves any external-change warning.
+  tabs.setExternalFlag(docId, false);
+  hideExtBar(docId);
 }
 
 /**
@@ -1352,6 +1505,7 @@ async function handleClose(docId: number): Promise<void> {
   }
   const closing = docStates.get(docId);
   if (closing) cancelRecovery(docId, closing.path);
+  hideExtBar(docId);
   tabs.remove(docId);
   docStates.delete(docId);
   editors.delete(docId);
@@ -1989,3 +2143,4 @@ registerShortcuts();
 // cannot observe real first-paint, so §2 records P1/P2 as human smoke items.
 void appPing().catch(() => {});
 void initRecovery();
+void initWatch();

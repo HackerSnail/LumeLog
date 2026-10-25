@@ -26,6 +26,11 @@
 **Why:** spec §3。项目无 jsdom，TabStrip 本体不可无依赖测——把黄点表现抽为 `externalDot` 纯函数单测；`.ext-dot` 独立于 `.dirty-dot`。
 **验证:** `npm test` 64 pass（10 文件，+3）+ `run build` tsc 通过（43 modules）。
 
+### Task 5. `main.ts` 外部事件分发
+**Files:** Modify `app/frontend/src/main.ts`（`initWatch` 启动订阅 + 降级写状态栏；`handleExternalEvent` 按 path 反查 docId：removed→黄点+toast；脏→黄点+`.ext-bar`（重新加载/保留）；干净→`reloadDocFromDisk`；单飞 `watchReloading`/`watchPending`；编辑保 scroll/选区、只读保 scroll + 清查询；跨 200MB 模式变化→关+重开；重载失败→黄点保留；`afterSave`/`handleClose` 清黄点与提示条）。
+**Why:** spec §3。重载在 `docReload` 后重新拼装状态（encoding/eol/totalLines/invalid）并 `markSaved`；黄点/提示条在保存/关闭/成功重载时清除。
+**验证:** `run build`（tsc 通过）+ `npm test` 64 pass（无回归；DOM 路径留 GUI 手工）。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。
