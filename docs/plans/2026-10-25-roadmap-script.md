@@ -60,7 +60,7 @@
 **Interfaces:**
 - DTO（camelCase）：`ScriptEntry{name,sizeBytes,modifiedMs}`、`ScriptConsole{level,text}`、`ScriptProgress{scanned,written}`、`ScriptStatsJson{scanned,written,dropped,cancelled,truncatedConsole,error}`。
 - `script_list/script_read/script_write/script_delete`（同步）；`script_run(state, app, doc_id:u64, code:String, target_path:String, on_console:Channel<ScriptConsole>, on_progress:Channel<ScriptProgress>, on_done:Channel<ScriptStatsJson>) -> Result<u64,IpcError>`（prologue：doc 存在、目标≠源、目录可建；`begin_search`+spawn_blocking+`end_search`）；`script_cancel(req_id)`。
-- [ ] **Step 1：测试**：`script_stats_camel_case`；`script_write_rejects_bad_name`（走 helper）；目标==源拒绝（纯 helper `same_path`）。
+- [ ] **Step 1：测试**：`script_stats_camel_case`（camelCase/error 空值）；`same_path`（同路径/不同路径、大小写/分隔符用 `canonicalize` 或字面比较的约定）；名称校验已由 T1 覆盖，不重复。
 - [ ] **Step 2：** FAIL→实现+注册→PASS + clippy。
 - [ ] **Step 3：** CHANGELOG；commit `feat:script-commands` + push。
 
