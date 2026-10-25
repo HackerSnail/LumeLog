@@ -95,6 +95,60 @@ pub fn doc_open(
     Ok(info)
 }
 
+/// Reopen `doc_id`'s file from disk (external change): refresh the `DocFile` in
+/// place so the id/tab stay stable. Testable without `State`.
+fn reload_doc(state: &AppDocs, doc_id: u64) -> Result<DocInfo, IpcError> {
+    let arc = state
+        .get(doc_id)
+        .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
+    let path = {
+        let d = arc.lock().unwrap_or_else(|p| p.into_inner());
+        d.path().to_path_buf()
+    };
+    lumelog_core::doc::validate_open_path(&path, SIZE_LIMIT)
+        .map_err(IpcError::from_open_reject)?;
+    let doc = DocFile::open(&path, SIZE_LIMIT).map_err(IpcError::from_core)?;
+    let size = doc.size();
+    let encoding = doc.encoding().as_str().to_string();
+    let eol = eol_str(doc.eol_style());
+    let lines = doc.line_count() as u64;
+    let mtime_millis = doc
+        .mtime()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if !state.replace(doc_id, doc) {
+        return Err(IpcError::new("unknown_doc", format!("no document {doc_id}")));
+    }
+    Ok(DocInfo {
+        doc_id,
+        size,
+        mtime_millis,
+        encoding,
+        eol,
+        mode: mode_str(size),
+        line_count_estimate: lines,
+        total_lines: Some(lines),
+    })
+}
+
+/// Reload a document after an external change (spec §4.4). Rebuilds the line
+/// index and returns the fresh `DocInfo` (mode may have changed).
+#[tauri::command]
+pub fn doc_reload(
+    state: tauri::State<'_, AppDocs>,
+    doc_id: u64,
+    on_progress: Channel<IndexProgress>,
+) -> Result<DocInfo, IpcError> {
+    let info = reload_doc(&state, doc_id)?;
+    let _ = on_progress.send(IndexProgress {
+        doc_id,
+        indexed_bytes: info.size,
+        done: true,
+    });
+    Ok(info)
+}
+
 /// Decode `[line_start, line_start+line_count)` and stream it to the front end.
 /// `char_map` stays core-side (the front end renders text only).
 #[tauri::command]
@@ -1193,6 +1247,51 @@ pub fn recovery_set_enabled(app: AppHandle, enabled: bool) -> Result<(), IpcErro
     std::fs::write(&path, next)
         .map_err(|e| IpcError::new("io", format!("write config: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+
+    #[test]
+    fn reload_after_external_rewrite() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"a\nb\nc\n").unwrap();
+        f.flush().unwrap();
+        let path = f.path().to_path_buf();
+        let state = AppDocs::default();
+        let id = state.insert(DocFile::open(&path, 1 << 20).unwrap());
+
+        // External rewrite: five lines.
+        {
+            let mut w = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            w.write_all(b"1\n2\n3\n4\n5").unwrap(); // no trailing \n -> 5 lines
+            w.flush().unwrap();
+        }
+
+        let info = reload_doc(&state, id).unwrap();
+        assert_eq!(info.total_lines, Some(5));
+        let text = {
+            let arc = state.get(id).unwrap();
+            let mut d = arc.lock().unwrap();
+            d.chunk_at(0, 5).unwrap().text
+        };
+        assert!(text.contains('5'), "{text}");
+        let disk_len = std::fs::metadata(&path).unwrap().len();
+        let snap_len = state.get(id).unwrap().lock().unwrap().disk_meta().0;
+        assert_eq!(snap_len, disk_len, "snapshot refreshed after reload");
+    }
+
+    #[test]
+    fn reload_unknown_doc_is_unknown_doc() {
+        let state = AppDocs::default();
+        let err = reload_doc(&state, 42).unwrap_err();
+        assert_eq!(err.code, "unknown_doc");
+    }
 }
 
 #[cfg(test)]

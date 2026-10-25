@@ -76,6 +76,19 @@ impl AppDocs {
             .collect()
     }
 
+    /// Replace a document's `DocFile` in place, keeping its id and `Arc` so any
+    /// in-flight reader (`DocLines`/export) immediately sees the fresh file.
+    /// Returns false for an unknown id.
+    pub fn replace(&self, id: u64, doc: DocFile) -> bool {
+        match self.get(id) {
+            Some(arc) => {
+                *arc.lock().unwrap_or_else(|p| p.into_inner()) = doc;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Begin a search: mint a request id and its (shared) cancel flag.
     pub fn begin_search(&self) -> (u64, Arc<AtomicBool>) {
         let id = Self::next_id(&self.next_req_id);
@@ -144,5 +157,21 @@ mod tests {
         want.sort_unstable();
         assert_eq!(got, want);
         assert!(s.snapshot_for_path(Path::new("C:/nope/x.log")).is_empty());
+    }
+
+    #[test]
+    fn replace_swaps_in_place() {
+        let s = AppDocs::default();
+        let mut a = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut a, b"one\n").unwrap();
+        let mut b = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut b, b"x\ny\nz").unwrap(); // no trailing \n -> 3 lines
+
+        let id = s.insert(DocFile::open(a.path(), 1 << 20).unwrap());
+        let fresh = DocFile::open(b.path(), 1 << 20).unwrap();
+        assert!(s.replace(id, fresh));
+        let lines = s.get(id).unwrap().lock().unwrap().line_count();
+        assert_eq!(lines, 3, "same id now serves the replacement doc");
+        assert!(!s.replace(9_999, DocFile::open(b.path(), 1 << 20).unwrap()));
     }
 }

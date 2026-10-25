@@ -20,6 +20,7 @@ pub fn run() {
             commands::app_ping,
             commands::doc_open,
             commands::doc_chunk,
+            commands::doc_reload,
             commands::doc_set_encoding,
             commands::doc_close,
             commands::watch_subscribe,

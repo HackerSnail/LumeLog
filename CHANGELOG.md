@@ -16,6 +16,11 @@
 **Why:** spec §2。watcher 回调只入 `pending` 并唤醒；去抖线程等首个事件后持续等到 500ms 无新事件才 drain；drain 时按 `snapshot_for_path` 逐 doc `classify`（Removed 优先、每 path 只发一条）；watcher 创建失败→`degraded` 不阻塞。
 **验证:** `cargo test -p lumelog-app` 76 pass（+2：`snapshot_for_path` 同 path 两 doc/未知 path；`watch_status_starts_not_degraded`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净（notify 6.1.1 编译通过）。
 
+### Task 3. `AppDocs::replace` + `doc_reload`
+**Files:** Modify `app/src-tauri/src/state.rs`（`replace(id,doc)` 锁同一 Arc 原地赋值 + 测）；Modify `commands.rs`（可测 `reload_doc(state,doc_id)` + `#[tauri::command] doc_reload`；重开前 `validate_open_path`，超限→`too_large`；返回新 `DocInfo`（同 id，mode 可能变）+完成 tick；+ `reload_tests` 2 例）；Modify `lib.rs`（注册）。
+**Why:** spec §3。原地替换保 Arc 一致（`DocLines`/导出持有的 Arc 立即看到新文件）；`DocFile::open` 重建索引/刷新 `(size,mtime)`。测试夹具采用无尾换行（核心行语义：尾 `\n` 会多一空行）。
+**验证:** `cargo test -p lumelog-app` 79 pass（+3：replace 同 id 新 doc/未知 id；reload 外部改 3→5 行、`chunk_at` 新文本、`disk_meta` 刷新；未知 doc 码）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。
