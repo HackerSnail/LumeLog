@@ -41,6 +41,12 @@
 **Why:** spec §4.1。导出与扫描共用单任务互斥（queryBusy/queryReqId），`queryKind` 决定 Stop 取消哪个；时间轴/行号退化由 `pickTimelineInput` 集中判定（可测）。
 **验证:** `npm --prefix app/frontend test` 54 pass（新 `query.test.ts` 7 + ipc 10）+ `run build`（tsc 通过，42 modules）。
 
+### Task 8. 样式 + 全量验收
+**Files:** Modify `app/frontend/src/styles.css`（`.query-time` 时序行：flex-wrap、`input[placeholder^="抽取"]` 增长、起/止窄；按 placeholder 定位避免误命中勾选框）。
+**Why:** spec §7。面板复用 `#search-panel` flex 列（head/conds/timeRow/status），时序行固定不抢 conds 滚动区。
+**手工验收清单（需 `tauri dev`）：**① ISO 时间窗只显区间内行；② 不填抽取→行号区间退化生效；③ 保留无时间戳行开关有/无效；④ 导出当前筛选→目标文件行内容/编码/行尾与源一致（多字节/CRLF）；⑤ 大文件导出中“停止”→文件为前缀、toast 区分取消/中断/成功。
+**验证（全量四门）:** `cargo test --workspace` 全绿（app 30、core 78 含 filter16/export4、can 集成、cli_smoke 9/1 ignored、docfile/proptest）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 54 pass + `run build`（tsc 通过）。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
