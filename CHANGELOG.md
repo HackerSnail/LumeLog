@@ -16,6 +16,11 @@
 **Why:** spec §4；`keymap_set` 的 `accel=None` 回默认、`Some("")` 解绑；写盘前 `create_dir_all`；失败上浮 `io`。
 **验证:** `cargo test -p lumelog-app` 87 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 3. 前端 `keymap.ts`（规范/校验/合并）
+**Files:** Create `app/frontend/src/keymap.ts`（`ActionId`/`ACTION_IDS`/`DEFAULT_BINDINGS`、`eventToAccel`、`parseAccel`/`formatAccel`/`normalizeAccel`、`validate`、`mergeBindings`、`conflictOf`）；Create `keymap.test.ts`（9 测）。
+**Why:** spec §3。Ctrl 同时匹配 Ctrl/Cmd；validate 要求 Ctrl/Alt 或 F1–F24（防劫持）；合并先默认后覆盖（`""`=解绑），冲突先到先得并记录，未知 id 上报。
+**验证:** `npm test` 77 pass（+9）+ `run build` tsc 通过（43 modules）。
+
 ## 2026-10-25 — 测试基建：jsdom DOM 单测
 
 **Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。
