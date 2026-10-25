@@ -11,6 +11,11 @@
 **Why:** 与项目自带 candump/ASC 解析一致、可行性可控；不依赖第三方 BLF crate。FD64 首版按参照实现 `cursor+40` 偏移会错 16B（测试捕获：数据从第 17 字节开始）→ 按真实 40B 结构改为 payload@40。
 **验证:** `cargo test -p lumelog-can blf::` 10 pass（经典字段/时间 1.5s、ext/RTR/channel、FD100 dlc 9→12 + edl/brs/esi、FD64 64B、zlib 等价、跨容器一帧、10µs、未知对象 skipped、坏 magic/截断）+ `cargo clippy -p lumelog-can --all-targets -- -D warnings` 净。
 
+### Task 2. 抽取 `export_frames`（行为不变）
+**Files:** Modify `app/src-tauri/src/can_export.rs`（新增 `export_frames(src:&mut dyn FrameSource, ...)`，把表头/列/循环/统计原样搬移；`export_can` 仅建 `DocLines`+`build_frame_source` 后调用它）。
+**Why:** BLF 无 `DocLines`，需与文本源共用帧→行/过滤/取消/统计逻辑；行为与签名不变。
+**验证:** `cargo test -p lumelog-app can_export::` 20 pass（既有断言零改动）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。

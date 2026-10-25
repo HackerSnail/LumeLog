@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use lumelog_can::dbc::Database;
+use lumelog_can::source::FrameSource;
 use lumelog_core::doc::DocFile;
 
 use crate::commands::{build_frame_source, DocLines};
@@ -146,36 +147,21 @@ pub struct CanExportStats {
 
 const CAN_EXPORT_BATCH: u64 = 512;
 
-/// Stream a CAN log's filtered frames to `writer` as CSV (`wide=true`) or JSONL.
-/// Reuses `can_parse`'s per-chunk `DocLines` reader + `build_frame_source`, so it
-/// does NOT hold the doc lock for the whole run (concurrent `doc_chunk` reads
-/// interleave). `frame_json` decodes each frame once; `frame_matches` decides
-/// inclusion. Source-build or write failure sets `errored` and stops (no `Result`);
-/// `cancel` is checked per frame.
-#[allow(clippy::too_many_arguments)] // scan inputs (doc/dbc/source/filter/sink/callbacks)
-pub fn export_can<W: Write>(
-    doc_arc: &Arc<Mutex<DocFile>>,
+/// Stream an already-built frame source to `writer` as CSV (`wide=true`) or
+/// JSONL. Shared by the text-document sources (`export_can`) and the BLF export
+/// commands; `frame_json` decodes each frame once and `frame_matches` decides
+/// inclusion. Write failure sets `errored` and stops (no `Result`); `cancel` is
+/// checked per frame.
+#[allow(clippy::too_many_arguments)] // dbc/filter/sink/callbacks
+pub fn export_frames<W: Write>(
+    src: &mut dyn FrameSource,
     dbc: Option<&Database>,
-    kind: &str,
-    regex: &Option<String>,
     filter: &CanFilterJson,
     writer: &mut W,
     on_progress: &mut dyn FnMut(u64),
     cancel: &dyn Fn() -> bool,
     wide: bool,
 ) -> CanExportStats {
-    let lines = DocLines::new(doc_arc.clone());
-    let mut src = match build_frame_source(kind, regex, lines) {
-        Ok(s) => s,
-        Err(_) => {
-            return CanExportStats {
-                written: 0,
-                scanned: 0,
-                cancelled: false,
-                errored: true,
-            }
-        }
-    };
     let cols = db_signal_columns(dbc);
     let col_index: HashMap<String, usize> = cols
         .iter()
@@ -233,6 +219,37 @@ pub fn export_can<W: Write>(
         cancelled: false,
         errored: false,
     }
+}
+
+/// Stream a CAN log's filtered frames to `writer` as CSV (`wide=true`) or JSONL.
+/// Reuses `can_parse`'s per-chunk `DocLines` reader + `build_frame_source`, so it
+/// does NOT hold the doc lock for the whole run (concurrent `doc_chunk` reads
+/// interleave); the actual frame→row loop lives in [`export_frames`].
+#[allow(clippy::too_many_arguments)] // scan inputs (doc/dbc/source/filter/sink/callbacks)
+pub fn export_can<W: Write>(
+    doc_arc: &Arc<Mutex<DocFile>>,
+    dbc: Option<&Database>,
+    kind: &str,
+    regex: &Option<String>,
+    filter: &CanFilterJson,
+    writer: &mut W,
+    on_progress: &mut dyn FnMut(u64),
+    cancel: &dyn Fn() -> bool,
+    wide: bool,
+) -> CanExportStats {
+    let lines = DocLines::new(doc_arc.clone());
+    let mut src = match build_frame_source(kind, regex, lines) {
+        Ok(s) => s,
+        Err(_) => {
+            return CanExportStats {
+                written: 0,
+                scanned: 0,
+                cancelled: false,
+                errored: true,
+            }
+        }
+    };
+    export_frames(&mut *src, dbc, filter, writer, on_progress, cancel, wide)
 }
 
 /// True iff `fj` satisfies every active axis of `f` (AND), matching
