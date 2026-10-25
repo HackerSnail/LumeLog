@@ -26,6 +26,11 @@
 **Why:** `script-ui` 不直接依赖 ipc，由 main 注入回调；与现有双/三 Channel 包装形状一致。
 **验证:** `npm test` 90 pass（ipc 16→17）+ `run build` tsc 通过。
 
+### Task 5. `script-ui.ts` 脚本管理器模态
+**Files:** Create `app/frontend/src/script-ui.ts`（列表/新建模板/删除/保存/textarea+Tab/控制台/运行+取消/状态行；未保存确认；运行中锁编辑；`inert` 背景）；`script-ui.test.ts`（4 个 jsdom：列表选中读取、非法名+新建模板、保存调用、无文档禁用+运行流控制台）；`styles.css`（`.script-*`）。
+**Why:** 回调注入使模态不依赖 ipc、可 jsdom 测；名字规则与服务端一致；运行中禁止切脚本/编辑。
+**验证:** `npm test` 94 pass（14 文件，script-ui 4）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
