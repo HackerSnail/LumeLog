@@ -16,6 +16,11 @@
 **Why:** tail 增量不重建全文；签名长度必须用**旧 size 的前缀**（否则增长过 512 后哈希窗口变化会误判轮转—— 首版测试即捕获）；`try_append` 刷新快照避免 B2 watcher 重复触发。
 **验证:** `cargo test -p lumelog-core` 88 pass（+5：追加/无变化/截断/同大小改头/尾 LF）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 3. `doc_tail_append` 命令 + DTO
+**Files:** Modify `crates/lumelog-core/src/doc/file.rs`（修正：`head_sig` 窗口长度改为**打开时冻结的 `head_len`**——否则文件增长后哈希窗口变化会把正常追加误判为 Rotated；`reload_after_save` 同步 `head_len`）；`crates/lumelog-core/src/doc/mod.rs`（re-export `AppendOutcome`）；`app/src-tauri/src/dto.rs`（`TailAppendJson`）；`commands.rs`（可测 `tail_append` helper + `doc_tail_append` 命令 + `tail_tests` 2 例）；`lib.rs`（注册）。
+**Why:** spec §3；`Rotated` 不修改索引、交给前端 `doc_reload`；`NoChange` 返回当前行数。
+**验证:** `cargo test --workspace`（app 89 / core 88）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。

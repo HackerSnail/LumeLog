@@ -28,9 +28,11 @@ pub struct DocFile {
     eol_style: EolStyle,
     mtime: SystemTime,
     size: u64,
-    /// FNV-1a64 of the first up-to-512 bytes: detects rename/rotation even when
-    /// the replacement is the same size or larger.
+    /// FNV-1a64 of the first `head_len` bytes: detects rename/rotation even when
+    /// the replacement is the same size or larger. The length is frozen at open
+    /// time so growth does not change the hashed window.
     head_sig: u64,
+    head_len: usize,
     /// Decoded-chunk LRU: front = least-recently-used (evicted), back = most.
     cache: VecDeque<(u64, Chunk)>,
     cache_bytes: usize,
@@ -66,7 +68,8 @@ impl DocFile {
         // Record the dominant line-ending style from the decoded leading window
         // (spec §4.4: on open we detect CRLF/LF and store it as document metadata).
         let eol_style = detect_eol(&encoding::decode_all(label, &head).text);
-        let sig = head_sig(&head);
+        let sig_len = size.min(512) as usize;
+        let sig = head_sig(&head[..sig_len]);
 
         let index = build_index(&mut file, size, label)?;
 
@@ -79,6 +82,7 @@ impl DocFile {
             mtime,
             size,
             head_sig: sig,
+            head_len: sig_len,
             cache: VecDeque::new(),
             cache_bytes: 0,
         })
@@ -119,9 +123,9 @@ impl DocFile {
             return Ok(AppendOutcome::Rotated);
         }
         // Rotation fingerprint over the SAME prefix length used at open
-        // (`min(512, old_size)`): growth must not change the hashed window.
-        let head_len = self.size.min(512);
-        let head = read_at(&mut self.file, 0, head_len as usize)?;
+        // (`head_len` frozen at open time): growth must not change the window.
+        let head_len = self.head_len;
+        let head = read_at(&mut self.file, 0, head_len)?;
         if head_sig(&head) != self.head_sig {
             return Ok(AppendOutcome::Rotated);
         }
@@ -184,7 +188,8 @@ impl DocFile {
         self.file = file;
         self.size = size;
         self.mtime = mtime;
-        self.head_sig = head_sig(&head);
+        self.head_len = size.min(512) as usize;
+        self.head_sig = head_sig(&head[..self.head_len]);
         self.label = encoding;
         self.eol_style = eol_style;
         self.index = index;
