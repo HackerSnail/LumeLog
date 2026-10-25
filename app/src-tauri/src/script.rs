@@ -2,7 +2,6 @@
 //! define `onLine(line, ctx)`; the runner (Task 2) executes them in a locked-down
 //! QuickJS runtime over the active document's lines. This module owns the store
 //! (list/read/write/delete), name validation and the bounded console buffer.
-#![allow(dead_code)] // consumed by the script commands (Task 3)
 
 use std::cell::RefCell;
 use std::fs::File;
@@ -314,7 +313,6 @@ pub fn run_script(
     let console_buf = Rc::new(RefCell::new(ConsoleBuf::new()));
     let mut cancelled = false;
     let mut script_error: Option<String> = None;
-    let mut io_error: Option<String> = None;
 
     let ctx = match Context::full(&rt) {
         Ok(c) => c,
@@ -397,8 +395,7 @@ pub fn run_script(
                     break;
                 }
                 if writer.write_all(s.as_bytes()).and_then(|_| writer.write_all(b"\n")).is_err() {
-                    io_error = Some("写入输出文件失败".into());
-                    break;
+                    return Err(RunStop::Io("写入输出文件失败".into()));
                 }
                 out_bytes += bytes;
                 stats.written += 1;
@@ -436,16 +433,16 @@ pub fn run_script(
     if let Err(stop) = result {
         match stop {
             RunStop::Js(msg) => script_error = Some(msg),
-            RunStop::Io(msg) => io_error = Some(msg),
+            RunStop::Io(msg) => {
+                let _ = std::fs::remove_file(&tmp);
+                stats.cancelled = cancelled;
+                stats.error = Some(msg);
+                return stats;
+            }
         }
     }
     stats.cancelled = cancelled;
     let _ = writer.flush();
-    if let Some(msg) = io_error {
-        let _ = std::fs::remove_file(&tmp);
-        stats.error = Some(msg);
-        return stats;
-    }
     if let Err(e) = std::fs::rename(&tmp, target) {
         let _ = std::fs::remove_file(&tmp);
         stats.error = Some(format!("保存输出失败：{e}"));
@@ -651,6 +648,22 @@ mod store_tests {
         delete_script_in(&dir, "a.js").unwrap(); // idempotent
         assert!(list_scripts_in(&dir).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stats_camel_case() {
+        let v = serde_json::to_value(ScriptStats {
+            scanned: 2,
+            written: 1,
+            dropped: 1,
+            cancelled: false,
+            truncated_console: true,
+            error: None,
+        })
+        .unwrap();
+        assert_eq!(v["scanned"], 2);
+        assert_eq!(v["truncatedConsole"], true);
+        assert!(v["error"].is_null());
     }
 
     #[test]

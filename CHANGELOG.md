@@ -16,6 +16,11 @@
 **Why:** spec §2/§3；只有 `DocLines` 分块读取才能保证 GB 级恒定内存；JS 侧格式化避免复杂值封送；`cancelled` 与“超时/脚本错误”分开上报。
 **验证:** `cargo test -p lumelog-app script::` 11 pass（三态/行号/抛错前缀/缺 onLine/非法返回/UTF-8/console 三级别+对象 JSON/无 tmp 残留）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 3. 脚本命令 + 注册
+**Files:** Modify `app/src-tauri/src/commands.rs`（`same_path`（canonicalize）；`script_list/read/write/delete`；`script_run`（doc 存在/目标≠源→`invalid_argument`；`begin_search`+`spawn_blocking`+`run_script`，console/progress/done 三 Channel）；`script_cancel`；测试 `same_path`）；`lib.rs`（注册 6 命令）；`script.rs`（除模块 allow；`RunStop::Io` 真正使用：写盘失败删 tmp 并返回错误）；新增 `stats_camel_case` 测试。
+**Why:** 目标与源同路径会覆盖正在读的文档，prologue 拒绝；取消复用通用 registry；DTO camelCase 直接由 script 类型序列化。
+**验证:** `cargo test -p lumelog-app script` 13 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
