@@ -130,9 +130,13 @@ pub fn list_shadows(dir: &Path) -> Vec<RecoveryEntry> {
     out
 }
 
-/// Delete the shadow for `path`; a missing file is success (idempotent).
-pub fn discard_shadow(dir: &Path, path: &str) {
-    let _ = fs::remove_file(shadow_path(dir, path));
+/// Delete the shadow for `path`; a missing file is success (idempotent),
+/// but any other I/O failure is reported so callers cannot silently orphan it.
+pub fn discard_shadow(dir: &Path, path: &str) -> io::Result<()> {
+    match fs::remove_file(shadow_path(dir, path)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 // ---- minimal config switch (config.toml `recovery_enabled`) ----------------
@@ -236,9 +240,9 @@ mod tests {
     fn discard_idempotent() {
         let d = tempdir().unwrap();
         write_shadow(d.path(), &meta("C:/a.log", 1), "x").unwrap();
-        discard_shadow(d.path(), "C:/a.log");
+        discard_shadow(d.path(), "C:/a.log").unwrap();
         assert!(read_shadow(d.path(), "C:/a.log").is_err());
-        discard_shadow(d.path(), "C:/a.log"); // no panic / no error
+        discard_shadow(d.path(), "C:/a.log").unwrap(); // idempotent: NotFound is success
         assert!(list_shadows(d.path()).is_empty());
     }
 

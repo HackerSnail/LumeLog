@@ -92,6 +92,8 @@ let busy = false;
 /** Crash-recovery schedule (spec §4.4): 2s idle → write the doc's shadow. */
 let recoveryOn = true; // refreshed from config.toml at startup (Task 6)
 const recoveryDebounce = new Debouncer(2000, (docId) => fireRecovery(docId));
+/** In-flight shadow writes per path: discard must wait, or a late write revives it. */
+const recoveryWrites = new Map<string, Promise<void>>();
 let recoveryChk: HTMLInputElement | null = null;
 let recoveryBannerEl: HTMLElement | null = null;
 let recoveryEntries: RecoveryEntry[] = [];
@@ -864,16 +866,18 @@ async function openFile(): Promise<void> {
   if (typeof picked === "string") await openPath(picked);
 }
 
-async function openPath(path: string): Promise<void> {
-  if (busy) return;
+async function openPath(path: string): Promise<boolean> {
+  if (busy) return false;
   setBusy(true);
   try {
     const info = await docOpen(path, onIndexProgress);
     // The shell owns the ≤200MB split (spec §4.3/A1) via `DocInfo.mode`.
     if (info.mode === "readonly") mountList(info, path);
     else await mountDoc(info, path);
+    return true;
   } catch (err) {
     reportError(err);
+    return false;
   } finally {
     setBusy(false);
   }
@@ -892,14 +896,21 @@ function fireRecovery(docId: number): void {
   const ds = docStates.get(docId);
   const h = editors.get(docId);
   if (!ds || !h || !h.isDirty()) return;
-  recoverySave({
-    path: ds.path,
+  const path = ds.path;
+  let write: Promise<void>;
+  write = recoverySave({
+    path,
     encoding: ds.encoding,
     eol: ds.eol,
     text: h.getText(),
-  }).catch(() => {
-    // A shadow write failure must never interrupt editing; the next idle retries.
-  });
+  })
+    .catch(() => {
+      // A shadow write failure must never interrupt editing; the next idle retries.
+    })
+    .finally(() => {
+      if (recoveryWrites.get(path) === write) recoveryWrites.delete(path);
+    });
+  recoveryWrites.set(path, write);
 }
 
 /** Arm the shadow timer for a dirty edit-mode doc (no-op when disabled). */
@@ -913,7 +924,19 @@ function scheduleRecovery(docId: number): void {
 /** Drop a pending shadow write and delete the on-disk shadow for `path`. */
 function cancelRecovery(docId: number, path: string): void {
   recoveryDebounce.cancel(docId);
-  recoveryDiscard(path).catch(() => {});
+  const inflight = recoveryWrites.get(path);
+  if (inflight) {
+    // A write may still be landing: delete only after it settles, else a stale
+    // shadow could survive a successful save/close.
+    void inflight.finally(() => recoveryDiscard(path).catch(() => {}));
+  } else {
+    recoveryDiscard(path).catch(() => {});
+  }
+  // Keep the banner in sync when the shadow is cleared from outside it.
+  if (recoveryEntries.some((e) => e.path === path)) {
+    recoveryEntries = recoveryEntries.filter((e) => e.path !== path);
+    renderRecoveryBanner();
+  }
 }
 
 // ---- crash recovery UI (spec §4.4/§10, M3 B1) -------------------------------
@@ -994,9 +1017,12 @@ async function restoreRecovery(e: RecoveryEntry): Promise<void> {
     toastMsg("请稍候…");
     return;
   }
-  try {
-    await openPath(e.path);
-  } catch {
+  const existing = tabs.list().find((t) => t.path === e.path);
+  if (existing) {
+    // Reuse the open tab: a second doc id for the same path would fork the
+    // shadow key and fight over the same file on save.
+    tabs.activate(existing.docId);
+  } else if (!(await openPath(e.path))) {
     toastMsg(`原文件已缺失，无法恢复：${basenameOf(e.path)}`);
     return; // keep the entry: only an explicit discard removes it
   }
@@ -1010,12 +1036,14 @@ async function restoreRecovery(e: RecoveryEntry): Promise<void> {
   }
   try {
     const c = await recoveryLoad(e.path);
-    h.replaceText(c.text); // triggers onDirty -> a fresh shadow after the next idle
+    h.replaceText(c.text); // triggers onEdit -> a fresh shadow after the next idle
     ds.encoding = c.encoding || ds.encoding;
     ds.eol = c.eol || ds.eol;
     status.setEncoding(ds.encoding);
     status.setEol(ds.eol);
     tabs.refreshDirty(docId);
+    updateInspector(docId);
+    refreshSidebar();
     // Drop the consumed shadow; the dirty editor re-writes it after 2s idle.
     await recoveryDiscard(e.path).catch(() => {});
     recoveryEntries = recoveryEntries.filter((x) => x.path !== e.path);
@@ -1068,10 +1096,9 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
     parent: tabsEl,
     info,
     ext: extOf(path),
-    onDirty: () => {
-      tabs.refreshDirty(info.docId);
-      scheduleRecovery(info.docId);
-    },
+    onDirty: () => tabs.refreshDirty(info.docId),
+    // onDirty fires once per dirty cycle; every edit must re-arm the 2s timer.
+    onEdit: () => scheduleRecovery(info.docId),
     onInvalid: (n) => {
       // Persistent ⚠ beside the encoding (spec §5.4), not a transient toast —
       // a wrong-encoding file must stay discoverable while it is open.

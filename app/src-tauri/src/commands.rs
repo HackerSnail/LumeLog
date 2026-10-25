@@ -1123,11 +1123,11 @@ pub fn recovery_load(
     })
 }
 
-/// Delete a shadow (idempotent).
+/// Delete a shadow (idempotent: a missing file is fine; other I/O errors surface).
 #[tauri::command]
 pub fn recovery_discard(app: AppHandle, path: String) -> Result<(), IpcError> {
-    crate::recovery::discard_shadow(&recovery_dir(&app)?, &path);
-    Ok(())
+    crate::recovery::discard_shadow(&recovery_dir(&app)?, &path)
+        .map_err(|e| IpcError::new("io", format!("discard shadow: {e}")))
 }
 
 /// Read the minimal config switch.

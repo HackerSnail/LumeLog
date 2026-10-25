@@ -623,6 +623,7 @@ html.has-custom-titlebar .win-btns {
   position: fixed;
   left: 50%;
   bottom: 48px;
+  z-index: 70; /* above .recovery-banner (60): its buttons report via toast */
   transform: translateX(-50%);
   max-width: 80vw;
   padding: 8px 14px;

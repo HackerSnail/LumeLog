@@ -6,6 +6,11 @@
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。
 
+### 终审修复波（CodeReview 全分支 1 Critical / 3 Important / 4 Minor，全修）
+**Files:** `app/frontend/src/editor.ts`（`OpenEditableOpts.onEdit` 每次改动触发；`onDirty` 仍只在首次脏转变；`replaceText`/`setEol` 也触发 `onEdit`）；`app/frontend/src/main.ts`（`onEdit→scheduleRecovery`（onDirty 每次脏周期只触发一次，是 Critical 根因）；`openPath→Promise<boolean>`；恢复时**复用已开同路径标签**（`tabs.list/activate`，避免双 docId 抢同一影子/文件）；`cancelRecovery` 同步移除横幅行；恢复后 `updateInspector`+`refreshSidebar`；`recoveryWrites` 按 path 串行化在飞写入，discard 等写入落地后再删（防“返回的旧影复活”）；`recovery_discard` 错误上浮）；`app/src-tauri/src/recovery.rs`（`discard_shadow→io::Result`，仅 NotFound 视为成功）；`app/src-tauri/src/commands.rs`（`recovery_discard` 映射 `io`）；`app/frontend/src/styles.css`（`#toast` `z-index:70` 高于横幅 60）。
+**Why:** Critical（影子在整个脏周期只写一次→长时间编辑后崩溃只恢复首次输入后 2s 快照）使验收项失效；Important 三项（缺失文件提示不可达、恢复重复开页、保存/关闭后横幅僵尸行）均为真实数据/UX 缺口；Minor 四项（信息栏不刷新、写入/discard 竞争、删除错误被吞、toast 被横幅遮）顺手修正。
+**验证:** `cargo test -p lumelog-app recovery::` 11 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm run build`（tsc，43 modules）+ `npm test` 61 pass。GUI 必测：长时间编辑→停输 2s→再编辑→`kill -9`→恢复为最后文本。
+
 ### Task 1. `recovery` 影子存储层
 **Files:** Create `app/src-tauri/src/recovery.rs`（`RecoveryMeta/RecoveryEntry/RecoveryContent` camelCase；`fnv1a64`/`doc_key`/`shadow_path`/`write_shadow`/`read_shadow`/`list_shadows`/`discard_shadow` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod recovery;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
 **Why:** spec §2—影子 `<doc_key>.lumelog` = 首行 JSON meta + `\n` + 原始 UTF-8 文本（大文本免 JSON 转义）；`doc_key=FNV-1a64(path)` 16hex（零依赖、稳定）；写入 `.lumelogtmp`→rename；list 按 `saved_at_ms` 降序、坏文件跳过、缺失目录→空。

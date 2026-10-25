@@ -55,6 +55,8 @@ export interface OpenEditableOpts {
   ext: string;
   /** Fires once on the first user edit (drives the tab dirty dot). */
   onDirty?: () => void;
+  /** Fires on EVERY edit (drives the 2s crash-recovery idle timer). */
+  onEdit?: () => void;
   /** Decoded U+FFFD replacement count from the full load (spec §5). */
   onInvalid?: (count: number) => void;
 }
@@ -76,10 +78,10 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   const langConf = new Compartment();
 
   const onDocChanged = () => {
-    if (!dirty) {
-      dirty = true;
-      opts.onDirty?.();
-    }
+    const first = !dirty;
+    dirty = true;
+    opts.onEdit?.();
+    if (first) opts.onDirty?.();
   };
 
   const view = new EditorView({
@@ -101,6 +103,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
         changes: { from: 0, to: view.state.doc.length, insert: next },
       });
       dirty = true;
+      opts.onEdit?.();
       opts.onDirty?.();
     },
     setMode: (ext: string) => {
@@ -109,6 +112,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     setEol: (next: string) => {
       eol = next;
       dirty = true;
+      opts.onEdit?.();
       opts.onDirty?.();
     },
     eol: () => eol,
