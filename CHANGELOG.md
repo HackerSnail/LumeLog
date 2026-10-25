@@ -16,6 +16,11 @@
 **Why:** spec §5—导出命令与 `can_parse` 共用同一源解析/校验，不第三套。`validate` 供 prologue、`build_frame_source` 供 worker，regex 编译校验集中在 validate（worker `expect("validated")`）。
 **验证:** `cargo test -p lumelog-app` 43 pass（新 5：candump/asc 通过、缺 pattern、合法正则、非法正则拒、未知 kind；`can_parse` 相关测不回归）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 3. CSV 宽表 / JSONL 纯文本构造器
+**Files:** Modify `app/src-tauri/src/can_export.rs`（新 `qualified_columns`/`db_signal_columns`/`csv_header`/`csv_row`/`jsonl_line` + `csv_escape`/`fmt_physical`/`fmt_ts` 私有 + `CSV_META` 常量）+ 8 测）。
+**Why:** spec §2/§3。列名 `消息名.信号名` 去重 `#n`；meta 7 列固定 + DBC 信号列；物理值 `{:.6}` 裁尾零（非有限→空）；CSV 仅在含 `,"\r\n` 时加引号；jsonl 复用 `serde_json::to_string`（FrameJson 本就 camelCase）。纯文本构造与文件 I/O 解耦→无盘可测。
+**验证:** `cargo test -p lumelog-app can_export::` 16 pass（+8：列限定去重、db_signal_columns、header meta/含信号、row 填列与空列、转义、无 msg、浮点稳定/非有限、jsonl 合法回读）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 5 M3 时序筛选 + 导出（feat/m3-timeline-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-timeline-export-design.md`；计划 `docs/plans/2026-10-25-m3-timeline-export.md`（M3 子项目 A 增量2：只读日志时序筛选 + export_lines）。
