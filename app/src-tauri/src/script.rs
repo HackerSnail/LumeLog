@@ -4,16 +4,30 @@
 //! (list/read/write/delete), name validation and the bounded console buffer.
 #![allow(dead_code)] // consumed by the script commands (Task 3)
 
+use std::cell::RefCell;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use lumelog_core::doc::DocFile;
+use rquickjs::function::Func;
+use rquickjs::{Context, FromJs, Function, Object, Runtime, Value};
 use serde::Serialize;
 use tauri::AppHandle;
 
+use crate::commands::DocLines;
 use crate::dto::IpcError;
 
 pub(crate) const MAX_CONSOLE_MESSAGES: usize = 200;
 pub(crate) const MAX_CONSOLE_CHARS: usize = 4096;
+pub(crate) const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub(crate) const MAX_SECONDS: u64 = 300;
+pub(crate) const PROGRESS_EVERY: u64 = 100_000;
+const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+const STACK_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -195,6 +209,392 @@ pub(crate) fn delete_script_in(dir: &Path, name: &str) -> Result<(), IpcError> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(IpcError::new("io", format!("delete script: {e}"))),
+    }
+}
+
+/// `console.*` shim: formats arguments (objects via JSON) and forwards one
+/// string to the host `__log`. Formatting lives in JS so no value marshalling is
+/// needed in Rust.
+const CONSOLE_SHIM: &str = r#"
+(function () {
+  const emit = globalThis.__log;
+  const fmt = (v) => {
+    try { return typeof v === "string" ? v : JSON.stringify(v); }
+    catch (e) { return String(v); }
+  };
+  const make = (level) => (...a) => emit(level, a.map(fmt).join(" "));
+  globalThis.console = { log: make("log"), info: make("info"), warn: make("warn"), error: make("error") };
+  delete globalThis.__log;
+})();
+"#;
+
+enum RunStop {
+    /// Script-level error: keep the written prefix at the target.
+    Js(String),
+    /// Output I/O failure: discard the tmp file.
+    Io(String),
+}
+
+fn catch_message(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
+    let caught = ctx.catch();
+    if caught.is_object() {
+        if let Ok(obj) = Object::from_js(ctx, caught.clone()) {
+            if let Some(ex) = rquickjs::Exception::from_object(obj) {
+                if let Some(msg) = ex.message() {
+                    return msg;
+                }
+            }
+        }
+    }
+    if let Ok(s) = rquickjs::String::from_js(ctx, caught) {
+        if let Ok(msg) = s.to_string() {
+            return msg;
+        }
+    }
+    err.to_string()
+}
+
+/// Run `code` over the document's lines. Output is UTF-8 + `\n`; a successful
+/// (or script-error) run renames the tmp file over `target`, so the caller sees
+/// exactly the emitted prefix.
+#[allow(clippy::too_many_arguments)] // doc/code/target/callbacks/cancel
+pub fn run_script(
+    doc: Arc<Mutex<DocFile>>,
+    code: &str,
+    target: &Path,
+    on_console: &mut dyn FnMut(ScriptConsole),
+    on_progress: &mut dyn FnMut(ScriptProgress),
+    cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> ScriptStats {
+    let mut stats = ScriptStats::default();
+    let tmp = target.with_file_name(format!(
+        ".{}.tmp-{}",
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("script-out"),
+        std::process::id()
+    ));
+    let file = match File::create(&tmp) {
+        Ok(f) => f,
+        Err(e) => {
+            stats.error = Some(format!("创建输出文件失败：{e}"));
+            return stats;
+        }
+    };
+    let mut writer = BufWriter::new(file);
+    let source_path = doc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .path()
+        .to_string_lossy()
+        .into_owned();
+    let mut lines = DocLines::new(doc);
+
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            stats.error = Some(format!("创建 JS 运行时失败：{e}"));
+            let _ = std::fs::remove_file(&tmp);
+            return stats;
+        }
+    };
+    rt.set_memory_limit(MEMORY_LIMIT);
+    rt.set_max_stack_size(STACK_LIMIT);
+    let start = Instant::now();
+    let deadline = Duration::from_secs(MAX_SECONDS);
+    {
+        let cancel = cancel.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            cancel() || start.elapsed() > deadline
+        })));
+    }
+
+    let console_pending: Rc<RefCell<Vec<ScriptConsole>>> = Rc::new(RefCell::new(Vec::new()));
+    let console_buf = Rc::new(RefCell::new(ConsoleBuf::new()));
+    let mut cancelled = false;
+    let mut script_error: Option<String> = None;
+    let mut io_error: Option<String> = None;
+
+    let ctx = match Context::full(&rt) {
+        Ok(c) => c,
+        Err(e) => {
+            stats.error = Some(format!("创建 JS 上下文失败：{e}"));
+            let _ = std::fs::remove_file(&tmp);
+            return stats;
+        }
+    };
+
+    let result = ctx.with(|ctx| -> Result<(), RunStop> {
+        let globals = ctx.globals();
+        let log = {
+            let pending = console_pending.clone();
+            let buf = console_buf.clone();
+            Func::from(
+                move |level: String, text: String| {
+                    if let Some(msg) = buf.borrow_mut().push(&level, text) {
+                        pending.borrow_mut().push(msg);
+                    }
+                },
+            )
+        };
+        globals
+            .set("__log", log)
+            .map_err(|e| RunStop::Js(format!("注入 console 失败：{e}")))?;
+        ctx.eval::<(), _>(CONSOLE_SHIM)
+            .map_err(|e| RunStop::Js(catch_message(&ctx, e)))?;
+        if let Err(e) = ctx.eval::<(), _>(code) {
+            return Err(RunStop::Js(format!(
+                "脚本错误：{}",
+                catch_message(&ctx, e)
+            )));
+        }
+        let on_line: Function = globals.get("onLine").map_err(|_| {
+            RunStop::Js("脚本必须定义 onLine(line, ctx)".into())
+        })?;
+
+        let mut out_bytes: u64 = 0;
+        for (line_number, text) in lines.by_ref() {
+            if cancel() {
+                cancelled = true;
+                break;
+            }
+            if start.elapsed() > deadline {
+                script_error = Some(format!("脚本超时（{MAX_SECONDS}s）"));
+                break;
+            }
+            stats.scanned += 1;
+            let ctx_obj = Object::new(ctx.clone())
+                .map_err(|e| RunStop::Js(format!("创建 ctx 失败：{e}")))?;
+            ctx_obj
+                .set("lineNumber", line_number as f64)
+                .map_err(|e| RunStop::Js(format!("设置 ctx.lineNumber 失败：{e}")))?;
+            ctx_obj
+                .set("index", line_number.saturating_sub(1) as f64)
+                .map_err(|e| RunStop::Js(format!("设置 ctx.index 失败：{e}")))?;
+            ctx_obj
+                .set("path", source_path.as_str())
+                .map_err(|e| RunStop::Js(format!("设置 ctx.path 失败：{e}")))?;
+            let value: Value = on_line
+                .call((text, ctx_obj))
+                .map_err(|e| {
+                    RunStop::Js(format!(
+                        "第 {line_number} 行：{}",
+                        catch_message(&ctx, e)
+                    ))
+                })?;
+            if value.is_null() || value.is_undefined() {
+                stats.dropped += 1;
+            } else if value.is_string() {
+                let s = rquickjs::String::from_js(&ctx, value)
+                    .map_err(|e| RunStop::Js(format!("第 {line_number} 行：{e}")))?;
+                let s = s
+                    .to_string()
+                    .map_err(|e| RunStop::Js(format!("第 {line_number} 行：{e}")))?;
+                let bytes = s.len() as u64 + 1;
+                if out_bytes + bytes > MAX_OUTPUT_BYTES {
+                    script_error = Some("输出超过 4 GiB 上限".into());
+                    break;
+                }
+                if writer.write_all(s.as_bytes()).and_then(|_| writer.write_all(b"\n")).is_err() {
+                    io_error = Some("写入输出文件失败".into());
+                    break;
+                }
+                out_bytes += bytes;
+                stats.written += 1;
+            } else {
+                return Err(RunStop::Js(format!(
+                    "第 {line_number} 行：onLine 必须返回 string、null 或 undefined"
+                )));
+            }
+
+            let msgs: Vec<_> = console_pending.borrow_mut().drain(..).collect();
+            for m in msgs {
+                on_console(m);
+            }
+            if stats.scanned % PROGRESS_EVERY == 0 {
+                on_progress(ScriptProgress {
+                    scanned: stats.scanned,
+                    written: stats.written,
+                });
+            }
+        }
+        Ok(())
+    });
+
+    // Forward any console lines produced by the final/erroring call.
+    let msgs: Vec<_> = console_pending.borrow_mut().drain(..).collect();
+    for m in msgs {
+        on_console(m);
+    }
+    stats.truncated_console = console_buf.borrow().truncated();
+    on_progress(ScriptProgress {
+        scanned: stats.scanned,
+        written: stats.written,
+    });
+
+    if let Err(stop) = result {
+        match stop {
+            RunStop::Js(msg) => script_error = Some(msg),
+            RunStop::Io(msg) => io_error = Some(msg),
+        }
+    }
+    stats.cancelled = cancelled;
+    let _ = writer.flush();
+    if let Some(msg) = io_error {
+        let _ = std::fs::remove_file(&tmp);
+        stats.error = Some(msg);
+        return stats;
+    }
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        stats.error = Some(format!("保存输出失败：{e}"));
+        return stats;
+    }
+    stats.error = script_error;
+    stats
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    fn run_case(
+        name: &str,
+        doc_text: &str,
+        code: &str,
+    ) -> (ScriptStats, String, Vec<ScriptConsole>) {
+        let dir = std::env::temp_dir().join(format!(
+            "lumelog-script-run-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc_path = dir.join("in.log");
+        std::fs::write(&doc_path, doc_text).unwrap();
+        let doc = Arc::new(Mutex::new(DocFile::open(&doc_path, 1 << 20).unwrap()));
+        let target = dir.join("out.txt");
+        let mut msgs = Vec::new();
+        let mut no_progress = |_p: ScriptProgress| {};
+        let stats = run_script(
+            doc,
+            code,
+            &target,
+            &mut |m| msgs.push(m),
+            &mut no_progress,
+            Arc::new(|| false),
+        );
+        let out = std::fs::read_to_string(&target).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+        (stats, out, msgs)
+    }
+
+    #[test]
+    fn keep_replace_drop() {
+        let (stats, out, _) = run_case(
+            "threeways",
+            "a\n\nb\n",
+            "function onLine(line) { if (line === '') return null; return line.toUpperCase(); }",
+        );
+        assert_eq!(out, "A\nB\n");
+        assert_eq!(stats.scanned, 3, "DocLines drops the trailing terminator");
+        assert_eq!(stats.written, 2);
+        assert_eq!(stats.dropped, 1);
+        assert!(stats.error.is_none());
+    }
+
+    #[test]
+    fn ctx_line_numbers() {
+        let (stats, out, _) = run_case(
+            "ctx",
+            "a\nb\nc",
+            "function onLine(line, ctx) { return String(ctx.lineNumber) + ':' + line; }",
+        );
+        assert_eq!(out, "1:a\n2:b\n3:c\n");
+        assert_eq!(stats.written, 3);
+    }
+
+    #[test]
+    fn js_throw_stops_with_prefix() {
+        let (stats, out, _) = run_case(
+            "throw",
+            "a\nb\nc",
+            "function onLine(line, ctx) { if (ctx.lineNumber === 2) throw new Error('boom'); return line; }",
+        );
+        assert_eq!(out, "a\n", "prefix before the error is kept");
+        let err = stats.error.unwrap();
+        assert!(err.contains("第 2 行"), "{err}");
+        assert!(err.contains("boom"), "{err}");
+    }
+
+    #[test]
+    fn missing_on_line_errors() {
+        let (stats, out, _) = run_case("noentry", "a\n", "const x = 1;");
+        assert_eq!(out, "");
+        assert!(stats.error.unwrap().contains("onLine"));
+    }
+
+    #[test]
+    fn bad_return_type_errors() {
+        let (stats, out, _) = run_case("badret", "a\n", "function onLine() { return 42; }");
+        assert_eq!(out, "");
+        assert!(stats.error.unwrap().contains("必须返回"));
+    }
+
+    #[test]
+    fn utf8_lf_bytes() {
+        let (stats, out, _) = run_case(
+            "utf8",
+            "中文",
+            "function onLine(line) { return line; }",
+        );
+        assert_eq!(out.as_bytes(), "中文\n".as_bytes());
+        assert_eq!(stats.written, 1);
+    }
+
+    #[test]
+    fn console_capture_and_formatting() {
+        let (_stats, _out, msgs) = run_case(
+            "console",
+            "a\n",
+            "function onLine(line) { console.log('hi', {a: 1}); console.warn('w'); console.error('e'); return line; }",
+        );
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].level, "log");
+        assert!(msgs[0].text.contains("hi"), "{}", msgs[0].text);
+        assert!(msgs[0].text.contains("\"a\":1"), "{}", msgs[0].text);
+        assert_eq!(msgs[1].level, "warn");
+        assert_eq!(msgs[2].level, "error");
+    }
+
+    #[test]
+    fn successful_run_leaves_no_tmp() {
+        let dir = std::env::temp_dir().join(format!(
+            "lumelog-script-tmp-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc_path = dir.join("in.log");
+        std::fs::write(&doc_path, "a\n").unwrap();
+        let doc = Arc::new(Mutex::new(DocFile::open(&doc_path, 1 << 20).unwrap()));
+        let target = dir.join("out.txt");
+        let mut none = |_m: ScriptConsole| {};
+        let mut nop = |_p: ScriptProgress| {};
+        let stats = run_script(
+            doc,
+            "function onLine(l) { return l; }",
+            &target,
+            &mut none,
+            &mut nop,
+            Arc::new(|| false),
+        );
+        assert!(stats.error.is_none());
+        let tmp: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(tmp.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 

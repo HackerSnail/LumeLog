@@ -11,6 +11,11 @@
 **Why:** 沙箱引擎与脚本存储都在 app 侧，不污染 core；脚本名只允许安全字符防目录穿越；保存原子化。MSRV 提升是 rquickjs 0.14 的硬要求（当前工具链 1.99）。
 **验证:** `cargo test -p lumelog-app script::` 3 pass（名字 8 类非法/合法、存储 roundtrip+无 tmp 残留、控制台单条截断+200 条后仅一条“已截断”）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 2. `run_script` QuickJS 运行器
+**Files:** Modify `app/src-tauri/src/script.rs`（`Runtime` 64MiB/1MiB 栈 + interrupt（取消或 300s）；console shim 在 JS 侧 `JSON.stringify` 后回传；eval 一次→`onLine`；`DocLines` 逐行、三态返回、ctx `{lineNumber,index,path}`；输出 UTF-8/LF、4GiB 上限；tmp→rename（脚本错误保留前缀；I/O 错误删 tmp）；超时/取消/错误区分）；新增 8 测。
+**Why:** spec §2/§3；只有 `DocLines` 分块读取才能保证 GB 级恒定内存；JS 侧格式化避免复杂值封送；`cancelled` 与“超时/脚本错误”分开上报。
+**验证:** `cargo test -p lumelog-app script::` 11 pass（三态/行号/抛错前缀/缺 onLine/非法返回/UTF-8/console 三级别+对象 JSON/无 tmp 残留）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 11 Roadmap BLF 报文源（feat/roadmap-blf）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-blf-design.md`；计划 `docs/plans/2026-10-25-roadmap-blf.md`（Roadmap：Vector BLF，CAN/CAN-FD + zlib 容器，直接进 CanPanel，支持导出）。
