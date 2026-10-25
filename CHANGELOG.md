@@ -26,6 +26,11 @@
 **Why:** spec §3.3—时间/行号与文本 AND 同扫描一次完成（单一选中集），不二次 pass。
 **验证:** `cargo test -p lumelog-app` 28 pass（新 `scan_filter_line_range_degrade`、`scan_filter_time_axis_keeps_range`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；前端未改。
 
+### Task 5. `export_lines` / `export_cancel` 命令
+**Files:** Modify `app/src-tauri/src/commands.rs`（新 `open_export_target` + `#[tauri::command] export_lines`（同步 prologue 校验/建文件 → `spawn_blocking` 持 doc 锁跑 `export::run` 写原始字节、`on_progress` 节流、`on_done` 始终发、`end_search`）+ `export_cancel`；+`export_cmd_tests`）；Modify `app/src-tauri/src/lib.rs`（注册两命令）；Modify `dto.rs`（剥 ExportProgress/ExportStatsJson/From 三处 `#[allow(dead_code)]`）。
+**Why:** spec §3.3/§5：目标路径打开失败同步返 `io`（不空写）；worker 持 doc 锁整任务扫描（同 `can_parse`/`filter_run`，主线程不冻），读/写错吸收进 `errored`、取消保留前缀，`on_done` 必发。**Ruling：**worker 持 `doc` 锁期间若同时关文档，`doc_arc` 被任务持有→后端扫完已关文件（与增量1 同模），不阻塞交付（已记 out-of-scope，二增量可接 export 取消 worker）。
+**验证:** `cargo test -p lumelog-app` 30 pass（新 `open_export_target_bad_path_is_io`/`open_export_target_creates_file`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净；`use std::io::Write` 补入使 `flush` 可用。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。

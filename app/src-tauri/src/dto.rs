@@ -371,7 +371,6 @@ impl TimeSpecJson {
 }
 
 /// Throttled export progress (`on_progress`).
-#[allow(dead_code)] // consumed by `export_lines` (Task 5)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportProgress {
@@ -379,7 +378,6 @@ pub struct ExportProgress {
 }
 
 /// Terminal `export_lines` tally (`on_done`), mirroring core `ExportStats`.
-#[allow(dead_code)] // consumed by `export_lines` (Task 5)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportStatsJson {
@@ -389,7 +387,6 @@ pub struct ExportStatsJson {
     pub errored: bool,
 }
 
-#[allow(dead_code)] // consumed by `export_lines` (Task 5)
 impl From<CoreExportStats> for ExportStatsJson {
     fn from(s: CoreExportStats) -> Self {
         ExportStatsJson {
