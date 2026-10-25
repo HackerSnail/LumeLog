@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 8 M3 外部修改监听（feat/m3-external-watch）
+
+**依据：** spec `docs/specs/2026-10-25-m3-external-watch-design.md`；计划 `docs/plans/2026-10-25-m3-external-watch.md`（M3 子项目 B2：已打开文档的外部修改持续监听 + 干净自动重载 + 脏黄点/三选）。
+
+### Task 1. `watch` 纯逻辑
+**Files:** Create `app/src-tauri/src/watch.rs`（`ExternalKind{Changed,Removed}` lowercase serde；`classify(disk,snapshot)`；`WatchRegistry{dirs refcount,paths}` + `watch/unwatch/tracked`；`ExternalEvent{path,kind}` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod watch;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
+**Why:** spec §2—`classify` 用式样：`disk==snapshot`→None（自我写入/无变化）、`None`→Removed、否则 Changed；监视单位=父目录，同目录 refcount 归零才停；裸文件名退化为 `.`。
+**验证:** `cargo test -p lumelog-app watch::` 7 pass（等值忽略/size或mtime变/缺失/同目录只 watch 一次/refcount 归零/相对名 `.`/事件 lowercase 往返）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
 
 **依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。
