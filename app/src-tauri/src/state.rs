@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use lumelog_can::dbc::Database;
 use lumelog_core::doc::DocFile;
 
+/// `(doc_id, doc snapshot, current disk meta)` used by the external watcher.
+pub type DocSnapshot = (u64, (u64, std::time::SystemTime), Option<(u64, std::time::SystemTime)>);
+
 #[derive(Default)]
 pub struct AppDocs {
     docs: Mutex<HashMap<u64, Arc<Mutex<DocFile>>>>,
@@ -53,10 +56,15 @@ impl AppDocs {
         self.docs.lock().unwrap().remove(&id).is_some()
     }
 
-    /// `(doc_id, (size, mtime))` for every open doc whose path equals `path`.
-    /// The external-watch debouncer compares these against the disk to tell our
-    /// own saves from real external changes.
-    pub fn snapshot_for_path(&self, path: &Path) -> Vec<(u64, (u64, std::time::SystemTime))> {
+    /// `(doc_id, (size, mtime), current-disk)` for every open doc whose path
+    /// matches `path`. The disk read happens under the doc lock, so a concurrent
+    /// save (which holds that lock across write+reindex) cannot be misread as an
+    /// external change. Paths are compared canonically so case/separator
+    /// differences (Windows / notify) still match.
+    pub fn snapshot_for_path(
+        &self,
+        path: &Path,
+    ) -> Vec<DocSnapshot> {
         let docs: Vec<(u64, Arc<Mutex<DocFile>>)> = self
             .docs
             .lock()
@@ -64,14 +72,23 @@ impl AppDocs {
             .iter()
             .map(|(id, arc)| (*id, arc.clone()))
             .collect();
+        let want = std::fs::canonicalize(path).ok();
         docs.into_iter()
             .filter_map(|(id, arc)| {
                 let d = arc.lock().unwrap_or_else(|p| p.into_inner());
-                if d.path() == path {
-                    Some((id, d.disk_meta()))
-                } else {
-                    None
+                let same = match &want {
+                    Some(w) => std::fs::canonicalize(d.path())
+                        .map(|p| &p == w)
+                        .unwrap_or_else(|_| d.path() == path),
+                    None => d.path() == path,
+                };
+                if !same {
+                    return None;
                 }
+                let disk = std::fs::metadata(path).ok().map(|m| {
+                    (m.len(), m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH))
+                });
+                Some((id, d.disk_meta(), disk))
             })
             .collect()
     }
@@ -150,7 +167,7 @@ mod tests {
         let mut got: Vec<u64> = s
             .snapshot_for_path(&path)
             .into_iter()
-            .map(|(id, _)| id)
+            .map(|(id, _, _)| id)
             .collect();
         got.sort_unstable();
         let mut want = vec![a, b];

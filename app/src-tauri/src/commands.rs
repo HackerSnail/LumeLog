@@ -187,8 +187,10 @@ pub fn doc_chunk(
 /// Persist `text` for `doc_id`. `encoding`/`eol` are the front-end labels; a
 /// `path` switches to Save-As. `force` overrides conflict / unmappable gates.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC: doc + app + text + path/encoding/eol/force
 pub fn doc_save(
     state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
     doc_id: u64,
     text: String,
     path: Option<String>,
@@ -203,22 +205,41 @@ pub fn doc_save(
     let doc_arc = state
         .get(doc_id)
         .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
-    let mut doc = doc_arc
-        .lock()
-        .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
-
-    let meta = doc.disk_meta();
-    let opts = SaveOptions {
-        path: path.map(PathBuf::from),
-        encoding: label,
-        eol: eol_style,
-        overwrite_policy: if force {
-            OverwritePolicy::Force
-        } else {
-            OverwritePolicy::SafetyConfirm
-        },
+    // Do all doc work under the lock, then drop it before touching the watcher:
+    // `notify`'s watch/unwatch waits for its event thread, which may be inside
+    // `snapshot_for_path` waiting for this very doc lock.
+    let (report, retarget) = {
+        let mut doc = doc_arc
+            .lock()
+            .map_err(|_| IpcError::new("io", "document mutex poisoned"))?;
+        let meta = doc.disk_meta();
+        let old_path = doc.path().to_path_buf();
+        let opts = SaveOptions {
+            path: path.map(PathBuf::from),
+            encoding: label,
+            eol: eol_style,
+            overwrite_policy: if force {
+                OverwritePolicy::Force
+            } else {
+                OverwritePolicy::SafetyConfirm
+            },
+        };
+        let report = save_text(&mut doc, &text, &opts, meta).map_err(IpcError::from_core)?;
+        // Save-As: rebind the doc to the file the tab now edits so path, index,
+        // cache, disk snapshot and the conflict baseline all follow it.
+        let mut retarget = None;
+        if let Some(p) = &opts.path {
+            if p != &old_path {
+                let fresh = DocFile::open(p, SIZE_LIMIT).map_err(IpcError::from_core)?;
+                *doc = fresh;
+                retarget = Some((old_path, p.clone()));
+            }
+        }
+        (report, retarget)
     };
-    let report = save_text(&mut doc, &text, &opts, meta).map_err(IpcError::from_core)?;
+    if let Some((old, new)) = retarget {
+        app.state::<AppWatch>().retarget(&old, &new);
+    }
     Ok(SaveReportJson {
         replace_count: report.replace_count as u64,
         conflict: report.conflict,
@@ -415,23 +436,10 @@ pub fn watch_subscribe(
     Ok(app.state::<AppWatch>().start(&app, on_event))
 }
 
-/// Save-As moved `doc_id` to `path`: migrate the directory watch.
+/// Current watcher health (degradation may appear after the initial subscribe).
 #[tauri::command]
-pub fn watch_retarget(
-    state: tauri::State<'_, AppDocs>,
-    app: AppHandle,
-    doc_id: u64,
-    path: String,
-) -> Result<(), IpcError> {
-    let arc = state
-        .get(doc_id)
-        .ok_or_else(|| IpcError::new("unknown_doc", format!("no document {doc_id}")))?;
-    let old = {
-        let d = arc.lock().unwrap_or_else(|p| p.into_inner());
-        d.path().to_path_buf()
-    };
-    app.state::<AppWatch>().retarget(&old, Path::new(&path));
-    Ok(())
+pub fn watch_status(app: AppHandle) -> Result<WatchStatus, IpcError> {
+    Ok(app.state::<AppWatch>().status())
 }
 
 /// Read + lenient-parse a DBC file. Lenient so a single bad construct does not

@@ -720,7 +720,7 @@ export function docReload(
   return call<DocInfo>("doc_reload", { docId, onProgress: ch });
 }
 
-/** Save-As moved a document: migrate its directory watch. */
-export function watchRetarget(docId: number, path: string): Promise<void> {
-  return call<void>("watch_retarget", { docId, path });
+/** Current watcher health (degradation can appear when a new dir fails). */
+export function watchStatus(): Promise<WatchStatus> {
+  return call<WatchStatus>("watch_status", {});
 }

@@ -35,7 +35,7 @@ import {
   recoverySetEnabled,
   watchSubscribe,
   docReload,
-  watchRetarget,
+  watchStatus,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -883,6 +883,7 @@ async function openPath(path: string): Promise<boolean> {
     // The shell owns the ≤200MB split (spec §4.3/A1) via `DocInfo.mode`.
     if (info.mode === "readonly") mountList(info, path);
     else await mountDoc(info, path);
+    void refreshWatchStatus(); // a new directory may have failed to watch
     return true;
   } catch (err) {
     reportError(err);
@@ -1101,6 +1102,16 @@ async function initWatch(): Promise<void> {
   }
 }
 
+/** Re-read watcher health (degradation can appear when a new dir fails). */
+async function refreshWatchStatus(): Promise<void> {
+  try {
+    const st = await watchStatus();
+    status.setWatch(st.degraded ? "degraded" : "ok", st.degraded ?? undefined);
+  } catch {
+    // Status is advisory; a failure here must not disturb opening.
+  }
+}
+
 function handleExternalEvent(e: ExternalEvent): void {
   const hits: number[] = [];
   for (const [id, ds] of docStates) {
@@ -1162,7 +1173,7 @@ async function reloadDirtyFromDisk(docId: number, path: string): Promise<void> {
 }
 
 /** Three-way save-conflict choice (spec §4.4; `ask` is only two buttons). */
-function confirmExternalConflict(): Promise<"reload" | "overwrite" | "cancel"> {
+function confirmExternalConflict(detail: string): Promise<"reload" | "overwrite" | "cancel"> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "modal-3way";
@@ -1175,8 +1186,9 @@ function confirmExternalConflict(): Promise<"reload" | "overwrite" | "cancel"> {
     title.textContent = "文件已被外部修改";
     const msg = document.createElement("div");
     msg.className = "modal-3way-msg";
-    msg.textContent =
-      "磁盘内容已变化。重新加载会丢弃你当前的修改；强制覆盖会写入你的版本。";
+    // Keep the shell's informed detail (disk size + unmappable `?` count).
+    msg.textContent = `${detail}\n\n重新加载会丢弃你当前的修改；强制覆盖会写入你的版本。`;
+    msg.style.whiteSpace = "pre-wrap";
     const row = document.createElement("div");
     row.className = "modal-3way-actions";
     const done = (choice: "reload" | "overwrite" | "cancel"): void => {
@@ -1224,13 +1236,24 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
   }
   try {
     const info = await docReload(docId, () => {});
-    if (!ds) return;
+    // The tab may have been closed/re-opened while the reload was in flight.
+    if (!ds || docStates.get(docId) !== ds || !tabs.get(docId)) return;
     if (info.mode !== ds.mode) {
       // Grew/shrank across the 200 MB threshold: reopen keeps views truthful.
-      watchPending.delete(docId);
-      await handleClose(docId);
+      // The user already consented on the dirty path; do not ask twice.
+      if (h && h.isDirty()) h.markSaved();
+      const closed = await handleClose(docId);
+      if (!closed) return;
       await openPath(path);
       toastMsg("文件大小变化导致视图模式切换，已重新打开");
+      return;
+    }
+    const hNow = editors.get(docId);
+    const listNow = lists.get(docId);
+    // The user may have typed during the reload: never overwrite fresh edits.
+    if (hNow && hNow.isDirty()) {
+      tabs.setExternalFlag(docId, true);
+      showExtBar(docId, path);
       return;
     }
     ds.encoding = info.encoding;
@@ -1238,26 +1261,26 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
     ds.totalLines = info.totalLines ?? info.lineCountEstimate;
     ds.invalid = 0;
     indexed.set(docId, ds.totalLines);
-    if (h) {
+    if (hNow) {
       const { text, invalidCount } = await loadAllText(docId, ds.totalLines);
       ds.invalid = invalidCount;
-      h.replaceText(text);
-      h.markSaved();
-      const len = h.view.state.doc.length;
+      hNow.replaceText(text);
+      hNow.markSaved();
+      const len = hNow.view.state.doc.length;
       if (sel) {
-        h.view.dispatch({
+        hNow.view.dispatch({
           selection: { anchor: Math.min(sel.anchor, len), head: Math.min(sel.head, len) },
         });
       }
-      h.view.scrollDOM.scrollTop = scroll;
+      hNow.view.scrollDOM.scrollTop = scroll;
       tabs.refreshDirty(docId);
-    } else if (list) {
-      list.invalidate();
-      list.setView(null, false, false);
+    } else if (listNow) {
+      listNow.invalidate();
+      listNow.setView(null, false, false);
       queryHits.delete(docId);
       queryCursor.delete(docId);
-      list.refresh();
-      list.setScrollTop(scroll);
+      listNow.refresh();
+      listNow.setScrollTop(scroll);
     }
     syncStatus(docId);
     updateInspector(docId);
@@ -1401,7 +1424,7 @@ async function saveActive(saveAs = false): Promise<void> {
     if (code === "conflict") {
       // Three-way (spec §4.4): reload discards local edits, overwrite forces
       // the write, cancel keeps editing. `ask` only has two buttons.
-      const choice = await confirmExternalConflict();
+      const choice = await confirmExternalConflict(ipcErr!.zh);
       if (choice === "reload") {
         await reloadDocFromDisk(a.info.docId, ds.path);
         return;
@@ -1467,10 +1490,6 @@ function afterSave(
   // A successful write resolves any external-change warning.
   tabs.setExternalFlag(docId, false);
   hideExtBar(docId);
-  // Save-As moved the file: migrate its directory watch.
-  if (target !== prevPath) {
-    void watchRetarget(docId, target).catch(() => {});
-  }
 }
 
 /**
@@ -1547,9 +1566,9 @@ function applyMode(docId: number, mode: ModeChoice): void {
   handle.setMode(ext); // reconfigure language only — keeps undo + scroll (I2)
 }
 
-async function handleClose(docId: number): Promise<void> {
+async function handleClose(docId: number): Promise<boolean> {
   const view = tabs.get(docId);
-  if (!view) return;
+  if (!view) return false;
   if (view.isDirty()) {
     const go = await ask("文档有未保存改动，确定关闭？", {
       title: "关闭文档",
@@ -1557,7 +1576,7 @@ async function handleClose(docId: number): Promise<void> {
       okLabel: "丢弃并关闭",
       cancelLabel: "取消",
     });
-    if (!go) return;
+    if (!go) return false;
   }
   const closing = docStates.get(docId);
   if (closing) cancelRecovery(docId, closing.path);
@@ -1573,6 +1592,7 @@ async function handleClose(docId: number): Promise<void> {
   queryCursor.delete(docId); // late `filter_run` onDone repopulates a closed, never-reused id
   refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
+  return true;
 }
 
 function syncStatus(docId: number): void {

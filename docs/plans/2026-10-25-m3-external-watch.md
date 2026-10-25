@@ -72,7 +72,7 @@
 
 **Files:** Modify `app/frontend/src/ipc.ts`、`tabs.ts`、`listview.ts`、`statusbar.ts`、`styles.css`；Tests `ipc.test.ts`、新建 `tabs.test.ts`。
 **Interfaces:**
-- `ipc.ts`：`ExternalEvent{path:string,kind:"changed"|"removed"}`、`WatchStatus{degraded:string|null}`、`watchSubscribe(onEvent)`、`docReload(docId,onProgress):Promise<DocInfo>`、`watchRetarget(docId,path)`。
+- `ipc.ts`：`ExternalEvent{path:string,kind:"changed"|"removed"}`、`WatchStatus{degraded:string|null}`、`watchSubscribe(onEvent)`、`docReload(docId,onProgress):Promise<DocInfo>`、`watchStatus()`。
 - `tabs.ts`：`TabEntry.ext` span（`.ext-dot`）；`setExternalFlag(docId, on)`；`remove` 时随 el 移除。
 - `listview.ts`：`scrollTop(): number`、`setScrollTop(n:number): void`（`this.root.scrollTop = Math.max(0,n)`，滚动事件自行触发 render）。
 - `statusbar.ts`：`setWatch(state:"ok"|"degraded", reason?:string)`（根元素内新增 `.status-watch`；ok 隐藏，degraded 显示"外部监听已降级" + title 原因）。
@@ -103,8 +103,8 @@
 
 ## Task 6: 保存三选模态 + Save-As retarget + 外部修改提示条样式
 
-**Files:** Modify `app/frontend/src/main.ts`（`confirmExternalConflict()` DOM 模态；`saveActive` 的 `conflict` 分支改用它；`afterSave` 调 `watchRetarget`；`showExtBar` 逻辑完善）、`styles.css`（`.ext-bar` + `.modal-3way`）。
-**Interfaces：** `confirmExternalConflict(): Promise<"reload"|"overwrite"|"cancel">`（三键 + Esc/遮罩=取消；`role="dialog"`）；`reload`→`reloadDocFromDisk(docId,true)`；`overwrite`→`force:true` 保存路径；`cancel`→`setBusy(false)`；`unmappable` 保持 `ask`。`afterSave` 仅当 `target !== prevPath` 时调 `watchRetarget(docId, target)`。
+**Files:** Modify `app/frontend/src/main.ts`（`confirmExternalConflict(detail)` DOM 模态（保留 `err.zh` 的磁盘大小/`?` 数知情细节）；`saveActive` 的 `conflict` 分支改用它；`afterSave` 不再迁移监听（由 `doc_save` 后端完成）；`showExtBar` 逻辑完善）、`styles.css`（`.ext-bar` + `.modal-3way`）。
+**Interfaces：** `confirmExternalConflict(detail: string): Promise<"reload"|"overwrite"|"cancel">`（三键 + Esc/遮罩=取消；`role="dialog"`）；`reload`→`reloadDocFromDisk(docId,true)`；`overwrite`→`force:true` 保存路径；`cancel`→`setBusy(false)`；`unmappable` 保持 `ask`。
 - [ ] **Step 1：实现**。
 - [ ] **Step 2：** `npm test` 不回归 + build tsc PASS。
 - [ ] **Step 3：** CHANGELOG；commit `feat:save-conflict-three-way` + push。

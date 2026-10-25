@@ -6,6 +6,11 @@
 
 **依据：** spec `docs/specs/2026-10-25-m3-external-watch-design.md`；计划 `docs/plans/2026-10-25-m3-external-watch.md`（M3 子项目 B2：已打开文档的外部修改持续监听 + 干净自动重载 + 脏黄点/三选）。
 
+### 终审修复波（CodeReview 全分支 1 Critical / 4 Important / 3 Minor，全修）
+**Files:** `watch.rs`（**Critical**：watcher 移入独立 `Mutex`，`notify` 的 watch/unwatch 不再持 `shared` 锁调用（回调会抢它，可能死锁）；`registry.paths` 改 `HashMap<PathBuf,u32>`（同文件多标签/关闭重开不再丢监听）；`status()` 公开）；`state.rs`（`DocSnapshot` 别名；`snapshot_for_path` 在 doc 锁内成对读 `disk_meta`+当前磁盘，并按 `canonicalize` 比较路径）；`commands.rs`（**Save-As 后端重绑 `DocFile` 到新路径**（path/index/cache/快照/冲突基线跟随）并在**释放 doc 锁后** `retarget(old,new)`；`watch_retarget` 改为 `watch_status`）；`lib.rs`；`ipc.ts`/`ipc.test`（`watchStatus`）；`main.ts`（`confirmExternalConflict(detail)` 保留 `err.zh` 知情细节；重载 `await` 后重校验关闭/重开与“途中输入”保护；`handleClose→Promise<boolean>`，模式切换不二次确认也不误开新标签；打开后刷新 watch 状态）；docs spec/plan 同步。
+**Why:** Critical 为真实死锁窗口（持锁调 notify 等事件线程 ack，而事件线程在 handler 里等同一把锁）；Important：Save-As 后监听静默失效（doc 仍绑旧 path→新路径事件永无匹配、`doc_reload` 也会重载旧文件）、三选丢失冲突 detail、同路径多文档丢监听、重载后不校验状态（可覆盖途中输入/向已关标签写状态）。Minor：快照与 stat 的 TOCTOU 误报、启动后降级不上报、模式切换依赖已捕获引用。
+**验证:** `cargo test -p lumelog-app` 80 pass（+`registry_same_path_keeps_watch_until_last_close`）+ `cargo clippy --workspace --all-targets -- -D warnings` 净 + `npm test` 64 pass + `npm run build` tsc 通过。
+
 ### Task 1. `watch` 纯逻辑
 **Files:** Create `app/src-tauri/src/watch.rs`（`ExternalKind{Changed,Removed}` lowercase serde；`classify(disk,snapshot)`；`WatchRegistry{dirs refcount,paths}` + `watch/unwatch/tracked`；`ExternalEvent{path,kind}` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod watch;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
 **Why:** spec §2—`classify` 用式样：`disk==snapshot`→None（自我写入/无变化）、`None`→Removed、否则 Changed；监视单位=父目录，同目录 refcount 归零才停；裸文件名退化为 `.`。

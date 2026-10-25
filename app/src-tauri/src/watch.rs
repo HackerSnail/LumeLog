@@ -4,7 +4,6 @@
 //! turns `notify` events into `ExternalEvent`s for the front end.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -39,37 +38,46 @@ pub fn classify(
     }
 }
 
-/// Parent-directory watch refcounts (one `notify` watch per directory) plus the
-/// tracked file paths used to filter events.
+/// Parent-directory watch refcounts (one `notify` watch per directory) plus
+/// tracked file paths with their own counts (the same file may be opened twice).
 #[derive(Debug, Default)]
 pub struct WatchRegistry {
     dirs: HashMap<PathBuf, u32>,
-    paths: HashSet<PathBuf>,
+    paths: HashMap<PathBuf, u32>,
 }
 
 impl WatchRegistry {
     /// Track `path`; returns the directory when it needs a NEW `notify` watch.
     pub fn watch(&mut self, path: &Path) -> Option<PathBuf> {
-        if !self.paths.insert(path.to_path_buf()) {
-            return None; // already tracked
+        let n = self.paths.entry(path.to_path_buf()).or_insert(0);
+        *n += 1;
+        if *n > 1 {
+            return None; // same file already open: only bump its count
         }
         let dir = parent_dir(path);
-        let n = self.dirs.entry(dir.clone()).or_insert(0);
-        *n += 1;
-        if *n == 1 {
+        let d = self.dirs.entry(dir.clone()).or_insert(0);
+        *d += 1;
+        if *d == 1 {
             Some(dir)
         } else {
             None
         }
     }
 
-    /// Stop tracking `path`; returns the directory whose refcount hit zero (stop
-    /// watching it), if any.
+    /// Stop tracking one reference to `path`; returns the directory whose count
+    /// hit zero (stop watching it), if any.
     pub fn unwatch(&mut self, path: &Path) -> Option<PathBuf> {
-        if !self.paths.remove(path) {
-            return None;
-        }
         let dir = parent_dir(path);
+        match self.paths.get_mut(path) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                return None;
+            }
+            Some(_) => {
+                self.paths.remove(path);
+            }
+            None => return None,
+        }
         match self.dirs.get_mut(&dir) {
             Some(n) if *n > 1 => {
                 *n -= 1;
@@ -84,7 +92,7 @@ impl WatchRegistry {
     }
 
     pub fn tracked(&self, path: &Path) -> bool {
-        self.paths.contains(path)
+        self.paths.contains_key(path)
     }
 
     /// Directories currently watched (used to replay them into a new watcher).
@@ -122,7 +130,6 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct Inner {
-    watcher: Option<RecommendedWatcher>,
     registry: WatchRegistry,
     channel: Option<Channel<ExternalEvent>>,
     pending: HashSet<PathBuf>,
@@ -131,8 +138,12 @@ struct Inner {
 }
 
 /// App-managed runtime: one directory watcher and one debounce thread per app.
+/// The watcher lives behind its OWN mutex: `notify`'s `watch`/`unwatch` block
+/// until the event thread acknowledges, and that thread runs our callback (which
+/// locks `shared`) — so calling notify while holding `shared` could deadlock.
 pub struct AppWatch {
     shared: Arc<(Mutex<Inner>, Condvar)>,
+    watcher: Mutex<Option<RecommendedWatcher>>,
     started: AtomicBool,
 }
 
@@ -140,84 +151,108 @@ impl Default for AppWatch {
     fn default() -> Self {
         Self {
             shared: Arc::new((Mutex::new(Inner::default()), Condvar::new())),
+            watcher: Mutex::new(None),
             started: AtomicBool::new(false),
         }
     }
 }
 
 impl AppWatch {
+    fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.shared.0.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn set_degraded(&self, reason: String) {
+        self.inner().degraded = Some(reason);
+    }
+
     /// Bind the event channel, create the watcher (once), and start the debounce
     /// thread (once). A watcher that cannot be created degrades to save-time
     /// checks only — it never fails this call.
     pub fn start(&self, app: &AppHandle, channel: Channel<ExternalEvent>) -> WatchStatus {
-        let (lock, _cv) = &*self.shared;
-        let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
-        inner.channel = Some(channel);
-        if inner.watcher.is_none() {
-            let shared = self.shared.clone();
-            let handler = move |res: notify::Result<notify::Event>| {
-                let Ok(ev) = res else { return };
-                let (l, cv) = &*shared;
-                let mut g = l.lock().unwrap_or_else(|p| p.into_inner());
-                let mut any = false;
-                for p in ev.paths {
-                    if g.registry.tracked(&p) {
-                        g.pending.insert(p);
-                        any = true;
-                    }
-                }
-                drop(g);
-                if any {
-                    cv.notify_all();
-                }
-            };
-            match RecommendedWatcher::new(handler, notify::Config::default()) {
-                Ok(mut w) => {
-                    for dir in inner.registry.dirs() {
-                        if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
-                            inner.degraded = Some(format!("文件监听不可用：{e}"));
+        let dirs = {
+            let mut inner = self.inner();
+            inner.channel = Some(channel);
+            inner.registry.dirs()
+        };
+        let mut fail: Option<String> = None;
+        {
+            let mut slot = self.watcher.lock().unwrap_or_else(|p| p.into_inner());
+            if slot.is_none() {
+                let shared = self.shared.clone();
+                let handler = move |res: notify::Result<notify::Event>| {
+                    let Ok(ev) = res else { return };
+                    let (lock, cv) = &*shared;
+                    let mut g = lock.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut any = false;
+                    for p in ev.paths {
+                        if g.registry.tracked(&p) {
+                            g.pending.insert(p);
+                            any = true;
                         }
                     }
-                    inner.watcher = Some(w);
+                    drop(g);
+                    if any {
+                        cv.notify_all();
+                    }
+                };
+                match RecommendedWatcher::new(handler, notify::Config::default()) {
+                    Ok(mut w) => {
+                        for dir in dirs {
+                            if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
+                                fail = Some(format!("文件监听不可用：{e}"));
+                            }
+                        }
+                        *slot = Some(w);
+                    }
+                    Err(e) => fail = Some(format!("文件监听不可用：{e}")),
                 }
-                Err(e) => inner.degraded = Some(format!("文件监听不可用：{e}")),
             }
         }
-        let status = WatchStatus {
-            degraded: inner.degraded.clone(),
-        };
-        drop(inner);
+        if let Some(e) = fail {
+            self.set_degraded(e);
+        }
         if !self.started.swap(true, Ordering::SeqCst) {
             let app = app.clone();
             let shared = self.shared.clone();
             std::thread::spawn(move || debounce_loop(app, shared));
         }
-        status
+        self.status()
     }
 
     /// Track `path` (a document opened). Safe before `start`: the registry keeps
     /// the directory and `start` replays it into the fresh watcher.
     pub fn watch_path(&self, path: &Path) {
-        let (lock, _cv) = &*self.shared;
-        let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(dir) = inner.registry.watch(path) {
-            if let Some(w) = inner.watcher.as_mut() {
+        let dir = {
+            let mut inner = self.inner();
+            inner.registry.watch(path)
+        };
+        let Some(dir) = dir else { return };
+        let mut fail: Option<String> = None;
+        {
+            let mut slot = self.watcher.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(w) = slot.as_mut() {
                 if let Err(e) = w.watch(&dir, RecursiveMode::NonRecursive) {
-                    inner.degraded = Some(format!("文件监听不可用：{e}"));
+                    fail = Some(format!("文件监听不可用：{e}"));
                 }
             }
         }
+        if let Some(e) = fail {
+            self.set_degraded(e);
+        }
     }
 
-    /// Stop tracking `path` (a document closed). Stops the directory watch once
-    /// its last document is gone.
+    /// Stop tracking one `path` reference; stops the directory watch once its
+    /// last document is gone.
     pub fn unwatch_path(&self, path: &Path) {
-        let (lock, _cv) = &*self.shared;
-        let mut inner = lock.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(dir) = inner.registry.unwatch(path) {
-            if let Some(w) = inner.watcher.as_mut() {
-                let _ = w.unwatch(&dir);
-            }
+        let dir = {
+            let mut inner = self.inner();
+            inner.registry.unwatch(path)
+        };
+        let Some(dir) = dir else { return };
+        let mut slot = self.watcher.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(w) = slot.as_mut() {
+            let _ = w.unwatch(&dir);
         }
     }
 
@@ -230,13 +265,10 @@ impl AppWatch {
         self.watch_path(new);
     }
 
-    /// Current degradation state (test-only: the command returns it from `start`).
-    #[cfg(test)]
+    /// Current degradation state (surfaced via `watch_status`).
     pub fn status(&self) -> WatchStatus {
-        let (lock, _cv) = &*self.shared;
-        let inner = lock.lock().unwrap_or_else(|p| p.into_inner());
         WatchStatus {
-            degraded: inner.degraded.clone(),
+            degraded: self.inner().degraded.clone(),
         }
     }
 }
@@ -277,11 +309,8 @@ fn debounce_loop(app: AppHandle, shared: Arc<(Mutex<Inner>, Condvar)>) {
             if snaps.is_empty() {
                 continue;
             }
-            let disk = fs::metadata(&path)
-                .ok()
-                .map(|m| (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
             let mut kind: Option<ExternalKind> = None;
-            for (_id, snap) in snaps {
+            for (_id, snap, disk) in snaps {
                 match classify(disk, snap) {
                     Some(ExternalKind::Removed) => {
                         kind = Some(ExternalKind::Removed);
@@ -335,6 +364,18 @@ mod tests {
         assert_eq!(r.watch(Path::new("/logs/b.log")), None, "dir already watched");
         assert!(r.tracked(Path::new("/logs/a.log")));
         assert!(!r.tracked(Path::new("/logs/c.log")));
+    }
+
+    #[test]
+    fn registry_same_path_keeps_watch_until_last_close() {
+        let mut r = WatchRegistry::default();
+        let p = Path::new("/logs/a.log");
+        assert_eq!(r.watch(p), Some(PathBuf::from("/logs")));
+        assert_eq!(r.watch(p), None, "second open of the same file only bumps count");
+        assert_eq!(r.unwatch(p), None, "one reference left");
+        assert!(r.tracked(p));
+        assert_eq!(r.unwatch(p), Some(PathBuf::from("/logs")), "last reference stops the dir");
+        assert!(!r.tracked(p));
     }
 
     #[test]

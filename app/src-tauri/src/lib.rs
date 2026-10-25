@@ -24,7 +24,7 @@ pub fn run() {
             commands::doc_set_encoding,
             commands::doc_close,
             commands::watch_subscribe,
-            commands::watch_retarget,
+            commands::watch_status,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,
