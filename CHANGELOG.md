@@ -11,6 +11,11 @@
 **Why:** spec §4—`[keymap]` 表：缺失→默认、`""`→解绑、`set_binding(None)`→删键回默认；保留 `recovery_enabled`/`theme` 等其它配置键；删空表时不写空 `[keymap]`；坏 TOML 重建。
 **验证:** `cargo test -p lumelog-app keymap::` 7 pass（缺表/非串跳过、保留其它键、None 删键、删空表、`""` 解绑、reset 只删表、坏文本重建）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 2. `keymap_get` / `keymap_set` / `keymap_reset` 命令
+**Files:** Modify `app/src-tauri/src/commands.rs`（`read_config_text`/`write_config_text` + 3 命令；读写走现有 `config_path`）；Modify `app/src-tauri/src/lib.rs`（注册）；`keymap.rs`（剥模块 allow）。
+**Why:** spec §4；`keymap_set` 的 `accel=None` 回默认、`Some("")` 解绑；写盘前 `create_dir_all`；失败上浮 `io`。
+**验证:** `cargo test -p lumelog-app` 87 pass + `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — 测试基建：jsdom DOM 单测
 
 **Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。

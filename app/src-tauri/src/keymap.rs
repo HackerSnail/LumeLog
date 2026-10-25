@@ -5,7 +5,6 @@
 //! - value       -> overrides the default.
 //!
 //! Everything here is a pure string -> string transform so it is fully testable.
-#![allow(dead_code)] // consumed by the keymap commands (Task 2)
 
 use std::collections::BTreeMap;
 

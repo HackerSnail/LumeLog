@@ -442,6 +442,49 @@ pub fn watch_status(app: AppHandle) -> Result<WatchStatus, IpcError> {
     Ok(app.state::<AppWatch>().status())
 }
 
+// ---- keymap overrides (spec §8/§10, M3 C) -----------------------------------
+
+fn read_config_text(app: &AppHandle) -> String {
+    config_path(app)
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default()
+}
+
+fn write_config_text(app: &AppHandle, text: &str) -> Result<(), IpcError> {
+    let path = config_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| IpcError::new("io", format!("create config dir: {e}")))?;
+    }
+    std::fs::write(&path, text).map_err(|e| IpcError::new("io", format!("write config: {e}")))
+}
+
+/// Current `[keymap]` overrides (absent keys mean defaults).
+#[tauri::command]
+pub fn keymap_get(app: AppHandle) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+    Ok(crate::keymap::read_keymap(&read_config_text(&app)))
+}
+
+/// Set (`Some(accel)`, `""` = unbound) or clear (`None` = default) one binding.
+#[tauri::command]
+pub fn keymap_set(
+    app: AppHandle,
+    action: String,
+    accel: Option<String>,
+) -> Result<(), IpcError> {
+    let text = read_config_text(&app);
+    let next = crate::keymap::set_binding(&text, &action, accel.as_deref());
+    write_config_text(&app, &next)
+}
+
+/// Drop the whole `[keymap]` table (all actions back to defaults).
+#[tauri::command]
+pub fn keymap_reset(app: AppHandle) -> Result<(), IpcError> {
+    let text = read_config_text(&app);
+    write_config_text(&app, &crate::keymap::reset_keymap(&text))
+}
+
 /// Read + lenient-parse a DBC file. Lenient so a single bad construct does not
 /// void the whole import — the good messages are kept and warnings surface (spec
 /// §7.1 "跳过坏行继续"). Never panics on non-UTF-8 bytes (lossy).
