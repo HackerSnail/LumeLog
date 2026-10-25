@@ -637,3 +637,53 @@ export function exportJsonl(args: Omit<Parameters<typeof exportCan>[0], "cmd">):
 export function exportCanCancel(requestId: number): Promise<void> {
   return call<void>("export_can_cancel", { requestId });
 }
+
+// ---- Crash recovery (spec §4.4/§10, M3 子项目 B1) --------------------------
+
+/** One recoverable shadow (`recovery_list` row). */
+export interface RecoveryEntry {
+  path: string;
+  encoding: string;
+  eol: string;
+  savedAtMs: number;
+  sizeBytes: number;
+}
+
+/** A loaded shadow's text + the metadata needed to save it back losslessly. */
+export interface RecoveryContent {
+  path: string;
+  encoding: string;
+  eol: string;
+  text: string;
+}
+
+/** Persist a dirty doc's shadow (backend no-ops when recovery is disabled). */
+export function recoverySave(args: {
+  path: string;
+  encoding: string;
+  eol: string;
+  text: string;
+}): Promise<void> {
+  return call<void>("recovery_save", args);
+}
+
+export function recoveryList(): Promise<RecoveryEntry[]> {
+  return call<RecoveryEntry[]>("recovery_list", {});
+}
+
+export function recoveryLoad(path: string): Promise<RecoveryContent> {
+  return call<RecoveryContent>("recovery_load", { path });
+}
+
+export function recoveryDiscard(path: string): Promise<void> {
+  return call<void>("recovery_discard", { path });
+}
+
+/** The minimal `config.toml` switch (defaults to true). */
+export function recoveryEnabled(): Promise<boolean> {
+  return call<boolean>("recovery_enabled", {});
+}
+
+export function recoverySetEnabled(enabled: boolean): Promise<void> {
+  return call<void>("recovery_set_enabled", { enabled });
+}

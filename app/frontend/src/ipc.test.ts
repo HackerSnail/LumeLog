@@ -14,6 +14,12 @@ import {
   exportCsv,
   exportJsonl,
   exportCanCancel,
+  recoverySave,
+  recoveryList,
+  recoveryLoad,
+  recoveryDiscard,
+  recoveryEnabled,
+  recoverySetEnabled,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -109,6 +115,19 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("can_export_wrappers_are_functions", () => {
     for (const fn of [exportCsv, exportJsonl, exportCanCancel]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("recovery_wrappers_are_functions", () => {
+    for (const fn of [
+      recoverySave,
+      recoveryList,
+      recoveryLoad,
+      recoveryDiscard,
+      recoveryEnabled,
+      recoverySetEnabled,
+    ]) {
       expect(typeof fn).toBe("function");
     }
   });

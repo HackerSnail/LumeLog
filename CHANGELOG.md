@@ -21,6 +21,11 @@
 **Why:** spec §4/§6。把 2s 节流的时序与展示格式抽为 DOM 无关纯模块，便于 fake-timers 单测；不依赖 locale 避免平台差异。
 **验证:** `npm --prefix app/frontend test` 60 pass（+5：合并只写一次/取消/多 id 隔离+cancelAll/humanSize 边界/时间格式形状）+ `run build` tsc 通过。
 
+### Task 4. 前端 IPC 桥（崩溃恢复）
+**Files:** Modify `app/frontend/src/ipc.ts`（`RecoveryEntry`/`RecoveryContent` 类型 + `recoverySave/recoveryList/recoveryLoad/recoveryDiscard/recoveryEnabled/recoverySetEnabled`）；Modify `ipc.test.ts`（+1 typeof）。
+**Why:** spec §3/§3.1；`RecoveryEntry` 字段与 Rust camelCase 对齐（`savedAtMs/sizeBytes`）；均以 `path` 为键。
+**验证:** `npm test` 61 pass（ipc 11→12）+ `run build` tsc 通过；Rust 未改。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
