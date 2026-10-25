@@ -4,6 +4,7 @@
 pub mod doc;
 pub mod encoding;
 pub mod error;
+pub mod export;
 pub mod filter;
 pub mod search;
 

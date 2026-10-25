@@ -11,6 +11,11 @@
 **Why:** spec §2/§3.1。行号与时间是两条独立 AND 轴；时间解析用内置格式集（chrono，无偏移当 UTC，支持 RFC3339/小数秒）；无抽取正则时行号区间为退化路径。**涟漪决策：**因 `build`/`keep` 签名变更，本 Task 一并适配 `commands.rs` 现有调用（传 `None,None` 保持旧行为），保证本提交 workspace 仍可编译（时间轴/行号轴的 **功能接入** 属 Task 4）。
 **验证:** `cargo test -p lumelog-core filter::` 16 pass（旧 10 适配新签名 + 新 6：行号区间/ISO 窗/epoch 秒/无 ts 保留标记/缺 ts 组报错/ISO 偏移与小数秒）；`cargo test -p lumelog-app` 23 pass（旧 filter_run 测试适配）；`cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 2. lumelog-core::export 原始字节导出
+**Files:** Create `crates/lumelog-core/src/export.rs`；Modify `crates/lumelog-core/src/lib.rs`（`pub mod export;`）。
+**Why:** spec §3.2。`export::run<W:Write>(doc, matcher, writer, on_progress, cancel) -> ExportStats{written,scanned,cancelled,errored}` 逐块 `chunk_at`（`chunk_lines` 去尾换行与 filter_run 的 `DocLines` 同法，保证 keep 判定与屏显一致）→保留行用 `line_byte_range`+`read_window` 取**原始字节**写 `writer`（不转码，精确保编码/行尾）；每行判 cancel、每块报进度；读/写错吸收为 `errored` 不返回 Result（落 core 因 `line_byte_range/read_window` 是 `pub(crate)`）。
+**验证:** `cargo test -p lumelog-core export::` 4 pass（字节一致/含选中行“bb\n”、CRLF+无尾换行全量逐字节、GBK 多字节原样拷贝、取消早停且输出为前缀）；`cargo clippy -p lumelog-core --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 4 M3 行过滤 + 高亮命中（feat/m3-filter-highlight）
 
 **依据：** spec `docs/specs/2026-10-25-m3-filter-highlight-design.md`；计划 `docs/plans/2026-10-25-m3-filter-highlight.md`（M3 子项目 A 增量1：只读视图 多条件 AND 行过滤 + 命中区高亮 + F3 跳转 + 实时取消）。
