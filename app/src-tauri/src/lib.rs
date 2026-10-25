@@ -6,6 +6,7 @@
 mod can_export;
 mod commands;
 mod dto;
+mod recovery;
 mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

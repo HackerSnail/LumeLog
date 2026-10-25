@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-25 — Plan 7 M3 崩溃恢复（feat/m3-crash-recovery）
+
+**依据：** spec `docs/specs/2026-10-25-m3-crash-recovery-design.md`；计划 `docs/plans/2026-10-25-m3-crash-recovery.md`（M3 子项目 B1：脏文档影子文件 + 启动单列表横幅恢复 + 最小配置开关 `recovery_enabled`）。
+
+### Task 1. `recovery` 影子存储层
+**Files:** Create `app/src-tauri/src/recovery.rs`（`RecoveryMeta/RecoveryEntry/RecoveryContent` camelCase；`fnv1a64`/`doc_key`/`shadow_path`/`write_shadow`/`read_shadow`/`list_shadows`/`discard_shadow` + 7 单测）；Modify `app/src-tauri/src/lib.rs`（`mod recovery;`）。模块级 `#![allow(dead_code)]`（Task2 接入后剥）。
+**Why:** spec §2—影子 `<doc_key>.lumelog` = 首行 JSON meta + `\n` + 原始 UTF-8 文本（大文本免 JSON 转义）；`doc_key=FNV-1a64(path)` 16hex（零依赖、稳定）；写入 `.lumelogtmp`→rename；list 按 `saved_at_ms` 降序、坏文件跳过、缺失目录→空。
+**验证:** `cargo test -p lumelog-app recovery::` 7 pass（FNV 标准向量、key 稳定/区分、meta+文本往返含中文/emoji/CRLF、同 key 覆盖、排序+坏文件跳过、缺目录、discard 幂等）；`cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 6 M3 CAN 报文导出（feat/m3-can-export）
 
 **依据：** spec `docs/specs/2026-10-25-m3-can-export-design.md`；计划 `docs/plans/2026-10-25-m3-can-export.md`（M3 子项目 A 增量3：后端重解码流式导出 CAN 报文为宽表 CSV + JSONL）。
