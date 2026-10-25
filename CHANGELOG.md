@@ -21,6 +21,11 @@
 **Why:** spec §3。Ctrl 同时匹配 Ctrl/Cmd；validate 要求 Ctrl/Alt 或 F1–F24（防劫持）；合并先默认后覆盖（`""`=解绑），冲突先到先得并记录，未知 id 上报。
 **验证:** `npm test` 77 pass（+9）+ `run build` tsc 通过（43 modules）。
 
+### Task 4. 前端 IPC 桥（快捷键）
+**Files:** Modify `app/frontend/src/ipc.ts`（`keymapGet/keymapSet/keymapReset`）；Modify `ipc.test.ts`（+1 typeof）。
+**Why:** spec §4；`keymapSet` 的 `accel=null` 回默认、`""` 解绑。
+**验证:** `npm test` 78 pass（ipc 13→14）+ `run build` tsc 通过。
+
 ## 2026-10-25 — 测试基建：jsdom DOM 单测
 
 **Files:** `app/frontend/package.json` + `package-lock.json`（`jsdom` devDependency）；`app/frontend/src/tabs.test.ts`（`@vitest-environment jsdom`；新增 2 个真实 DOM 用例：黄点 `setExternalFlag` 与脏点独立切换）；Create `app/frontend/src/statusbar.test.ts`（2 个用例：`setWatch` ok 隐藏 / degraded 显示文案+tooltip 并可清除）。
