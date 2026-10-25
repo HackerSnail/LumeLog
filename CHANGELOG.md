@@ -21,6 +21,11 @@
 **Why:** spec §3；无源文档，BLF 帧仍走同一批处理/过滤/取消链路；大文件不整文件载入。
 **验证:** `cargo test -p lumelog-app` 90 pass（+1 DTO）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 4. 前端 IPC（BLF）
+**Files:** Modify `app/frontend/src/ipc.ts`（`BlfStats`、`canParseBlf`、`exportBlfCsv/Jsonl`）；`ipc.test.ts`（+1 typeof）。
+**Why:** spec §4；导出包装用 `path` 而非 `docId`，其余形状与现有 CAN 包装一致（双 Channel）。
+**验证:** `npm test` 89 pass（ipc 15→16）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 10 Roadmap tail 跟随（feat/roadmap-tail-follow）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-tail-follow-design.md`；计划 `docs/plans/2026-10-25-roadmap-tail-follow.md`（Roadmap：只读 tail 跟随 + 滚动截断，增量扩展索引）。
