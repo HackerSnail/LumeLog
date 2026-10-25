@@ -11,6 +11,11 @@
 **Why:** tail 追加不应重建全文；尾有/无 LF 两种旧状态均只需推 LF+1（不重复起点）。
 **验证:** `cargo test -p lumelog-core line_index::` 14 pass（+5：尾有 LF/尾无 LF/空追加/多 LF/4GB 越界）+ `cargo clippy -p lumelog-core --all-targets -- -D warnings` 净。
 
+### Task 2. core `DocFile::try_append` + 头签名
+**Files:** Modify `crates/lumelog-core/src/doc/file.rs`（`head_sig`（FNV-1a64, 前 `min(512, old_size)`）；`AppendOutcome{NoChange,Appended{lines_added,total_lines},Rotated}`；`try_append`：缩小/头签名变→Rotated，同尺寸→NoChange，增长→`LineIndex::extend`+刷新 `size/mtime/head_sig`；`reload_after_save` 同步签名）+ 5 单测。
+**Why:** tail 增量不重建全文；签名长度必须用**旧 size 的前缀**（否则增长过 512 后哈希窗口变化会误判轮转—— 首版测试即捕获）；`try_append` 刷新快照避免 B2 watcher 重复触发。
+**验证:** `cargo test -p lumelog-core` 88 pass（+5：追加/无变化/截断/同大小改头/尾 LF）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 9 M3 快捷键自定义（feat/m3-keymap）
 
 **依据：** spec `docs/specs/2026-10-25-m3-keymap-design.md`；计划 `docs/plans/2026-10-25-m3-keymap.md`（M3 子项目 C：13 个动作可绑定、`config.toml` `[keymap]` 覆盖、录制模态）。
