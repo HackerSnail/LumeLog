@@ -66,6 +66,7 @@ export class Mf4View {
   private total = 0;
   private busy = false;
   private lastEmpty = "尚未选择通道";
+  private lastSelected = -1;
 
   constructor(host: HTMLElement, opts: Mf4UiOpts) {
     this.opts = opts;
@@ -222,6 +223,7 @@ export class Mf4View {
   }
 
   private query(): void {
+    if (this.busy) return; // one request at a time; stale ones are dropped anyway
     if (this.selected.size === 0) {
       this.lastEmpty = "请先在左侧勾选通道";
       this.table.setEmpty(this.lastEmpty);
@@ -273,6 +275,9 @@ export class Mf4View {
       this.listEl.append(row);
     }
     if (shown.length === 0) this.listEl.append(el("div", "mf4-empty", "无匹配通道"));
-    this.setStatus(`已选 ${this.selected.size}/${MAX_COLS}`);
+    if (this.selected.size !== this.lastSelected) {
+      this.lastSelected = this.selected.size;
+      this.setStatus(`已选 ${this.selected.size}/${MAX_COLS}`);
+    }
   }
 }

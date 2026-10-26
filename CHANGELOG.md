@@ -33,6 +33,12 @@
 **偏差/Parked:** dock 未内置“取消导出”按钮（`mf4_export_cancel` 已有，UI 仅可在完成后解除）；列选择上限/分页默认值与 spec 一致；会话多开（>1）UI 仅保留最后一个（后端支持 ≤4，UI 先简化为单会话）。
 **验证:** `npm test` 102 pass（16 文件）+ `run build` tsc 通过（48 modules）。
 
+### 终审修复波（全分支审查：1 Critical / 6 Important / 6 Minor）
+**Files:** `app/src-tauri/src/mf4.rs`（**C1** `Mf4ChannelJson` 增 `dataGroup`；`records`/`export_csv` 改为“同一 `data_group_index` + `is_time_channel()`”取时间主通道，跨数据组选择直接 `invalid_argument`；**I2** 降序页改为先升序取单元格再按 `slot_of` 回排，并在 `select_rows` 用 `last_needed = total - start` 作为扫描终点（避免跨分块下溢/尾部空值）；**I3** `select_rows` 改两遍流式（第一遍只计数、第二遍用 `HashMap<position, slot>` 只收本页），无时间轴用 `signal_chunks` 累加长度，不再整信号入内存；**I4** 导出先快照 `Arc<Mutex<Mf4File>>` 并 `drop(session 锁)`，长写入不再阻塞表格/概览）；`app/frontend/src/mf4-ui.ts`（`query()` 增加 `busy` 短路；“已选 N/32”只在数量变化时覆盖状态区，不再掩盖“读取中/导出 N 行”）；`main.ts`（`mf4Opening` 防重入；打开后 `channels/summary` 失败时 `mf4Close(opened)` 回收会话槽；超 2000 通道时状态区提示“仅加载前 N，请用搜索缩小范围”）；`styles.css`（**I5** `#mf4-dock` 补 `flex:0 0 auto;max-height:55%;min-height:0;display:flex;flex-direction:column`，`.mf4-view` 改 `flex:1 1 auto` 去掉 `height:100%`，表格/通道列重新可滚动）；新增回归测（两个数据组 → 跨组选择 `invalid_argument`、单组仍播 3 行）。
+**Why:** C1/I2 会静默给出错误数据；I3 在百万样本级文件上每翻页重整时间窗；I5 导致页只能看到视口内几十行。
+**Parked:** Minor 的 `Bytes/Complex → degraded`、导出 UI 取消按钮、`summary` 组合并同号组、无时间轴表头/行数一致性、跨分块降序/无时间轴/`busy` 点复选框等测试（详见 `docs/reviews/2026-10-26-mf4-review-findings.md`）。
+**验证:** `cargo test -p lumelog-app mf4::` 9 pass；`cargo test --workspace`（app 114 / core 89 / can 23）、`cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 102 pass；`run build` 通过。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

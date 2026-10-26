@@ -44,9 +44,12 @@ pub struct Mf4ChannelJson {
     pub name: String,
     pub unit: String,
     pub kind: Mf4Kind,
-    /// Master (time) channel of its group.
+    /// Master time channel of its group (angle/distance masters are NOT time).
     pub master: bool,
+    /// Channel-group index (unique only within its data group).
     pub group: u32,
+    /// Data-group index; `(data_group, group)` identifies a record stream.
+    pub data_group: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -263,8 +266,9 @@ fn cell_of(values: &SignalValues, local: usize, valid: bool) -> Mf4CellJson {
 }
 
 /// Absolute sample rows inside `[from,to]` seconds, ordered by time and paged.
-/// Also returns the millisecond axis and the total in-window sample count (so the
-/// UI can page accurately); `axis` is empty when the file has no time channel.
+/// Two streaming passes: the first counts the window (for `totalRows`), the second
+/// collects only the requested page, so memory is bounded by the page size rather
+/// than by the sample count. `axis` is empty when the file has no time channel.
 fn select_rows(
     file: &Mf4File,
     master: Option<&Channel>,
@@ -274,41 +278,73 @@ fn select_rows(
     limit: usize,
     offset: usize,
 ) -> Result<(Vec<usize>, Vec<f64>, u64, bool), IpcError> {
-    // (sample index, time in ms) for every in-window sample, file order.
-    let mut pairs: Vec<(usize, f64)> = Vec::new();
-    let has_time_axis = master.is_some();
     if let Some(m) = master {
-        let mut base: usize = 0;
+        // Pass 1: count the window (no allocation).
+        let mut total: u64 = 0;
         for chunk in file.signal_chunks(m).map_err(classify)? {
             let chunk = chunk.map_err(classify)?;
-            let len = chunk.len();
-            for (i, t) in chunk.values_f64().map_err(classify)?.iter().enumerate() {
-                let in_window = from.is_none_or(|f| *t >= f) && to.is_none_or(|v| *t <= v);
-                if in_window {
-                    pairs.push((base + i, t * 1000.0));
+            for t in chunk.values_f64().map_err(classify)?.iter() {
+                if in_window(*t, from, to) {
+                    total += 1;
                 }
             }
-            base += len;
         }
-    } else {
-        // No time axis at all: pages are plain sample indices of the first group.
-        let Some(first) = file.channels().next() else {
-            return Ok((Vec::new(), Vec::new(), 0, false));
-        };
-        let len = file.signal(first).map_err(classify)?.len();
-        pairs.extend((0..len).map(|i| (i, 0.0)));
+        // Pass 2: collect the page. `positions` maps a window position to its slot
+        // in the requested order (a descending page reads the window's tail first).
+        let start = offset as u64;
+        let end = (offset as u64 + limit as u64).min(total);
+        let slots = (end - start) as usize;
+        let mut wanted: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        for slot in 0..slots {
+            let pos = start + slot as u64;
+            let at = if desc { total - 1 - pos } else { pos };
+            wanted.insert(at, slot);
+        }
+        let mut rows = vec![0usize; slots];
+        let mut times = vec![0.0f64; slots];
+        if slots > 0 {
+            // A descending page sits at the END of the window, so the scan runs to
+            // `total - start` in-window samples, not to `end`.
+            let last_needed = if desc { total - start } else { end };
+            let mut seen: u64 = 0;
+            let mut base: usize = 0;
+            'outer: for chunk in file.signal_chunks(m).map_err(classify)? {
+                let chunk = chunk.map_err(classify)?;
+                let len = chunk.len();
+                for (i, t) in chunk.values_f64().map_err(classify)?.iter().enumerate() {
+                    if !in_window(*t, from, to) {
+                        continue;
+                    }
+                    if let Some(&slot) = wanted.get(&seen) {
+                        rows[slot] = base + i;
+                        times[slot] = t * 1000.0;
+                    }
+                    seen += 1;
+                    if seen >= last_needed {
+                        break 'outer;
+                    }
+                }
+                base += len;
+            }
+        }
+        return Ok((rows, times, total, true));
     }
-    let total_rows = pairs.len() as u64;
-    if desc {
-        pairs.reverse();
+    // No time axis: rows are sample indices, and the length comes from chunked
+    // reads — a whole signal is never materialised just to page it.
+    let Some(first) = file.channels().next() else {
+        return Ok((Vec::new(), Vec::new(), 0, false));
+    };
+    let mut len: u64 = 0;
+    for chunk in file.signal_chunks(first).map_err(classify)? {
+        len += chunk.map_err(classify)?.len() as u64;
     }
-    let page: Vec<(usize, f64)> = pairs.into_iter().skip(offset).take(limit).collect();
-    Ok((
-        page.iter().map(|p| p.0).collect(),
-        page.iter().map(|p| p.1).collect(),
-        total_rows,
-        has_time_axis,
-    ))
+    let end = (offset as u64 + limit as u64).min(len);
+    let rows: Vec<usize> = (offset as u64..end).map(|i| i as usize).collect();
+    Ok((rows, Vec::new(), len, false))
+}
+
+fn in_window(t: f64, from: Option<f64>, to: Option<f64>) -> bool {
+    from.is_none_or(|f| t >= f) && to.is_none_or(|v| t <= v)
 }
 
 /// One page of the record table for the selected channels.
@@ -340,10 +376,7 @@ pub(crate) fn records(
     }
     if let (Some(f), Some(t)) = (from_sec, to_sec) {
         if f > t {
-            return Err(IpcError::new(
-                "invalid_argument",
-                "时间窗起点不能晚于止点",
-            ));
+            return Err(IpcError::new("invalid_argument", "时间窗起点不能晚于止点"));
         }
     }
     let desc = match sort {
@@ -367,13 +400,47 @@ pub(crate) fn records(
             .ok_or_else(|| IpcError::new("invalid_argument", format!("未知通道 {want}")))?;
         picked.push(found.clone());
     }
+    // One record stream only: a channel from another data group has its own time
+    // base and sample indices, so mixing them would silently show wrong values.
+    let data_group = picked[0].1.data_group_index;
+    if picked.iter().any(|(_, c)| c.data_group_index != data_group) {
+        return Err(IpcError::new(
+            "invalid_argument",
+            "请选择同一数据组内的通道",
+        ));
+    }
     let file = guard.file.lock().unwrap_or_else(|p| p.into_inner());
-    let master = guard.channels.iter().find(|(_, c)| c.is_master()).map(|(_, c)| c);
-    let (rows, time_ms, total_rows, has_time_axis) =
-        select_rows(&file, master, from_sec, to_sec, desc, limit as usize, offset as usize)?;
+    // Only a time master defines the axis; angle/distance masters are not seconds.
+    let master = guard
+        .channels
+        .iter()
+        .find(|(_, c)| c.data_group_index == data_group && c.is_time_channel())
+        .map(|(_, c)| c);
+    let (rows, time_ms, total_rows, has_time_axis) = select_rows(
+        &file,
+        master,
+        from_sec,
+        to_sec,
+        desc,
+        limit as usize,
+        offset as usize,
+    )?;
+    // `cells_for_rows` walks chunks in ascending sample order, so fetch ascending
+    // and map back to the requested (possibly descending) display order.
+    let mut asc = rows.clone();
+    asc.sort_unstable();
+    let slot_of: std::collections::HashMap<usize, usize> = asc
+        .iter()
+        .enumerate()
+        .map(|(slot, &row)| (row, slot))
+        .collect();
     let mut columns = Vec::with_capacity(picked.len());
     for (meta, ch) in &picked {
-        let (values, degraded) = cells_for_rows(&file, ch, &rows);
+        let (asc_values, degraded) = cells_for_rows(&file, ch, &asc);
+        let values = rows
+            .iter()
+            .map(|row| asc_values[slot_of[row]].clone())
+            .collect();
         columns.push(Mf4ColumnJson {
             index: meta.index,
             name: meta.name.clone(),
@@ -419,8 +486,9 @@ pub(crate) fn open_session(sessions: &Mf4Sessions, path: &Path) -> Result<Mf4Inf
                 name: ch.name.clone(),
                 unit: ch.unit.clone(),
                 kind: kind_of(ch),
-                master: ch.is_master(),
+                master: ch.is_time_channel(),
                 group: ch.channel_group_index as u32,
+                data_group: ch.data_group_index as u32,
             };
             (meta, ch.clone())
         })
@@ -598,6 +666,21 @@ pub(crate) fn export_csv(
             }
         }
     }
+    // Same one-stream rule as the table: never mix data groups.
+    let data_group = picked[0].1.data_group_index;
+    if picked.iter().any(|(_, c)| c.data_group_index != data_group) {
+        stats.errored = true;
+        return stats;
+    }
+    let master = guard
+        .channels
+        .iter()
+        .find(|(_, c)| c.data_group_index == data_group && c.is_time_channel())
+        .map(|(_, c)| c);
+    // Release the session registry lock before the long write; the file handle is
+    // shared (Arc), so `records`/`summary` are not blocked by the export.
+    let file_arc = Arc::clone(&guard.file);
+    let _lock_kept = &guard;
     let tmp = target.with_file_name(format!(
         ".{}.tmp-{}-{}",
         target
@@ -623,8 +706,7 @@ pub(crate) fn export_csv(
         stats.errored = true;
         return stats;
     }
-    let inner = guard.file.lock().unwrap_or_else(|p| p.into_inner());
-    let master = guard.channels.iter().find(|(_, c)| c.is_master()).map(|(_, c)| c);
+    let inner = file_arc.lock().unwrap_or_else(|p| p.into_inner());
 
     // Collector: batches of (row, ms) that render and flush together.
     let mut batch: Vec<(usize, f64)> = Vec::with_capacity(500);
@@ -669,38 +751,39 @@ pub(crate) fn export_csv(
         let mut base: usize = 0;
         let chunks = inner.signal_chunks(m);
         if let Ok(chunks) = chunks {
-        'outer: for chunk in chunks {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(_) => {
-                    io_failed = true;
-                    break;
-                }
-            };
-            let len = chunk.len();
-            let vals = match chunk.values_f64() {
-                Ok(v) => v,
-                Err(_) => {
-                    io_failed = true;
-                    break;
-                }
-            };
-            for (i, t) in vals.iter().enumerate() {
-                if cancel() {
-                    stats.cancelled = true;
-                    break 'outer;
-                }
-                let in_window = from_sec.is_none_or(|f| *t >= f) && to_sec.is_none_or(|v| *t <= v);
-                if in_window {
-                    batch.push((base + i, t * 1000.0));
-                    if batch.len() >= 500 && !write_batch(&mut batch) {
+            'outer: for chunk in chunks {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(_) => {
                         io_failed = true;
+                        break;
+                    }
+                };
+                let len = chunk.len();
+                let vals = match chunk.values_f64() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        io_failed = true;
+                        break;
+                    }
+                };
+                for (i, t) in vals.iter().enumerate() {
+                    if cancel() {
+                        stats.cancelled = true;
                         break 'outer;
                     }
+                    let in_window =
+                        from_sec.is_none_or(|f| *t >= f) && to_sec.is_none_or(|v| *t <= v);
+                    if in_window {
+                        batch.push((base + i, t * 1000.0));
+                        if batch.len() >= 500 && !write_batch(&mut batch) {
+                            io_failed = true;
+                            break 'outer;
+                        }
+                    }
                 }
+                base += len;
             }
-            base += len;
-        }
         } else {
             io_failed = true;
         }
@@ -806,7 +889,11 @@ mod tests {
         assert!(lines[0].starts_with("timeMs"), "{}", lines[0]);
         assert!(lines[0].contains("Speed (km/h)"));
         assert!(lines[1].starts_with("0.000,10,"));
-        assert!(lines[1].contains("\"a\"\"b\""), "quotes doubled: {}", lines[1]);
+        assert!(
+            lines[1].contains("\"a\"\"b\""),
+            "quotes doubled: {}",
+            lines[1]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -844,7 +931,39 @@ mod tests {
         );
         assert!(cancelled.cancelled);
         assert_eq!(cancelled.written, 0);
-        assert!(cancel_target.exists(), "cancelled run keeps the header prefix");
+        assert!(
+            cancel_target.exists(),
+            "cancelled run keeps the header prefix"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn records_rejects_cross_data_group_selection() {
+        let dir = std::env::temp_dir().join(format!("lumelog-mf4-xdg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two.mf4");
+        let mut w = Mf4Writer::new();
+        {
+            let g = w.add_group(&[0.0, 1.0]).unwrap();
+            g.add_channel("A", "", &[1.0, 2.0]).unwrap();
+        }
+        {
+            let g = w.add_group(&[0.0, 1.0, 2.0]).unwrap();
+            g.add_channel("B", "", &[3.0, 4.0, 5.0]).unwrap();
+        }
+        w.write_to_file(&path).unwrap();
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        assert!(info.data_groups >= 2, "writer made two groups");
+        let a = channel_id(&sessions, info.id, "A");
+        let b = channel_id(&sessions, info.id, "B");
+        let err = records(&sessions, info.id, &[a, b], None, None, "timeAsc", 10, 0).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        assert!(err.message.contains("同一数据组"), "{}", err.message);
+        // A single-group selection still works and uses that group's own axis.
+        let ok = records(&sessions, info.id, &[b], None, None, "timeAsc", 10, 0).unwrap();
+        assert_eq!(ok.total_rows, 3);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -856,7 +975,10 @@ mod tests {
         let s = summary(&sessions, info.id).unwrap();
         assert_eq!(s.channel_count, info.channel_count);
         assert_eq!(s.data_groups, 1);
-        assert_eq!(s.groups.iter().map(|g| g.channels).sum::<u32>(), s.channel_count);
+        assert_eq!(
+            s.groups.iter().map(|g| g.channels).sum::<u32>(),
+            s.channel_count
+        );
         assert!(!s.version.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -869,15 +991,37 @@ mod tests {
         let speed = channel_id(&sessions, info.id, "Speed");
         let temp = channel_id(&sessions, info.id, "EngineTemp");
 
-        let all = records(&sessions, info.id, &[speed, temp], None, None, "timeAsc", 10, 0).unwrap();
+        let all = records(
+            &sessions,
+            info.id,
+            &[speed, temp],
+            None,
+            None,
+            "timeAsc",
+            10,
+            0,
+        )
+        .unwrap();
         assert_eq!(all.total_rows, 4);
         assert!(all.has_time_axis);
-        assert_eq!(all.time_ms, vec![Some(0.0), Some(1000.0), Some(2000.0), Some(3000.0)]);
+        assert_eq!(
+            all.time_ms,
+            vec![Some(0.0), Some(1000.0), Some(2000.0), Some(3000.0)]
+        );
         assert_eq!(all.columns.len(), 2);
         assert_eq!(cell_num(&all.columns[0].values[3]), 40.0);
 
-        let clipped =
-            records(&sessions, info.id, &[speed], Some(1.0), Some(2.0), "timeAsc", 10, 0).unwrap();
+        let clipped = records(
+            &sessions,
+            info.id,
+            &[speed],
+            Some(1.0),
+            Some(2.0),
+            "timeAsc",
+            10,
+            0,
+        )
+        .unwrap();
         assert_eq!(clipped.total_rows, 2);
         assert_eq!(clipped.time_ms, vec![Some(1000.0), Some(2000.0)]);
 
@@ -890,8 +1034,17 @@ mod tests {
         assert_eq!(cell_num(&p2.columns[0].values[0]), 30.0);
 
         // Column order follows the requested selection, not the file order.
-        let flipped =
-            records(&sessions, info.id, &[temp, speed], None, None, "timeAsc", 1, 0).unwrap();
+        let flipped = records(
+            &sessions,
+            info.id,
+            &[temp, speed],
+            None,
+            None,
+            "timeAsc",
+            1,
+            0,
+        )
+        .unwrap();
         assert_eq!(flipped.columns[0].name, "EngineTemp");
         assert_eq!(flipped.columns[1].name, "Speed");
         std::fs::remove_dir_all(&dir).ok();
@@ -904,29 +1057,65 @@ mod tests {
         let info = open_session(&sessions, &path).unwrap();
         let temp = channel_id(&sessions, info.id, "EngineTemp");
         let rows = records(&sessions, info.id, &[temp], None, None, "timeAsc", 10, 0).unwrap();
-        assert!(matches!(rows.columns[0].values[1], Mf4CellJson::Null), "marked invalid");
+        assert!(
+            matches!(rows.columns[0].values[1], Mf4CellJson::Null),
+            "marked invalid"
+        );
         assert!(matches!(rows.columns[0].values[0], Mf4CellJson::Number(_)));
 
-        assert_eq!(records(&sessions, info.id, &[], None, None, "timeAsc", 10, 0).unwrap_err().code, "invalid_argument");
         assert_eq!(
-            records(&sessions, info.id, &[temp], None, None, "timeAsc", MAX_LIMIT + 1, 0).unwrap_err().code,
+            records(&sessions, info.id, &[], None, None, "timeAsc", 10, 0)
+                .unwrap_err()
+                .code,
             "invalid_argument"
         );
         assert_eq!(
-            records(&sessions, info.id, &[temp], Some(5.0), Some(1.0), "timeAsc", 10, 0).unwrap_err().code,
+            records(
+                &sessions,
+                info.id,
+                &[temp],
+                None,
+                None,
+                "timeAsc",
+                MAX_LIMIT + 1,
+                0
+            )
+            .unwrap_err()
+            .code,
             "invalid_argument"
         );
         assert_eq!(
-            records(&sessions, info.id, &[temp], None, None, "col:3Asc", 10, 0).unwrap_err().code,
+            records(
+                &sessions,
+                info.id,
+                &[temp],
+                Some(5.0),
+                Some(1.0),
+                "timeAsc",
+                10,
+                0
+            )
+            .unwrap_err()
+            .code,
             "invalid_argument"
         );
         assert_eq!(
-            records(&sessions, info.id, &[9999], None, None, "timeAsc", 10, 0).unwrap_err().code,
+            records(&sessions, info.id, &[temp], None, None, "col:3Asc", 10, 0)
+                .unwrap_err()
+                .code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            records(&sessions, info.id, &[9999], None, None, "timeAsc", 10, 0)
+                .unwrap_err()
+                .code,
             "invalid_argument"
         );
         let too_many: Vec<u32> = (0..=(MAX_COLUMNS as u32)).collect();
         assert_eq!(
-            records(&sessions, info.id, &too_many, None, None, "timeAsc", 10, 0).unwrap_err().code,
+            records(&sessions, info.id, &too_many, None, None, "timeAsc", 10, 0)
+                .unwrap_err()
+                .code,
             "invalid_argument"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -964,7 +1153,10 @@ mod tests {
         let miss = list_channels(&sessions, info.id, Some("zzz"), 100, 0).unwrap();
         assert!(miss.items.is_empty() && miss.total == 0);
         let paged = list_channels(&sessions, info.id, None, 1, 99).unwrap();
-        assert!(paged.items.is_empty(), "offset past the end is an empty page");
+        assert!(
+            paged.items.is_empty(),
+            "offset past the end is an empty page"
+        );
         assert_eq!(paged.total, info.channel_count);
         std::fs::remove_dir_all(&dir).ok();
     }

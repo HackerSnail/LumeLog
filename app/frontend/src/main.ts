@@ -568,6 +568,7 @@ let mf4View: Mf4View | null = null;
 let mf4SessionId: number | null = null;
 let mf4Path = "";
 let mf4Token = 0;
+let mf4Opening = false;
 
 function buildMf4Dock(): HTMLElement {
   if (mf4DockEl) return mf4DockEl;
@@ -585,14 +586,19 @@ async function openMf4File(): Promise<void> {
     filters: [{ name: "MF4 测量文件", extensions: ["mf4"] }],
   });
   if (typeof picked !== "string") return;
+  if (mf4Opening) return;
+  mf4Opening = true;
+  let opened: number | null = null;
   try {
     const info = await mf4Open(picked);
+    opened = info.id;
     const [channels, summary] = await Promise.all([
       mf4Channels({ id: info.id, limit: 2000 }),
       mf4Summary(info.id),
     ]);
     if (mf4SessionId !== null) void mf4Close(mf4SessionId).catch(() => {});
     mf4SessionId = info.id;
+    opened = null; // the session now belongs to mf4SessionId/closeMf4
     mf4Path = picked;
     if (canDockVisible) toggleCanDock();
     const host = buildMf4Dock();
@@ -605,9 +611,18 @@ async function openMf4File(): Promise<void> {
       onExport: (a) => void exportMf4Csv(info.id, a),
       onClose: () => closeMf4(),
     });
-    mf4View.setStatus(`已打开 ${basenameOf(picked)}`);
+    const loaded = channels.items.length;
+    mf4View.setStatus(
+      channels.total > loaded
+        ? `共 ${channels.total} 个通道，仅加载前 ${loaded}，请用搜索缩小范围`
+        : `已打开 ${basenameOf(picked)}`,
+    );
   } catch (err) {
+    // A failed follow-up call must not burn one of the four session slots.
+    if (opened !== null) void mf4Close(opened).catch(() => {});
     reportError(err);
+  } finally {
+    mf4Opening = false;
   }
 }
 
