@@ -2,6 +2,12 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-26 — docs：定位改通用文件编辑查看器，功能清单拆到 features.md
+
+**Files:** Modify `docs/claude.md`；Create `docs/features.md`。
+**Why:** 产品定位从“工业调试专用轻量编辑器”改为“通用文件编辑查看器”，新增 PDF/PPT/docx/xlsx 等常见文档格式查看与导出的规划条目；`claude.md` 原规划功能清单（30 余行）整体迁到 `docs/features.md`（按已交付/待做分节，`↳` 交付细节原样保留），`claude.md` 只留指针，正文收敛为定位/痛点/技术栈/同类差异/Git 约定。
+**验证:** 通读两文件确认清单内容无删改、`[features.md](features.md)` 相对链接指向存在文件；纯文档改动，未动代码，不涉及测试。
+
 ## 2026-10-26 — Plan 14 Roadmap MF4 波形（增量2，feat/roadmap-mf4-chart）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-chart-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-chart.md`。
