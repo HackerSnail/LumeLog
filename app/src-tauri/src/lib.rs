@@ -37,6 +37,7 @@ pub fn run() {
             commands::mf4_close,
             commands::mf4_channels,
             commands::mf4_records,
+            commands::mf4_series,
             commands::mf4_summary,
             commands::mf4_export_csv,
             commands::mf4_export_cancel,

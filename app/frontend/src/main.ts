@@ -56,6 +56,7 @@ import {
   mf4Records,
   mf4ExportCsv,
   mf4ExportCancel,
+  mf4Series,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -571,6 +572,7 @@ let mf4Path = "";
 let mf4Token = 0;
 let mf4Opening = false;
 let mf4ExportReq: number | null = null;
+let mf4SeriesToken = 0;
 
 function buildMf4Dock(): HTMLElement {
   if (mf4DockEl) return mf4DockEl;
@@ -609,7 +611,9 @@ async function openMf4File(): Promise<void> {
       info,
       summary,
       channels: channels.items,
+      hasTimeAxis: channels.items.some((c) => c.master),
       onQuery: (q) => void runMf4Query(q),
+      onSeriesQuery: (q) => void runMf4Series(info.id, q),
       onExport: (a) => void exportMf4Csv(info.id, a),
       onCancelExport: () => {
         if (mf4ExportReq !== null) {
@@ -654,6 +658,34 @@ async function runMf4Query(q: Mf4Query): Promise<void> {
   }
 }
 
+/** Fetch the waveform envelope; a newer query invalidates an in-flight one. */
+async function runMf4Series(
+  id: number,
+  q: { channels: number[]; fromSec: number | null; toSec: number | null; buckets: number },
+): Promise<void> {
+  if (!mf4View) return;
+  const token = ++mf4SeriesToken;
+  mf4View.setBusy(true);
+  try {
+    const data = await mf4Series({
+      id,
+      channels: q.channels,
+      fromSec: q.fromSec,
+      toSec: q.toSec,
+      buckets: q.buckets,
+    });
+    if (token !== mf4SeriesToken) return;
+    mf4View.setSeries(data);
+    mf4View.setStatus(data.hasTimeAxis ? "" : "该文件无时间轴，无法绘制波形");
+  } catch (err) {
+    if (token !== mf4SeriesToken) return;
+    reportError(err);
+    mf4View.setStatus("波形读取失败");
+  } finally {
+    if (token === mf4SeriesToken) mf4View?.setBusy(false);
+  }
+}
+
 async function exportMf4Csv(
   id: number,
   a: { channels: number[]; fromSec: number | null; toSec: number | null },
@@ -694,6 +726,8 @@ async function exportMf4Csv(
 
 function closeMf4(): void {
   mf4Token++;
+  mf4SeriesToken++;
+  mf4View?.destroy();
   if (mf4ExportReq !== null) {
     void mf4ExportCancel(mf4ExportReq).catch(() => {});
     mf4ExportReq = null;

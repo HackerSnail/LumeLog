@@ -2,6 +2,36 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-26 — Plan 14 Roadmap MF4 波形（增量2，feat/roadmap-mf4-chart）
+
+**依据：** spec `docs/specs/2026-10-26-roadmap-mf4-chart-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-chart.md`。
+
+### Task 1+2. `mf4_series` 桶化 + 命令 + IPC
+**Files:** Modify `app/src-tauri/src/mf4.rs`（`MAX_SERIES=8`/`MAX_BUCKETS=4000`；`Mf4SeriesJson{has_time_axis,from_sec,to_sec,bucket_sec,times,series}`、`Mf4SeriesEntryJson{index,name,unit,degraded,min,max,first,last}`（均 `Vec<Option<f64>>`）；`series()`：同 `records` 规则（同数据组 + `is_time_channel()`），文本/未知类型→`invalid_argument`；窗口未给时用主通道首末样本解析；`aligned_signal_chunks(&[master]+channels, 65536)` 逐块取同下标值，桶号 `((t-from)/bucket_sec).floor().clamp(0,n-1)`，逐桶累积 min/max/first/last，空桶 `None`；全 `null` + `has_time_axis=false` 的无时间轴路径）；`commands.rs`/`lib.rs`（`mf4_series` 命令，`buckets` 缺省 2000）；`ipc.ts`/`ipc.test.ts`（`Mf4Series/Mf4SeriesEntry` + `mf4Series`，typeof 8）。
+**Why:** 波形必须保尖峰且不让整信号进前端；`aligned_signal_chunks` 提供同下标对齐，比逐通道重扫稳定；假定“同组等采样”已在注释写入（混采样留后续 `Raster`）。
+**验证:** `cargo test -p lumelog-app mf4::` 12 pass（新增桶数/包络/first-last/空桶/尖峰 999 保留/跨组与文本拒绝）；`cargo test --workspace` app 117 / core 89 / can 23；`clippy --workspace --all-targets -- -D warnings` 净；`npm test` 103 + `run build` 通过。
+
+### Task 3. 波形数学（`mf4-chart.ts` 纯函数）
+**Files:** Create `app/frontend/src/mf4-chart.ts`（`clampWindow`（全范围/最小窗宽 `fullSpan/1e6` 或 `1e-6`）、`zoomAt`（锚点时间不变）、`panBy`（两端夹紧）、`bucketIndex`（`t==end` 归末桶、零宽窗口归 0）、`nearestBucket`（跳空桶，全空返回 -1）、`xOf`、`yOf`（归一化；min==max 落中线、NaN→NaN））、`mf4-chart.test.ts`（6）。
+**Why:** 交互手感靠窗口数学，先以纯函数钉住（jsdom 无真像素，像素级留给手工验）。
+**验证:** `npm test` 109 pass（17 文件）+ `run build` 通过。
+
+### Task 4. `Mf4Chart`（双层 canvas + 交互）
+**Files:** Modify `app/frontend/src/mf4-chart.ts`（`Mf4Chart`：base + overlay 两张 canvas、tooltip `div`；`ResizeObserver` + DPR（`setTransform` 只设一次）、`requestAnimationFrame` 合并重绘；底图网格/时间刻度/每序列 min–max 竖线 + 桶间细连线（10 色、归一化）；工具条层级：`setData/setWindow/setBusy/onWindowChange/destroy`；wheel（`passive:false`、1.25^…、光标为锚点）、pointer 拖拽（`setPointerCapture`）、dblclick 复位、hover 十字线 + tooltip（`nearestBucket` 的首值）；`getContext` 为空时安全降级（不抛错、只回调））、`styles.css`（`.mf4-chart*`：相对布局、叠层 canvas、tooltip；`mf4-chart.dom.test.ts`（3：双层与尺寸、60ms 节流只触发一次 + dblclick 复位、destroy 后不再响应）。
+**Why:** hover 高频重绘只碰 overlay；DPR 只 `setTransform` 一次避免累积缩放；jsdom 无 canvas 实现时保证交互测试仍可跑。
+**验证:** `npm test` 112 pass（18 文件）+ `run build` 通过。
+
+### Task 5. dock tab + `main.ts` 注入
+**Files:** Modify `mf4-ui.ts`（「表格 / 波形」tab；`hasTimeAxis===false` 时波形 disabled；波形模式只允许数值通道且上限 8，切回表格恢复 32；`setSeries()` 记住全范围并重置窗口；图表窗口文案 + 「应用到表格」（写入起/止并重查）+ 「复位」；`emitSeries()` 在无窗口时发 `null` 窗口让后端自行解析全范围；`destroy()` 释放图表监听）、`mf4-ui.test.ts`（+2：切 tab 发 `onSeriesQuery`/文本通道禁用/应用到表格后 `onQuery` 窗口一致；无时间轴 tab disabled）、`main.ts`（`mf4Series` 注入 + `mf4SeriesToken` 丢弃旧响应 + `closeMf4` 递增 token 并 `destroy()`）、`ipc.ts`（`onSeriesQuery` 允许 `null` 窗口）。
+**Why:** 波形窗口独立（缩放不惊动分页），仅在「应用到表格」时同步；首帧无窗口时由后端解析全范围，避免前端猜 0/0。
+**验证:** `npm test` 114 pass（18 文件）+ `run build` 通过（49 modules）。
+
+### 终审修复波（0 Critical / 5 Important / 5 Minor）
+**Files:** `mf4-chart.ts`（**I1** `setData` 不再重定义 `full`/重置窗口：首帧才定全范围，「响应只换数据」——修正首次缩放后无法再缩小/平移/双击复位；`setFullRange` 独立；底图按 `data.from/from.to` 裁剪并把 `min/max` 均缺的桶断线（不再画成`lo/hi` 满幅假尖峰）；**I3** 滚轮方向改为“向上=放大”（`1.25^(deltaY/100)`）；**I2 配套** 新增 `pointercancel`/`lostpointercapture` 复位拖拽）；`mf4-ui.ts`（**I2** 切波形时把文本/未知/时间主通道从选择中剔掉并重新渲染，`emitSeries` 再次过滤防混选；状态行在波形模式显示 `已选 N/8`；tab 移到工具栏上方，两种模式不跳动）；`mf4.rs`（**I4** 仅在 `from/to` 缺一才扫主通道首末；**I5** 主通道与选择锁定到同一 `channel_group_index`（对齐假定与注释一致）；**I6** 窗口倒置/空 → 返回空桶而非虚构 span）；`styles.css`（`#mf4-dock{overflow:hidden}`、`.mf4-chart(-host){min-height:0}`）。新增前端测 2（缩放响应不改变全范围 + dblclick 仍回全范围；表格选文本通道→切波形自动剔除），Rust 12 测不回归。
+**Why:** I1 是导航性失效（只能单向放大）；缺值桶会被画成满幅假噪声；混选文本会令整次波形请求 `invalid_argument`。
+**Parked:** 图例/点击隐藏序列、波形页的 `⚠` 与“无样本”文案、tooltip 用桶首值而标题是光标时刻（最多差一桶）、`buckets` 固定 2000 而非按像素宽、resize 后不重采样。
+**验证:** `cargo test -p lumelog-app mf4::` 12 pass + `clippy --workspace --all-targets -- -D warnings` 净；`npm test` 115 pass（18 文件）+ `run build` 通过。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。

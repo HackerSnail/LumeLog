@@ -100,6 +100,82 @@ describe("Mf4View", () => {
     host.remove();
   });
 
+  it("charts share the selection and apply their window to the table", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const queries: Mf4Query[] = [];
+    const series: { channels: number[]; fromSec: number | null; toSec: number | null; buckets: number }[] = [];
+    const view = new Mf4View(host, {
+      info: { version: "4.10", channelCount: 4, dataGroups: 1, comment: "" },
+      summary: null,
+      channels: [...channels, { index: 3, name: "Note", unit: "", kind: "text", master: false, group: 0 }],
+      hasTimeAxis: true,
+      onQuery: (q) => queries.push(q),
+      onSeriesQuery: (q) => series.push(q),
+      onExport: () => {},
+      onClose: () => {},
+    });
+    host.querySelectorAll<HTMLInputElement>(".mf4-channel input")[0].click();
+    // Selecting a text column is allowed in table mode …
+    host.querySelectorAll<HTMLInputElement>(".mf4-channel input")[3].click();
+    expect(queries.length).toBe(2);
+
+    const tabs = host.querySelectorAll<HTMLButtonElement>(".mf4-tab");
+    tabs[1].click();
+    expect(series.length).toBe(1);
+    // … but the chart must drop it instead of failing the whole request.
+    expect(series[0].channels).toEqual([1]);
+    expect(series[0].fromSec).toBeNull();
+    expect(series[0].toSec).toBeNull(); // null window = resolve full extent
+
+    view.setSeries({
+      hasTimeAxis: true,
+      fromSec: 0,
+      toSec: 10,
+      bucketSec: 1,
+      times: [0.5, 1.5],
+      series: [
+        {
+          index: 1,
+          name: "Speed",
+          unit: "",
+          degraded: false,
+          min: [1, 2],
+          max: [1, 2],
+          first: [1, 2],
+          last: [1, 2],
+        },
+      ],
+    });
+    expect(host.querySelector(".mf4-chart-base")).toBeTruthy();
+    // Text channels cannot be plotted.
+    const boxesAfter = host.querySelectorAll<HTMLInputElement>(".mf4-channel input");
+    expect(boxesAfter[3].disabled).toBe(true);
+
+    host.querySelector<HTMLButtonElement>(".mf4-apply-window")!.click();
+    const last = queries[queries.length - 1];
+    expect(last.fromSec).toBe(0);
+    expect(last.toSec).toBe(10);
+    host.remove();
+  });
+
+  it("disables the waveform tab without a time axis", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    new Mf4View(host, {
+      info: { version: "4.10", channelCount: 3, dataGroups: 1, comment: "" },
+      summary: null,
+      channels,
+      hasTimeAxis: false,
+      onQuery: () => {},
+      onSeriesQuery: () => {},
+      onExport: () => {},
+      onClose: () => {},
+    });
+    expect(host.querySelectorAll<HTMLButtonElement>(".mf4-tab")[1].disabled).toBe(true);
+    host.remove();
+  });
+
   it("does not query while busy and arms export cancellation", () => {
     const host = document.createElement("div");
     document.body.append(host);

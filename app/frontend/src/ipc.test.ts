@@ -43,6 +43,7 @@ import {
   mf4Records,
   mf4ExportCsv,
   mf4ExportCancel,
+  mf4Series,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -199,6 +200,7 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
       mf4Records,
       mf4ExportCsv,
       mf4ExportCancel,
+      mf4Series,
     ]) {
       expect(typeof fn).toBe("function");
     }
