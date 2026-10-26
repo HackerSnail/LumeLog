@@ -22,6 +22,11 @@
 **偏差（记录）:** `falcon_mdf` 的 `Event`/`Attachment` 字段未深入封装，summary 先只给 events/attachments 的数量，事件明细留后续；列排序仅 timeAsc/timeDesc（列序在 UI 本页内做）。
 **验证:** `cargo test -p lumelog-app mf4::` 8 pass（+3）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
 
+### Task 4. 前端 IPC（MF4）
+**Files:** Modify `app/frontend/src/ipc.ts`（`Mf4Kind/Mf4Info/Mf4Channel/Mf4ChannelsPage/Mf4Cell/Mf4Column/Mf4Rows/Mf4Summary/Mf4ExportStats` + `mf4Open/Close/Channels/Summary/Records/ExportCsv/ExportCancel`）；`ipc.test.ts`（+1 typeof 7）。
+**Why:** 单元格改为 `#[serde(untagged)]`（`number|string|boolean|null`），前端零解包；Rust `Mf4CellJson` 同步改为 untagged（原 camelCase 会变 `{number:10}`，已在 T4 一并修正）。
+**验证:** `npm test` 95 pass（ipc 17→18）+ `run build` tsc 通过。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

@@ -153,7 +153,7 @@ fn unknown_session(id: u64) -> IpcError {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum Mf4CellJson {
     Number(f64),
     Text(String),

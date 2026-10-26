@@ -36,6 +36,13 @@ import {
   scriptDelete,
   scriptRun,
   scriptCancel,
+  mf4Open,
+  mf4Close,
+  mf4Channels,
+  mf4Summary,
+  mf4Records,
+  mf4ExportCsv,
+  mf4ExportCancel,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -178,6 +185,20 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
       scriptDelete,
       scriptRun,
       scriptCancel,
+    ]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("mf4_wrappers_are_functions", () => {
+    for (const fn of [
+      mf4Open,
+      mf4Close,
+      mf4Channels,
+      mf4Summary,
+      mf4Records,
+      mf4ExportCsv,
+      mf4ExportCancel,
     ]) {
       expect(typeof fn).toBe("function");
     }
