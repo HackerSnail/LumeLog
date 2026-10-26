@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use falcon_mdf::{Channel, Mf4File};
+use falcon_mdf::{Channel, Mf4File, SignalValues};
 use serde::Serialize;
 
 use crate::dto::IpcError;
@@ -19,10 +19,8 @@ use crate::dto::IpcError;
 /// How many measurement files may stay open at once (mmap handles + index).
 pub(crate) const MAX_SESSIONS: usize = 4;
 /// Column cap for one table page / export run.
-#[allow(dead_code)] // consumed by `records`/export (Task 2/3)
 pub(crate) const MAX_COLUMNS: usize = 32;
 /// Hard cap on rows returned by one `records` call.
-#[allow(dead_code)] // consumed by `records` (Task 2)
 pub(crate) const MAX_LIMIT: u32 = 1000;
 /// Page size ceiling for the channel list.
 const MAX_CHANNEL_PAGE: u32 = 2000;
@@ -68,10 +66,8 @@ pub struct Mf4InfoJson {
 }
 
 pub(crate) struct Mf4Session {
-    /// Read by the windowed record/export paths (Task 2/3).
-    #[allow(dead_code)]
     pub file: Arc<Mutex<Mf4File>>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // the export path reports it (Task 3)
     pub path: PathBuf,
     /// Channel metadata in file order, paired with the handle used to read it.
     pub channels: Vec<(Mf4ChannelJson, Channel)>,
@@ -153,6 +149,248 @@ fn classify(err: falcon_mdf::Mf4Error) -> IpcError {
 
 fn unknown_session(id: u64) -> IpcError {
     IpcError::new("unknown_mf4", format!("没有 id 为 {id} 的测量会话"))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Mf4CellJson {
+    Number(f64),
+    Text(String),
+    Bool(bool),
+    Null,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4ColumnJson {
+    pub index: u32,
+    pub name: String,
+    pub unit: String,
+    pub values: Vec<Mf4CellJson>,
+    /// The channel exists but could not be read as cells (odd type / failure).
+    pub degraded: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4RecordsJson {
+    /// Milliseconds since measurement start, `None` when the file has no time axis.
+    pub time_ms: Vec<Option<f64>>,
+    pub columns: Vec<Mf4ColumnJson>,
+    pub total_rows: u64,
+    pub has_time_axis: bool,
+}
+
+/// Sample values of one channel, collected window-first.
+///
+/// Streams the signal in `signal_chunks` windows and keeps only the samples named
+/// by `rows` (absolute, ascending), so memory stays bounded by the page instead of
+/// the signal length. Text/bytes channels land in `Text`, everything numeric in
+/// `Number`; a sample the file marks invalid (or a chunk that fails) becomes
+/// `Null`, and a channel that cannot be read at all sets `degraded`.
+fn cells_for_rows(file: &Mf4File, ch: &Channel, rows: &[usize]) -> (Vec<Mf4CellJson>, bool) {
+    let wanted: usize = rows.len();
+    let mut out = vec![Mf4CellJson::Null; wanted];
+    let mut cursor = 0usize; // index into `rows`
+    let mut base: usize = 0; // absolute sample index of the current chunk
+    let chunks = match file.signal_chunks(ch) {
+        Ok(c) => c,
+        Err(_) => return (out, true),
+    };
+    // MDF stores booleans as integers; report them as `Bool` so the UI can render
+    // a tick instead of 0/1.
+    let as_bool = kind_of(ch) == Mf4Kind::Bool;
+    for chunk in chunks {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(_) => return (out, true),
+        };
+        let len = chunk.len();
+        let vals = match chunk.values() {
+            Ok(v) => v,
+            Err(_) => return (out, true),
+        };
+        while cursor < wanted && rows[cursor] < base + len {
+            let local = rows[cursor] - base;
+            out[cursor] = {
+                let cell = cell_of(&vals, local, chunk.is_valid(local));
+                match (as_bool, cell) {
+                    (true, Mf4CellJson::Number(v)) => Mf4CellJson::Bool(v != 0.0),
+                    (_, other) => other,
+                }
+            };
+            cursor += 1;
+        }
+        base += len;
+        if cursor >= wanted {
+            break;
+        }
+    }
+    (out, false)
+}
+
+fn cell_of(values: &SignalValues, local: usize, valid: bool) -> Mf4CellJson {
+    if !valid {
+        return Mf4CellJson::Null;
+    }
+    macro_rules! num {
+        ($v:expr, $i:expr) => {
+            $v.get($i)
+                .map(|x| Mf4CellJson::Number(*x as f64))
+                .unwrap_or(Mf4CellJson::Null)
+        };
+    }
+    match values {
+        SignalValues::U8(v) => num!(v, local),
+        SignalValues::U16(v) => num!(v, local),
+        SignalValues::U32(v) => num!(v, local),
+        SignalValues::U64(v) => num!(v, local),
+        SignalValues::I8(v) => num!(v, local),
+        SignalValues::I16(v) => num!(v, local),
+        SignalValues::I32(v) => num!(v, local),
+        SignalValues::I64(v) => num!(v, local),
+        SignalValues::F32(v) => num!(v, local),
+        SignalValues::F64(v) => num!(v, local),
+        SignalValues::Str(v) => v
+            .get(local)
+            .cloned()
+            .map(Mf4CellJson::Text)
+            .unwrap_or(Mf4CellJson::Null),
+        // Anything else (bool, byte arrays, ratios, …) has no cell kind yet.
+        _ => Mf4CellJson::Null,
+    }
+}
+
+/// Absolute sample rows inside `[from,to]` seconds, ordered by time and paged.
+/// Also returns the millisecond axis and the total in-window sample count (so the
+/// UI can page accurately); `axis` is empty when the file has no time channel.
+fn select_rows(
+    file: &Mf4File,
+    master: Option<&Channel>,
+    from: Option<f64>,
+    to: Option<f64>,
+    desc: bool,
+    limit: usize,
+    offset: usize,
+) -> Result<(Vec<usize>, Vec<f64>, u64, bool), IpcError> {
+    // (sample index, time in ms) for every in-window sample, file order.
+    let mut pairs: Vec<(usize, f64)> = Vec::new();
+    let has_time_axis = master.is_some();
+    if let Some(m) = master {
+        let mut base: usize = 0;
+        for chunk in file.signal_chunks(m).map_err(classify)? {
+            let chunk = chunk.map_err(classify)?;
+            let len = chunk.len();
+            for (i, t) in chunk.values_f64().map_err(classify)?.iter().enumerate() {
+                let in_window = from.is_none_or(|f| *t >= f) && to.is_none_or(|v| *t <= v);
+                if in_window {
+                    pairs.push((base + i, t * 1000.0));
+                }
+            }
+            base += len;
+        }
+    } else {
+        // No time axis at all: pages are plain sample indices of the first group.
+        let Some(first) = file.channels().next() else {
+            return Ok((Vec::new(), Vec::new(), 0, false));
+        };
+        let len = file.signal(first).map_err(classify)?.len();
+        pairs.extend((0..len).map(|i| (i, 0.0)));
+    }
+    let total_rows = pairs.len() as u64;
+    if desc {
+        pairs.reverse();
+    }
+    let page: Vec<(usize, f64)> = pairs.into_iter().skip(offset).take(limit).collect();
+    Ok((
+        page.iter().map(|p| p.0).collect(),
+        page.iter().map(|p| p.1).collect(),
+        total_rows,
+        has_time_axis,
+    ))
+}
+
+/// One page of the record table for the selected channels.
+#[allow(clippy::too_many_arguments)] // window + paging + selection in one call
+pub(crate) fn records(
+    sessions: &Mf4Sessions,
+    id: u64,
+    channels: &[u32],
+    from_sec: Option<f64>,
+    to_sec: Option<f64>,
+    sort: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Mf4RecordsJson, IpcError> {
+    if channels.is_empty() {
+        return Err(IpcError::new("invalid_argument", "请先勾选至少一个通道"));
+    }
+    if channels.len() > MAX_COLUMNS {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!("一次最多选择 {MAX_COLUMNS} 个通道"),
+        ));
+    }
+    if limit == 0 || limit > MAX_LIMIT {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!("每页行数需在 1–{MAX_LIMIT}"),
+        ));
+    }
+    if let (Some(f), Some(t)) = (from_sec, to_sec) {
+        if f > t {
+            return Err(IpcError::new(
+                "invalid_argument",
+                "时间窗起点不能晚于止点",
+            ));
+        }
+    }
+    let desc = match sort {
+        "timeDesc" => true,
+        "timeAsc" | "" => false,
+        other => {
+            return Err(IpcError::new(
+                "invalid_argument",
+                format!("未知排序方式 {other}"),
+            ))
+        }
+    };
+    let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+    let guard = session.lock().unwrap_or_else(|p| p.into_inner());
+    let mut picked: Vec<(Mf4ChannelJson, Channel)> = Vec::with_capacity(channels.len());
+    for want in channels {
+        let found = guard
+            .channels
+            .iter()
+            .find(|(m, _)| m.index == *want)
+            .ok_or_else(|| IpcError::new("invalid_argument", format!("未知通道 {want}")))?;
+        picked.push(found.clone());
+    }
+    let file = guard.file.lock().unwrap_or_else(|p| p.into_inner());
+    let master = guard.channels.iter().find(|(_, c)| c.is_master()).map(|(_, c)| c);
+    let (rows, time_ms, total_rows, has_time_axis) =
+        select_rows(&file, master, from_sec, to_sec, desc, limit as usize, offset as usize)?;
+    let mut columns = Vec::with_capacity(picked.len());
+    for (meta, ch) in &picked {
+        let (values, degraded) = cells_for_rows(&file, ch, &rows);
+        columns.push(Mf4ColumnJson {
+            index: meta.index,
+            name: meta.name.clone(),
+            unit: meta.unit.clone(),
+            values,
+            degraded,
+        });
+    }
+    Ok(Mf4RecordsJson {
+        time_ms: if has_time_axis {
+            time_ms.into_iter().map(Some).collect()
+        } else {
+            vec![None; rows.len()]
+        },
+        columns,
+        total_rows,
+        has_time_axis,
+    })
 }
 
 pub(crate) fn open_session(sessions: &Mf4Sessions, path: &Path) -> Result<Mf4InfoJson, IpcError> {
@@ -247,11 +485,88 @@ mod tests {
             let g = w.add_group(&[0.0, 1.0, 2.0, 3.0]).unwrap();
             g.add_channel("Speed", "km/h", &[10.0, 20.0, 30.0, 40.0])
                 .unwrap();
-            g.add_channel("EngineTemp", "degC", &[1.5, 2.0, 2.5, 3.0])
-                .unwrap();
+            // Sample 1 is flagged invalid so `records` can prove null mapping.
+            g.add_channel_with_validity(
+                "EngineTemp",
+                "degC",
+                &[1.5, 2.0, 2.5, 3.0],
+                Some(&[true, false, true, true]),
+            )
+            .unwrap();
         }
         w.write_to_file(&path).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn records_window_sort_and_paginate() {
+        let (dir, path) = fixture("records");
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let speed = channel_id(&sessions, info.id, "Speed");
+        let temp = channel_id(&sessions, info.id, "EngineTemp");
+
+        let all = records(&sessions, info.id, &[speed, temp], None, None, "timeAsc", 10, 0).unwrap();
+        assert_eq!(all.total_rows, 4);
+        assert!(all.has_time_axis);
+        assert_eq!(all.time_ms, vec![Some(0.0), Some(1000.0), Some(2000.0), Some(3000.0)]);
+        assert_eq!(all.columns.len(), 2);
+        assert_eq!(cell_num(&all.columns[0].values[3]), 40.0);
+
+        let clipped =
+            records(&sessions, info.id, &[speed], Some(1.0), Some(2.0), "timeAsc", 10, 0).unwrap();
+        assert_eq!(clipped.total_rows, 2);
+        assert_eq!(clipped.time_ms, vec![Some(1000.0), Some(2000.0)]);
+
+        let desc = records(&sessions, info.id, &[speed], None, None, "timeDesc", 2, 0).unwrap();
+        assert_eq!(desc.time_ms, vec![Some(3000.0), Some(2000.0)]);
+        assert_eq!(cell_num(&desc.columns[0].values[0]), 40.0);
+
+        let p2 = records(&sessions, info.id, &[speed], None, None, "timeAsc", 2, 2).unwrap();
+        assert_eq!(p2.total_rows, 4, "total is the whole window, not the page");
+        assert_eq!(cell_num(&p2.columns[0].values[0]), 30.0);
+
+        // Column order follows the requested selection, not the file order.
+        let flipped =
+            records(&sessions, info.id, &[temp, speed], None, None, "timeAsc", 1, 0).unwrap();
+        assert_eq!(flipped.columns[0].name, "EngineTemp");
+        assert_eq!(flipped.columns[1].name, "Speed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn records_marks_invalid_samples_and_rejects_bad_requests() {
+        let (dir, path) = fixture("invalid");
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let temp = channel_id(&sessions, info.id, "EngineTemp");
+        let rows = records(&sessions, info.id, &[temp], None, None, "timeAsc", 10, 0).unwrap();
+        assert!(matches!(rows.columns[0].values[1], Mf4CellJson::Null), "marked invalid");
+        assert!(matches!(rows.columns[0].values[0], Mf4CellJson::Number(_)));
+
+        assert_eq!(records(&sessions, info.id, &[], None, None, "timeAsc", 10, 0).unwrap_err().code, "invalid_argument");
+        assert_eq!(
+            records(&sessions, info.id, &[temp], None, None, "timeAsc", MAX_LIMIT + 1, 0).unwrap_err().code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            records(&sessions, info.id, &[temp], Some(5.0), Some(1.0), "timeAsc", 10, 0).unwrap_err().code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            records(&sessions, info.id, &[temp], None, None, "col:3Asc", 10, 0).unwrap_err().code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            records(&sessions, info.id, &[9999], None, None, "timeAsc", 10, 0).unwrap_err().code,
+            "invalid_argument"
+        );
+        let too_many: Vec<u32> = (0..=(MAX_COLUMNS as u32)).collect();
+        assert_eq!(
+            records(&sessions, info.id, &too_many, None, None, "timeAsc", 10, 0).unwrap_err().code,
+            "invalid_argument"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -289,6 +604,22 @@ mod tests {
         assert!(paged.items.is_empty(), "offset past the end is an empty page");
         assert_eq!(paged.total, info.channel_count);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn channel_id(sessions: &Mf4Sessions, id: u64, name: &str) -> u32 {
+        list_channels(sessions, id, Some(name), 10, 0)
+            .unwrap()
+            .items
+            .first()
+            .unwrap_or_else(|| panic!("channel {name} missing"))
+            .index
+    }
+
+    fn cell_num(c: &Mf4CellJson) -> f64 {
+        match c {
+            Mf4CellJson::Number(v) => *v,
+            other => panic!("expected number cell, got {other:?}"),
+        }
     }
 
     #[test]

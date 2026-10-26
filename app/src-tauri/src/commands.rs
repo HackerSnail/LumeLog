@@ -1587,6 +1587,31 @@ pub fn mf4_channels(
     crate::mf4::list_channels(&state, id, query.as_deref(), limit.unwrap_or(500), offset.unwrap_or(0))
 }
 
+/// One page of the MF4 record table (`sort` is `timeAsc`/`timeDesc`).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // window + paging in one shot
+pub fn mf4_records(
+    state: tauri::State<'_, Mf4Sessions>,
+    id: u64,
+    channels: Vec<u32>,
+    from_sec: Option<f64>,
+    to_sec: Option<f64>,
+    sort: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<crate::mf4::Mf4RecordsJson, IpcError> {
+    crate::mf4::records(
+        &state,
+        id,
+        &channels,
+        from_sec,
+        to_sec,
+        sort.as_deref().unwrap_or("timeAsc"),
+        limit.unwrap_or(500),
+        offset.unwrap_or(0),
+    )
+}
+
 // ---- scripts (Roadmap-3) ---------------------------------------------------
 
 /// True when both paths point at the same file (canonicalize when possible).

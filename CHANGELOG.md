@@ -11,6 +11,11 @@
 **Why:** MF4 不能走文本/行索引链路 → 独立会话 + dock；`falcon_mdf` 类型只出现在 `mf4.rs`（可换库）；只开 `mmap` 避免 rayon/arrow 依赖面；打开失败一律归为结构错误（非真 I/O），避免把“不是 MF4”误报为 io。
 **验证:** `cargo test -p lumelog-app mf4::` 3 pass（夹具用 `Mf4Writer` 现写 MF4：计数/主通道/名称、大小写不敏感搜索+分页+越界空页、非 MF4 → `mf4_not_mf4`、会话上限 4 → `invalid_argument`、close 幂等、未知会话 `unknown_mf4`）；`cargo test --workspace`（app 108 / core 89 / can 23）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 2. `mf4_records`（时间窗 + 分页 + 单元格映射）
+**Files:** Modify `app/src-tauri/src/mf4.rs`（`select_rows` 流式主通道得 `(样行, 毫秒)` 对并计数 total（降序就地反转，再 skip/take）；`cells_for_rows` 逐块只取本页行下标（内存与页大小成正比）；`cell_of` 映射数值/文本变体，失效样本与读失败→`Null`，整列不可读→`degraded`；MDF 把 bool 存成整数，按 `kind_of` 回报 `Bool`；`records` 校验选择非空/≤32 列/limit≤1000/from≤to/排序仅 timeAsc|timeDesc）；`commands.rs` + `lib.rs`（`mf4_records` 命令与注册）；`path` 字段保留 `#[allow(dead_code)]`（T3 导出使用）。
+**Why:** spec §3/§5：不能把整信号物化到内存才能撑住大文件；`total_rows` 需要全窗口计数，因此只对时间轴做一遗扫描（页数据按块取）；排序语义固定为时间跳页、列仅本页（列排序需物化，本增量不做）。
+**验证:** `cargo test -p lumelog-app mf4::` 5 pass（新增窗口裁剪/分页与 total/timeDesc 反向/列顺序按选择/失效样本 Null/六类参数拒绝）；`cargo test --workspace` app 110 全绿；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

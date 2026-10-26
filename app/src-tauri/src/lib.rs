@@ -36,6 +36,7 @@ pub fn run() {
             commands::mf4_open,
             commands::mf4_close,
             commands::mf4_channels,
+            commands::mf4_records,
             commands::script_list,
             commands::script_read,
             commands::script_write,
