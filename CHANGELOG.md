@@ -27,6 +27,12 @@
 **Why:** 单元格改为 `#[serde(untagged)]`（`number|string|boolean|null`），前端零解包；Rust `Mf4CellJson` 同步改为 untagged（原 camelCase 会变 `{number:10}`，已在 T4 一并修正）。
 **验证:** `npm test` 95 pass（ipc 17→18）+ `run build` tsc 通过。
 
+### Task 5+6. MF4 dock（表格 + 通道面板 + 分页/时间窗/导出）+ main 接线
+**Files:** Create `app/frontend/src/mf4-table.ts`（`cellText`：null→`—`/bool→`✓`/浮点修剪；表头带单位，`degraded` 加 `⚠`+tooltip；**列排序仅本页**、点击切换升降；页内直接渲染，不分页内部虚拟化）、`mf4-ui.ts`（`Mf4View`：通道搜索 150ms 防抖、复选上限 32、时间窗校验（起>止拒）、排序/每页 100/500/1000、上一页/下一页按 `totalRows` 禁启、导出入参仅选列+窗口、回调注入）、`mf4-table.test.ts`（3）、`mf4-ui.test.ts`（4）；Modify `styles.css`（`.mf4-*`）、`main.ts`（工具栏“测量”、面板“测量数据…”、`#mf4-dock`、`mf4Open/mf4Channels/mf4Summary` 并行、`runMf4Query` 带 token 丢弃旧响应、导出走 `save()`+`mf4ExportCsv` 进度/完成、关闭释放会话、与 CAN dock 双向互斥）。
+**Why:** 一页 ≤1000 行，直接渲染比自写虚拟化更可验证（jsdom 与真实行为一致）；列排序只在本页内（后端只做时间序跳页）避免物化整窗。
+**偏差/Parked:** dock 未内置“取消导出”按钮（`mf4_export_cancel` 已有，UI 仅可在完成后解除）；列选择上限/分页默认值与 spec 一致；会话多开（>1）UI 仅保留最后一个（后端支持 ≤4，UI 先简化为单会话）。
+**验证:** `npm test` 102 pass（16 文件）+ `run build` tsc 通过（48 modules）。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

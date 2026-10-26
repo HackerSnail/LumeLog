@@ -534,6 +534,104 @@ html.has-custom-titlebar .win-btns {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* MF4 measurement dock (Roadmap-4) */
+.mf4-view {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  height: 100%;
+  min-height: 0;
+}
+.mf4-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.mf4-title {
+  font-weight: 600;
+}
+.mf4-close {
+  padding: 2px 8px;
+}
+.mf4-meta,
+.mf4-page,
+.mf4-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+.mf4-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+}
+.mf4-search {
+  width: 160px;
+}
+.mf4-time-input {
+  width: 64px;
+}
+.mf4-body {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+.mf4-channels {
+  overflow: auto;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 4px;
+  padding: 4px;
+}
+.mf4-channel {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mf4-channel-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mf4-table {
+  overflow: auto;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 4px;
+}
+.mf4-table-el {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+.mf4-table-el th,
+.mf4-table-el td {
+  border-bottom: 1px solid var(--border, #eee);
+  padding: 2px 6px;
+  text-align: left;
+  white-space: nowrap;
+}
+.mf4-table-el thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel, #fafafa);
+  cursor: pointer;
+}
+.mf4-time,
+.mf4-null,
+.mf4-empty {
+  color: var(--muted);
+}
+.mf4-empty {
+  padding: 8px;
+  font-size: 12px;
+}
 .script-editor {
   flex: 1 1 auto;
   min-height: 180px;
