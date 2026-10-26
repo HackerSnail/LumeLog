@@ -22,6 +22,10 @@ use crate::dto::IpcError;
 pub(crate) const MAX_SESSIONS: usize = 4;
 /// Column cap for one table page / export run.
 pub(crate) const MAX_COLUMNS: usize = 32;
+/// Series cap for one waveform request.
+pub(crate) const MAX_SERIES: usize = 8;
+/// Bucket cap per series (2 per CSS pixel at 2000 px is the practical ceiling).
+pub(crate) const MAX_BUCKETS: u32 = 4000;
 /// Hard cap on rows returned by one `records` call.
 pub(crate) const MAX_LIMIT: u32 = 1000;
 /// Page size ceiling for the channel list.
@@ -352,6 +356,202 @@ fn select_rows(
 
 fn in_window(t: f64, from: Option<f64>, to: Option<f64>) -> bool {
     from.is_none_or(|f| t >= f) && to.is_none_or(|v| t <= v)
+}
+
+/// One downsampled series: per-bucket envelope plus first/last for hover.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4SeriesEntryJson {
+    pub index: u32,
+    pub name: String,
+    pub unit: String,
+    pub degraded: bool,
+    pub min: Vec<Option<f64>>,
+    pub max: Vec<Option<f64>>,
+    pub first: Vec<Option<f64>>,
+    pub last: Vec<Option<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4SeriesJson {
+    pub has_time_axis: bool,
+    /// The window actually used (inputs `None` resolve to the time axis extent).
+    pub from_sec: f64,
+    pub to_sec: f64,
+    pub bucket_sec: f64,
+    /// Bucket midpoint in seconds; `None` when the bucket saw no sample.
+    pub times: Vec<Option<f64>>,
+    pub series: Vec<Mf4SeriesEntryJson>,
+}
+
+fn empty_series(meta: &Mf4ChannelJson, buckets: usize, degraded: bool) -> Mf4SeriesEntryJson {
+    Mf4SeriesEntryJson {
+        index: meta.index,
+        name: meta.name.clone(),
+        unit: meta.unit.clone(),
+        degraded,
+        min: vec![None; buckets],
+        max: vec![None; buckets],
+        first: vec![None; buckets],
+        last: vec![None; buckets],
+    }
+}
+
+/// Min/max envelope of the selected channels over `[from,to]`, bucketed server-side.
+///
+/// Uses `aligned_signal_chunks` so every series shares the master's sample index
+/// range within a chunk. Assumes the selected channels belong to one record stream
+/// (same group, equal sampling); mixed-rate channels would need `Raster` and are
+/// out of scope for this increment.
+pub(crate) fn series(
+    sessions: &Mf4Sessions,
+    id: u64,
+    channels: &[u32],
+    from_sec: Option<f64>,
+    to_sec: Option<f64>,
+    buckets: u32,
+) -> Result<Mf4SeriesJson, IpcError> {
+    if channels.is_empty() {
+        return Err(IpcError::new("invalid_argument", "请先勾选至少一个通道"));
+    }
+    if channels.len() > MAX_SERIES {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!("波形最多同时显示 {MAX_SERIES} 条序列"),
+        ));
+    }
+    if buckets == 0 || buckets > MAX_BUCKETS {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!("桶数需在 1–{MAX_BUCKETS}"),
+        ));
+    }
+    if let (Some(f), Some(t)) = (from_sec, to_sec) {
+        if f > t {
+            return Err(IpcError::new(
+                "invalid_argument",
+                "时间窗起点不能晚于止点",
+            ));
+        }
+    }
+    let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+    let guard = session.lock().unwrap_or_else(|p| p.into_inner());
+    let mut picked: Vec<(Mf4ChannelJson, Channel)> = Vec::with_capacity(channels.len());
+    for want in channels {
+        let found = guard
+            .channels
+            .iter()
+            .find(|(m, _)| m.index == *want)
+            .ok_or_else(|| IpcError::new("invalid_argument", format!("未知通道 {want}")))?;
+        if matches!(found.0.kind, Mf4Kind::Text | Mf4Kind::Unknown) {
+            return Err(IpcError::new(
+                "invalid_argument",
+                format!("通道 {} 不是数值型，无法绘制波形", found.0.name),
+            ));
+        }
+        picked.push(found.clone());
+    }
+    let data_group = picked[0].1.data_group_index;
+    if picked.iter().any(|(_, c)| c.data_group_index != data_group) {
+        return Err(IpcError::new(
+            "invalid_argument",
+            "请选择同一数据组内的通道",
+        ));
+    }
+    let file = guard.file.lock().unwrap_or_else(|p| p.into_inner());
+    let master = guard
+        .channels
+        .iter()
+        .find(|(_, c)| c.data_group_index == data_group && c.is_time_channel())
+        .map(|(_, c)| c);
+    let n = buckets as usize;
+    let Some(master) = master else {
+        return Ok(Mf4SeriesJson {
+            has_time_axis: false,
+            from_sec: 0.0,
+            to_sec: 0.0,
+            bucket_sec: 0.0,
+            times: vec![None; n],
+            series: picked
+                .iter()
+                .map(|(m, _)| empty_series(m, n, false))
+                .collect(),
+        });
+    };
+    // Resolve an open window from the master's own extent (first/last sample).
+    let (mut t_first, mut t_last) = (f64::INFINITY, f64::NEG_INFINITY);
+    for chunk in file.signal_chunks(master).map_err(classify)? {
+        let chunk = chunk.map_err(classify)?;
+        let vals = chunk.values_f64().map_err(classify)?;
+        if let Some(v) = vals.first() {
+            t_first = t_first.min(*v);
+        }
+        if let Some(v) = vals.last() {
+            t_last = t_last.max(*v);
+        }
+    }
+    let win_from = from_sec.unwrap_or(t_first);
+    let win_to = to_sec.unwrap_or(t_last);
+    let span = (win_to - win_from).max(1e-9);
+    let bucket_sec = span / buckets as f64;
+
+    let mut entries: Vec<Mf4SeriesEntryJson> =
+        picked.iter().map(|(m, _)| empty_series(m, n, false)).collect();
+    let mut times: Vec<Option<f64>> = vec![None; n];
+    let mut handles: Vec<&Channel> = Vec::with_capacity(picked.len() + 1);
+    handles.push(master);
+    handles.extend(picked.iter().map(|(_, c)| c));
+    let chunks = file.aligned_signal_chunks(&handles, 65_536).map_err(classify)?;
+    for chunk in chunks {
+        let sigs = chunk.map_err(classify)?;
+        let Some(master_sig) = sigs.first() else {
+            continue;
+        };
+        let tvals = master_sig.values_f64().map_err(classify)?;
+        let mut cols: Vec<Option<Vec<f64>>> = Vec::with_capacity(picked.len());
+        for (k, sig) in sigs.iter().skip(1).enumerate() {
+            match sig.values_f64() {
+                Ok(v) => cols.push(Some(v)),
+                Err(_) => {
+                    entries[k].degraded = true;
+                    cols.push(None);
+                }
+            }
+        }
+        for (i, t) in tvals.iter().enumerate() {
+            if !in_window(*t, from_sec, to_sec) {
+                continue;
+            }
+            let raw = ((*t - win_from) / bucket_sec).floor();
+            let b = (raw.max(0.0) as usize).min(n - 1);
+            times[b] = Some(win_from + (b as f64 + 0.5) * bucket_sec);
+            for (k, col) in cols.iter().enumerate() {
+                let Some(vals) = col else { continue };
+                let Some(v) = vals.get(i).copied() else { continue };
+                if !v.is_finite() {
+                    continue;
+                }
+                let e = &mut entries[k];
+                let cur_min = e.min[b];
+                let cur_max = e.max[b];
+                e.min[b] = Some(cur_min.map_or(v, |m| m.min(v)));
+                e.max[b] = Some(cur_max.map_or(v, |m| m.max(v)));
+                if e.first[b].is_none() {
+                    e.first[b] = Some(v);
+                }
+                e.last[b] = Some(v);
+            }
+        }
+    }
+    Ok(Mf4SeriesJson {
+        has_time_axis: true,
+        from_sec: win_from,
+        to_sec: win_to,
+        bucket_sec,
+        times,
+        series: entries,
+    })
 }
 
 /// One page of the record table for the selected channels.
@@ -970,6 +1170,67 @@ mod tests {
             cancel_target.exists(),
             "cancelled run keeps the header prefix"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn series_buckets_envelope_and_limits() {
+        let (dir, path) = fixture("series");
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let speed = channel_id(&sessions, info.id, "Speed");
+
+        let s = series(&sessions, info.id, &[speed], None, None, 2).unwrap();
+        assert!(s.has_time_axis);
+        assert_eq!((s.from_sec, s.to_sec), (0.0, 3.0));
+        assert!((s.bucket_sec - 1.5).abs() < 1e-9);
+        assert_eq!(s.times.len(), 2);
+        assert_eq!(s.series[0].min, vec![Some(10.0), Some(30.0)]);
+        assert_eq!(s.series[0].max, vec![Some(20.0), Some(40.0)]);
+        assert_eq!(s.series[0].first, vec![Some(10.0), Some(30.0)]);
+        assert_eq!(s.series[0].last, vec![Some(20.0), Some(40.0)]);
+        assert!((s.times[0].unwrap() - 0.75).abs() < 1e-9);
+
+        // A window wider than the samples leaves empty buckets as null.
+        let wide = series(&sessions, info.id, &[speed], Some(0.0), Some(100.0), 4).unwrap();
+        assert!(wide.times[0].is_some());
+        assert!(wide.times[1].is_none());
+        assert!(wide.series[0].min[3].is_none());
+
+        assert_eq!(series(&sessions, info.id, &[speed], None, None, 0).unwrap_err().code, "invalid_argument");
+        assert_eq!(series(&sessions, info.id, &[speed], None, None, MAX_BUCKETS + 1).unwrap_err().code, "invalid_argument");
+        assert_eq!(series(&sessions, info.id, &[], None, None, 100).unwrap_err().code, "invalid_argument");
+        let too_many: Vec<u32> = (0..=(MAX_SERIES as u32)).collect();
+        assert_eq!(series(&sessions, info.id, &too_many, None, None, 100).unwrap_err().code, "invalid_argument");
+        let note = channel_id(&sessions, info.id, "Note");
+        let text = series(&sessions, info.id, &[note], None, None, 100).unwrap_err();
+        assert_eq!(text.code, "invalid_argument");
+        assert!(text.message.contains("数值"), "{}", text.message);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn series_keeps_spike_and_rejects_cross_group() {
+        let dir = std::env::temp_dir().join(format!("lumelog-mf4-spike-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("spike.mf4");
+        let mut w = Mf4Writer::new();
+        {
+            let g = w.add_group(&[0.0, 1.0, 2.0, 3.0]).unwrap();
+            g.add_channel("Sig", "", &[0.0, 999.0, 1.0, 2.0]).unwrap();
+        }
+        {
+            let g = w.add_group(&[0.0, 1.0]).unwrap();
+            g.add_channel("Other", "", &[5.0, 6.0]).unwrap();
+        }
+        w.write_to_file(&path).unwrap();
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let sig = channel_id(&sessions, info.id, "Sig");
+        let other = channel_id(&sessions, info.id, "Other");
+        let s = series(&sessions, info.id, &[sig], None, None, 2).unwrap();
+        assert_eq!(s.series[0].max[0], Some(999.0), "spike survives bucketing");
+        assert_eq!(series(&sessions, info.id, &[sig, other], None, None, 10).unwrap_err().code, "invalid_argument");
         std::fs::remove_dir_all(&dir).ok();
     }
 

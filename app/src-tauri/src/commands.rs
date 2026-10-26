@@ -1699,6 +1699,27 @@ pub fn mf4_export_cancel(
     }
 }
 
+/// Downsampled min/max envelope for the waveform view.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // selection + window + bucket budget
+pub fn mf4_series(
+    state: tauri::State<'_, Mf4Sessions>,
+    id: u64,
+    channels: Vec<u32>,
+    from_sec: Option<f64>,
+    to_sec: Option<f64>,
+    buckets: Option<u32>,
+) -> Result<crate::mf4::Mf4SeriesJson, IpcError> {
+    crate::mf4::series(
+        &state,
+        id,
+        &channels,
+        from_sec,
+        to_sec,
+        buckets.unwrap_or(2000),
+    )
+}
+
 // ---- scripts (Roadmap-3) ---------------------------------------------------
 
 /// True when both paths point at the same file (canonicalize when possible).

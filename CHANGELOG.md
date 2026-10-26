@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-26 — Plan 14 Roadmap MF4 波形（增量2，feat/roadmap-mf4-chart）
+
+**依据：** spec `docs/specs/2026-10-26-roadmap-mf4-chart-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-chart.md`。
+
+### Task 1+2. `mf4_series` 桶化 + 命令 + IPC
+**Files:** Modify `app/src-tauri/src/mf4.rs`（`MAX_SERIES=8`/`MAX_BUCKETS=4000`；`Mf4SeriesJson{has_time_axis,from_sec,to_sec,bucket_sec,times,series}`、`Mf4SeriesEntryJson{index,name,unit,degraded,min,max,first,last}`（均 `Vec<Option<f64>>`）；`series()`：同 `records` 规则（同数据组 + `is_time_channel()`），文本/未知类型→`invalid_argument`；窗口未给时用主通道首末样本解析；`aligned_signal_chunks(&[master]+channels, 65536)` 逐块取同下标值，桶号 `((t-from)/bucket_sec).floor().clamp(0,n-1)`，逐桶累积 min/max/first/last，空桶 `None`；全 `null` + `has_time_axis=false` 的无时间轴路径）；`commands.rs`/`lib.rs`（`mf4_series` 命令，`buckets` 缺省 2000）；`ipc.ts`/`ipc.test.ts`（`Mf4Series/Mf4SeriesEntry` + `mf4Series`，typeof 8）。
+**Why:** 波形必须保尖峰且不让整信号进前端；`aligned_signal_chunks` 提供同下标对齐，比逐通道重扫稳定；假定“同组等采样”已在注释写入（混采样留后续 `Raster`）。
+**验证:** `cargo test -p lumelog-app mf4::` 12 pass（新增桶数/包络/first-last/空桶/尖峰 999 保留/跨组与文本拒绝）；`cargo test --workspace` app 117 / core 89 / can 23；`clippy --workspace --all-targets -- -D warnings` 净；`npm test` 103 + `run build` 通过。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。

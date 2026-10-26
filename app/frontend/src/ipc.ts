@@ -761,6 +761,28 @@ export interface Mf4ExportStats {
   errored: boolean;
 }
 
+/** One downsampled series: per-bucket envelope plus first/last for hover. */
+export interface Mf4SeriesEntry {
+  index: number;
+  name: string;
+  unit: string;
+  degraded: boolean;
+  min: (number | null)[];
+  max: (number | null)[];
+  first: (number | null)[];
+  last: (number | null)[];
+}
+
+export interface Mf4Series {
+  hasTimeAxis: boolean;
+  fromSec: number;
+  toSec: number;
+  bucketSec: number;
+  /** Bucket midpoint in seconds; `null` when the bucket saw no sample. */
+  times: (number | null)[];
+  series: Mf4SeriesEntry[];
+}
+
 export function mf4Open(path: string): Promise<Mf4Info> {
   return call<Mf4Info>("mf4_open", { path });
 }
@@ -833,6 +855,22 @@ export function mf4ExportCsv(args: {
 
 export function mf4ExportCancel(requestId: number): Promise<void> {
   return call<void>("mf4_export_cancel", { requestId });
+}
+
+export function mf4Series(args: {
+  id: number;
+  channels: number[];
+  fromSec?: number | null;
+  toSec?: number | null;
+  buckets?: number;
+}): Promise<Mf4Series> {
+  return call<Mf4Series>("mf4_series", {
+    id: args.id,
+    channels: args.channels,
+    fromSec: args.fromSec ?? null,
+    toSec: args.toSec ?? null,
+    buckets: args.buckets ?? 2000,
+  });
 }
 
 // ---- User scripts (Roadmap-3: QuickJS) --------------------------------------
