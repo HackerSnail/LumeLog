@@ -2,6 +2,37 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
+
+**依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。
+
+### Task 1. MSRV 1.89 + `falcon_mdf` + MF4 会话/通道
+**Files:** Modify `Cargo.toml`/`app/src-tauri/Cargo.toml`（`rust-version 1.87→1.89`；`falcon_mdf = { version = "0.7", default-features = false, features = ["mmap"] }`）、`Cargo.lock`、`.github/workflows/ci.yml`（工具链注释）；Create `app/src-tauri/src/mf4.rs`（`Mf4Sessions`（id→会话，上限 4）、`open_session/close_session/list_channels`、`Mf4InfoJson/Mf4ChannelJson/Mf4ChannelsPage/Mf4Kind`、错误分类 `mf4_not_mf4/mf4_encrypted/mf4_unsupported/io`、`kind_of` 按 `data_type` Debug 字串判定）、`commands.rs`（3 个 `#[tauri::command]`）、`lib.rs`（`mod mf4` + `manage` + 注册）；`MAX_COLUMNS/MAX_LIMIT/session.file/path` 临时 `#[allow(dead_code)]`（T2/T3 使用后剥）。
+**Why:** MF4 不能走文本/行索引链路 → 独立会话 + dock；`falcon_mdf` 类型只出现在 `mf4.rs`（可换库）；只开 `mmap` 避免 rayon/arrow 依赖面；打开失败一律归为结构错误（非真 I/O），避免把“不是 MF4”误报为 io。
+**验证:** `cargo test -p lumelog-app mf4::` 3 pass（夹具用 `Mf4Writer` 现写 MF4：计数/主通道/名称、大小写不敏感搜索+分页+越界空页、非 MF4 → `mf4_not_mf4`、会话上限 4 → `invalid_argument`、close 幂等、未知会话 `unknown_mf4`）；`cargo test --workspace`（app 108 / core 89 / can 23）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 2. `mf4_records`（时间窗 + 分页 + 单元格映射）
+**Files:** Modify `app/src-tauri/src/mf4.rs`（`select_rows` 流式主通道得 `(样行, 毫秒)` 对并计数 total（降序就地反转，再 skip/take）；`cells_for_rows` 逐块只取本页行下标（内存与页大小成正比）；`cell_of` 映射数值/文本变体，失效样本与读失败→`Null`，整列不可读→`degraded`；MDF 把 bool 存成整数，按 `kind_of` 回报 `Bool`；`records` 校验选择非空/≤32 列/limit≤1000/from≤to/排序仅 timeAsc|timeDesc）；`commands.rs` + `lib.rs`（`mf4_records` 命令与注册）；`path` 字段保留 `#[allow(dead_code)]`（T3 导出使用）。
+**Why:** spec §3/§5：不能把整信号物化到内存才能撑住大文件；`total_rows` 需要全窗口计数，因此只对时间轴做一遗扫描（页数据按块取）；排序语义固定为时间跳页、列仅本页（列排序需物化，本增量不做）。
+**验证:** `cargo test -p lumelog-app mf4::` 5 pass（新增窗口裁剪/分页与 total/timeDesc 反向/列顺序按选择/失效样本 Null/六类参数拒绝）；`cargo test --workspace` app 110 全绿；`cargo clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 3. `mf4_summary` + CSV 导出 + 命令注册
+**Files:** Modify `app/src-tauri/src/mf4.rs`（`Mf4SummaryJson`/`Mf4GroupJson`（按 `channel_group_index` 聚合）/`Mf4ExportProgress`/`Mf4ExportStats`；`summary()`（version/path/comment/计数/组聚合/events+attachments 数量）；`export_csv()`（500 行/批，复用 `cells_for_rows` 与表格同一映射；`timeMs` 头 + `名 (单位)` 头；文本引号加倍；取消保前缀；tmp→rename；进度每 5 万行）；`csv_cell/csv_header`）；`commands.rs`（`mf4_summary`、`mf4_export_csv`（跨 `Mf4Sessions`+`AppDocs` 两托管态，worker 内取会话、`begin_search`/`end_search`、`catch_unwind` 仍需 `on_done`）、`mf4_export_cancel`）；`lib.rs` 注册；新增 3 测（summary 计数/组、导出与表格一致+引号转义、空选择与取消前缀）。
+**Why:** 导出与表格必须同源映射（都走 `cells_for_rows`），否则两边会漂移；取消仍转成可读前缀（tmp→rename）。
+**偏差（记录）:** `falcon_mdf` 的 `Event`/`Attachment` 字段未深入封装，summary 先只给 events/attachments 的数量，事件明细留后续；列排序仅 timeAsc/timeDesc（列序在 UI 本页内做）。
+**验证:** `cargo test -p lumelog-app mf4::` 8 pass（+3）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
+### Task 4. 前端 IPC（MF4）
+**Files:** Modify `app/frontend/src/ipc.ts`（`Mf4Kind/Mf4Info/Mf4Channel/Mf4ChannelsPage/Mf4Cell/Mf4Column/Mf4Rows/Mf4Summary/Mf4ExportStats` + `mf4Open/Close/Channels/Summary/Records/ExportCsv/ExportCancel`）；`ipc.test.ts`（+1 typeof 7）。
+**Why:** 单元格改为 `#[serde(untagged)]`（`number|string|boolean|null`），前端零解包；Rust `Mf4CellJson` 同步改为 untagged（原 camelCase 会变 `{number:10}`，已在 T4 一并修正）。
+**验证:** `npm test` 95 pass（ipc 17→18）+ `run build` tsc 通过。
+
+### Task 5+6. MF4 dock（表格 + 通道面板 + 分页/时间窗/导出）+ main 接线
+**Files:** Create `app/frontend/src/mf4-table.ts`（`cellText`：null→`—`/bool→`✓`/浮点修剪；表头带单位，`degraded` 加 `⚠`+tooltip；**列排序仅本页**、点击切换升降；页内直接渲染，不分页内部虚拟化）、`mf4-ui.ts`（`Mf4View`：通道搜索 150ms 防抖、复选上限 32、时间窗校验（起>止拒）、排序/每页 100/500/1000、上一页/下一页按 `totalRows` 禁启、导出入参仅选列+窗口、回调注入）、`mf4-table.test.ts`（3）、`mf4-ui.test.ts`（4）；Modify `styles.css`（`.mf4-*`）、`main.ts`（工具栏“测量”、面板“测量数据…”、`#mf4-dock`、`mf4Open/mf4Channels/mf4Summary` 并行、`runMf4Query` 带 token 丢弃旧响应、导出走 `save()`+`mf4ExportCsv` 进度/完成、关闭释放会话、与 CAN dock 双向互斥）。
+**Why:** 一页 ≤1000 行，直接渲染比自写虚拟化更可验证（jsdom 与真实行为一致）；列排序只在本页内（后端只做时间序跳页）避免物化整窗。
+**偏差/Parked:** dock 未内置“取消导出”按钮（`mf4_export_cancel` 已有，UI 仅可在完成后解除）；列选择上限/分页默认值与 spec 一致；会话多开（>1）UI 仅保留最后一个（后端支持 ≤4，UI 先简化为单会话）。
+**验证:** `npm test` 102 pass（16 文件）+ `run build` tsc 通过（48 modules）。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

@@ -49,6 +49,12 @@ import {
   scriptDelete,
   scriptRun,
   scriptCancel,
+  mf4Open,
+  mf4Close,
+  mf4Channels,
+  mf4Summary,
+  mf4Records,
+  mf4ExportCsv,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -67,6 +73,7 @@ import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
 import { openKeymapModal } from "./keymap-ui";
 import { openScriptModal } from "./script-ui";
+import { Mf4View, type Mf4Query } from "./mf4-ui";
 import { openEditable, type EditorHandle } from "./editor";
 import { ListView, isNearBottom } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
@@ -233,6 +240,7 @@ function layout(): void {
     mkBtn("打开文件", "", () => void openFile()),
     mkBtn("查询", "行过滤 / 高亮命中", () => openQueryPanel()),
     mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
+    mkBtn("测量", "打开 MF4 测量文件（表格浏览与导出）", () => void openMf4File()),
     mkBtn("脚本", "打开脚本管理器（QuickJS 逐行变换）", () => openScriptManager()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
@@ -291,7 +299,7 @@ function layout(): void {
   panel.id = "search-panel";
   panel.className = "search-panel";
   panel.style.display = "none";
-  center.append(tabsEl, panel, buildCanDock());
+  center.append(tabsEl, panel, buildCanDock(), buildMf4Dock());
 
   sidebarHandleEl = document.createElement("div");
   sidebarHandleEl.className = "pane-resizer";
@@ -553,6 +561,122 @@ function buildCanDock(): HTMLElement {
   return dock;
 }
 
+// ---- MF4 measurement dock (Roadmap-4 increment 1) ---------------------------
+
+let mf4DockEl: HTMLElement | null = null;
+let mf4View: Mf4View | null = null;
+let mf4SessionId: number | null = null;
+let mf4Path = "";
+let mf4Token = 0;
+
+function buildMf4Dock(): HTMLElement {
+  if (mf4DockEl) return mf4DockEl;
+  const dock = document.createElement("div");
+  dock.id = "mf4-dock";
+  dock.className = "mf4-dock";
+  dock.style.display = "none";
+  mf4DockEl = dock;
+  return dock;
+}
+
+async function openMf4File(): Promise<void> {
+  const picked = await open({
+    multiple: false,
+    filters: [{ name: "MF4 测量文件", extensions: ["mf4"] }],
+  });
+  if (typeof picked !== "string") return;
+  try {
+    const info = await mf4Open(picked);
+    const [channels, summary] = await Promise.all([
+      mf4Channels({ id: info.id, limit: 2000 }),
+      mf4Summary(info.id),
+    ]);
+    if (mf4SessionId !== null) void mf4Close(mf4SessionId).catch(() => {});
+    mf4SessionId = info.id;
+    mf4Path = picked;
+    if (canDockVisible) toggleCanDock();
+    const host = buildMf4Dock();
+    host.style.display = "";
+    mf4View = new Mf4View(host, {
+      info,
+      summary,
+      channels: channels.items,
+      onQuery: (q) => void runMf4Query(q),
+      onExport: (a) => void exportMf4Csv(info.id, a),
+      onClose: () => closeMf4(),
+    });
+    mf4View.setStatus(`已打开 ${basenameOf(picked)}`);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/** Fetch one page; a newer query invalidates an in-flight one (later wins). */
+async function runMf4Query(q: Mf4Query): Promise<void> {
+  if (mf4SessionId === null || !mf4View) return;
+  const token = ++mf4Token;
+  mf4View.setBusy(true);
+  mf4View.setStatus("读取中…");
+  try {
+    const rows = await mf4Records({ id: mf4SessionId, ...q });
+    if (token !== mf4Token) return;
+    mf4View.setRows(rows);
+    mf4View.setStatus(rows.timeMs.length === 0 ? "该区间无样本" : "");
+  } catch (err) {
+    if (token !== mf4Token) return;
+    reportError(err);
+    mf4View.setStatus("读取失败");
+  } finally {
+    if (token === mf4Token) mf4View?.setBusy(false);
+  }
+}
+
+async function exportMf4Csv(
+  id: number,
+  a: { channels: number[]; fromSec: number | null; toSec: number | null },
+): Promise<void> {
+  const dest = await save({
+    defaultPath: `${basenameOf(mf4Path).replace(/\.mf4$/i, "")}.csv`,
+    filters: [{ name: "CSV", extensions: ["csv"] }],
+  });
+  if (typeof dest !== "string") return;
+  mf4View?.setBusy(true);
+  mf4View?.setStatus("导出中…");
+  try {
+    await mf4ExportCsv({
+      id,
+      channels: a.channels,
+      fromSec: a.fromSec,
+      toSec: a.toSec,
+      targetPath: dest,
+      onProgress: (p) => mf4View?.setStatus(`导出 ${p.written} 行…`),
+      onDone: (s) => {
+        mf4View?.setStatus(
+          s.errored ? "导出失败" : s.cancelled ? "已取消导出" : `已导出 ${s.written} 行`,
+        );
+        mf4View?.setBusy(false);
+      },
+    });
+  } catch (err) {
+    reportError(err);
+    mf4View?.setBusy(false);
+    mf4View?.setStatus("导出失败");
+  }
+}
+
+function closeMf4(): void {
+  mf4Token++;
+  if (mf4SessionId !== null) {
+    void mf4Close(mf4SessionId).catch(() => {});
+    mf4SessionId = null;
+  }
+  mf4View = null;
+  if (mf4DockEl) {
+    mf4DockEl.style.display = "none";
+    mf4DockEl.textContent = "";
+  }
+}
+
 /** The view-filter toolbar; each change rebuilds the active doc's `CanFilter`. */
 function buildCanFilterRow(): HTMLElement {
   const row = document.createElement("div");
@@ -651,6 +775,7 @@ function toggleCanDock(): void {
   canDockVisible = !canDockVisible;
   if (canDockEl) canDockEl.style.display = canDockVisible ? "" : "none";
   if (canDockVisible) {
+    if (mf4SessionId !== null) closeMf4(); // one bottom dock at a time
     ensurePanel();
     switchCanView();
   }
@@ -2469,6 +2594,7 @@ function buildCommands(): Command[] {
     ...bound,
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "script", title: "脚本…", run: () => openScriptManager() },
+    { id: "mf4", title: "测量数据…", run: () => void openMf4File() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
     { id: "theme-vampire", title: "主题：吸血鬼 (Dracula)", run: () => theme.set("vampire") },

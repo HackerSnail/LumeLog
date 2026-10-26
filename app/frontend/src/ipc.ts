@@ -699,6 +699,142 @@ export function exportBlfJsonl(args: Omit<Parameters<typeof exportBlf>[0], "cmd"
   return exportBlf({ ...args, cmd: "can_export_blf_jsonl" });
 }
 
+// ---- MF4 measurement sessions (Roadmap-4) -----------------------------------
+
+export type Mf4Kind = "number" | "text" | "bool" | "unknown";
+
+export interface Mf4Info {
+  id: number;
+  version: string;
+  path: string;
+  channelCount: number;
+  dataGroups: number;
+  comment: string;
+}
+
+export interface Mf4Channel {
+  index: number;
+  name: string;
+  unit: string;
+  kind: Mf4Kind;
+  master: boolean;
+  group: number;
+}
+
+export interface Mf4ChannelsPage {
+  items: Mf4Channel[];
+  total: number;
+}
+
+/** Plain JSON cell: numbers/strings/bools, `null` for missing or invalid. */
+export type Mf4Cell = number | string | boolean | null;
+
+export interface Mf4Column {
+  index: number;
+  name: string;
+  unit: string;
+  values: Mf4Cell[];
+  degraded: boolean;
+}
+
+export interface Mf4Rows {
+  timeMs: (number | null)[];
+  columns: Mf4Column[];
+  totalRows: number;
+  hasTimeAxis: boolean;
+}
+
+export interface Mf4Summary {
+  version: string;
+  path: string;
+  comment: string;
+  channelCount: number;
+  dataGroups: number;
+  events: number;
+  attachments: number;
+  groups: { index: number; channels: number }[];
+}
+
+export interface Mf4ExportStats {
+  written: number;
+  cancelled: boolean;
+  errored: boolean;
+}
+
+export function mf4Open(path: string): Promise<Mf4Info> {
+  return call<Mf4Info>("mf4_open", { path });
+}
+
+export function mf4Close(id: number): Promise<void> {
+  return call<void>("mf4_close", { id });
+}
+
+export function mf4Channels(args: {
+  id: number;
+  query?: string | null;
+  limit?: number;
+  offset?: number;
+}): Promise<Mf4ChannelsPage> {
+  return call<Mf4ChannelsPage>("mf4_channels", {
+    id: args.id,
+    query: args.query ?? null,
+    limit: args.limit ?? 500,
+    offset: args.offset ?? 0,
+  });
+}
+
+export function mf4Summary(id: number): Promise<Mf4Summary> {
+  return call<Mf4Summary>("mf4_summary", { id });
+}
+
+export function mf4Records(args: {
+  id: number;
+  channels: number[];
+  fromSec?: number | null;
+  toSec?: number | null;
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<Mf4Rows> {
+  return call<Mf4Rows>("mf4_records", {
+    id: args.id,
+    channels: args.channels,
+    fromSec: args.fromSec ?? null,
+    toSec: args.toSec ?? null,
+    sort: args.sort ?? "timeAsc",
+    limit: args.limit ?? 500,
+    offset: args.offset ?? 0,
+  });
+}
+
+export function mf4ExportCsv(args: {
+  id: number;
+  channels: number[];
+  fromSec?: number | null;
+  toSec?: number | null;
+  targetPath: string;
+  onProgress: (p: { written: number }) => void;
+  onDone: (s: Mf4ExportStats) => void;
+}): Promise<number> {
+  const progCh = new Channel<{ written: number }>();
+  progCh.onmessage = args.onProgress;
+  const doneCh = new Channel<Mf4ExportStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("mf4_export_csv", {
+    id: args.id,
+    channels: args.channels,
+    fromSec: args.fromSec ?? null,
+    toSec: args.toSec ?? null,
+    targetPath: args.targetPath,
+    onProgress: progCh,
+    onDone: doneCh,
+  });
+}
+
+export function mf4ExportCancel(requestId: number): Promise<void> {
+  return call<void>("mf4_export_cancel", { requestId });
+}
+
 // ---- User scripts (Roadmap-3: QuickJS) --------------------------------------
 
 export interface ScriptEntry {
