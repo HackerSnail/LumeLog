@@ -55,8 +55,9 @@
       ↳ Plan 10 `feat/roadmap-tail-follow`：只读状态栏“跟随尾部”开关，新增字节**增量扩展行索引**（不重建、不整页重载）并自动滚底；上滚暂停 + “回到底部”；截断/轮转（缩小或头签名变化，含 rename 替换）回退全量重载；编辑模式不跟随。
 - [x] Roadmap：BLF（Vector 二进制日志）报文源
       ↳ Plan 11 `feat/roadmap-blf`：工具栏“打开 BLF…”直接进 CanPanel；解析 `LOGG` 容器（无压缩/zlib）+ 对象 1/86/100/101；跨容器切分、1ns/10µs 时间；复用过滤/DBC/停止；导出 CSV/JSONL 复用 `export_frames`；无源文本（`lineNumber`=帧序号）。
-- [x] Roadmap：MF4（ASAM MDF4）测量数据查看器（增量1：表格；波形待增量2）
+- [x] Roadmap：MF4（ASAM MDF4）测量数据查看器（增量1 表格 + 增量2 自绘波形）
       ↳ Plan 13 `feat/roadmap-mf4-viewer`：工具栏“测量”/面板“测量数据…”打开 `.mf4`（`falcon_mdf 0.7`，只开 `mmap`；workspace MSRV 1.87→1.89）；独立 dock：元数据行 + 通道搜索/多选（≤32）+ 分页记录表（100/500/1000，时间跳页、列序仅本页，缺失 `—`，不可读列 `⚠`）+ 时间窗 + 流式 CSV 导出（与表格同一单元格映射，可取消、保前缀）；会话上限 4、`mf4_records` 按时间轴分块、其余通道按页取块。
+      ↳ Plan 14 `feat/roadmap-mf4-chart`：dock 内「表格 / 波形」tab；`mf4_series` 后端 **min/max 包络**（≤8 序列、≤4000 桶、同一 channel group + 时间主通道、单遍 `aligned_signal_chunks` 流式）；自绘双层 canvas（DPR/ResizeObserver/rAF、滚轮以光标为锚点缩放、拖拽平移、双击复位、hover 十字线 + 原值 tooltip、归一化绘制）；窗口独立，「应用到表格」显式同步；无时间轴禁用波形。
 - [x] 脚本引擎（QuickJS 逐行变换）
       ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。
 - [ ] 插件接口，支持用户扩展解析器
