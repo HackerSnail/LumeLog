@@ -2,8 +2,9 @@
 // paging, page-local column sort and CSV export. Pure DOM with injected callbacks;
 // `main.ts` owns IPC, the file dialog and the session map.
 
-import type { Mf4Channel, Mf4Rows } from "./ipc";
+import type { Mf4Channel, Mf4Rows, Mf4Series } from "./ipc";
 import { Mf4Table } from "./mf4-table";
+import { Mf4Chart, type Win } from "./mf4-chart";
 
 export interface Mf4Query {
   channels: number[];
@@ -22,7 +23,15 @@ export interface Mf4UiOpts {
     groups: { index: number; dataGroup: number; channels: number }[];
   } | null;
   channels: Mf4Channel[];
+  /** False disables the waveform tab (no time master in the file). */
+  hasTimeAxis?: boolean;
   onQuery: (q: Mf4Query) => void;
+  onSeriesQuery?: (q: {
+    channels: number[];
+    fromSec: number | null;
+    toSec: number | null;
+    buckets: number;
+  }) => void;
   onExport: (a: { channels: number[]; fromSec: number | null; toSec: number | null }) => void;
   onCancelExport?: () => void;
   onClose: () => void;
@@ -73,6 +82,15 @@ export class Mf4View {
   private busy = false;
   private lastEmpty = "尚未选择通道";
   private lastSelected = -1;
+  private mode: "table" | "chart" = "table";
+  private readonly tabTable: HTMLButtonElement;
+  private readonly tabChart: HTMLButtonElement;
+  private readonly chartWrap: HTMLElement;
+  private readonly chart: Mf4Chart;
+  private readonly chartWindowEl: HTMLElement;
+  private chartWindow: Win | null = null;
+  private fullWin: Win | null = null;
+  private readonly tableWrap: HTMLElement;
 
   constructor(host: HTMLElement, opts: Mf4UiOpts) {
     this.opts = opts;
@@ -196,8 +214,44 @@ export class Mf4View {
     const tableHost = el("div", "mf4-table");
     this.table = new Mf4Table(tableHost);
     body.append(this.listEl, tableHost);
+    this.tableWrap = body;
 
     host.append(head, meta, bar, this.statusEl, body);
+
+    // Table / waveform tabs. The chart shares the channel selection and only
+    // re-queries when the tab is active or its own window changes.
+    const tabs = el("div", "mf4-tabs");
+    this.tabTable = el("button", "mf4-tab active", "表格");
+    this.tabChart = el("button", "mf4-tab", "波形");
+    this.tabChart.disabled = opts.hasTimeAxis === false;
+    this.tabTable.addEventListener("click", () => this.setMode("table"));
+    this.tabChart.addEventListener("click", () => this.setMode("chart"));
+    tabs.append(this.tabTable, this.tabChart);
+
+    this.chartWrap = el("div", "mf4-chart-wrap");
+    this.chartWrap.style.display = "none";
+    const chartBar = el("div", "mf4-toolbar");
+    this.chartWindowEl = el("span", "mf4-page", "");
+    const applyBtn = el("button", "mf4-apply-window", "应用到表格");
+    applyBtn.addEventListener("click", () => this.applyChartWindow());
+    const resetBtn = el("button", "mf4-reset-window", "复位");
+    resetBtn.addEventListener("click", () => {
+      if (!this.fullWin) return;
+      this.chart.setWindow({ ...this.fullWin });
+      this.chartWindow = this.chart.window;
+      this.syncChartWindowLabel();
+      this.emitSeries();
+    });
+    chartBar.append(this.chartWindowEl, applyBtn, resetBtn);
+    const chartHost = el("div", "mf4-chart-host");
+    this.chart = new Mf4Chart(chartHost);
+    this.chart.onWindowChange((w) => {
+      this.chartWindow = w;
+      this.syncChartWindowLabel();
+      this.emitSeries();
+    });
+    this.chartWrap.append(chartBar, chartHost);
+    host.append(tabs, this.chartWrap);
     this.renderChannels();
     this.syncButtons();
   }
@@ -226,12 +280,80 @@ export class Mf4View {
 
   setBusy(busy: boolean): void {
     this.busy = busy;
+    this.chart.setBusy(busy);
     this.syncButtons();
   }
 
   /** Export runs in the backend with its own cancel hook; only then is it armed. */
   setExporting(exporting: boolean): void {
     this.cancelExportBtn.disabled = !exporting;
+  }
+
+  /** Feed downsampled series (the waveform tab keeps its own window). */
+  setSeries(data: Mf4Series): void {
+    this.fullWin = {
+      start: data.fromSec,
+      end: data.toSec > data.fromSec ? data.toSec : data.fromSec + 1,
+    };
+    this.chart.setData(data);
+    this.chart.setWindow({ ...this.fullWin });
+    this.chartWindow = { ...this.fullWin };
+    this.syncChartWindowLabel();
+  }
+
+  /** Detach chart listeners before the dock is cleared. */
+  destroy(): void {
+    this.chart.destroy();
+  }
+
+  private setMode(mode: "table" | "chart"): void {
+    if (mode === "chart" && this.opts.hasTimeAxis === false) return;
+    this.mode = mode;
+    this.tabTable.classList.toggle("active", mode === "table");
+    this.tabChart.classList.toggle("active", mode === "chart");
+    this.tableWrap.style.display = mode === "table" ? "" : "none";
+    this.chartWrap.style.display = mode === "chart" ? "" : "none";
+    this.renderChannels();
+    if (mode === "chart") this.emitSeries();
+  }
+
+  private syncChartWindowLabel(): void {
+    const w = this.chartWindow;
+    this.chartWindowEl.textContent = w
+      ? `窗口 ${w.start.toFixed(3)} – ${w.end.toFixed(3)} s`
+      : "";
+  }
+
+  /** Ask main for the envelope of the current selection over the chart window. */
+  private emitSeries(): void {
+    if (this.mode !== "chart" || !this.opts.onSeriesQuery) return;
+    if (this.selected.size === 0) {
+      this.setStatus("请先勾选通道");
+      return;
+    }
+    if (this.selected.size > 8) {
+      this.setStatus("波形最多显示 8 条序列，请先减少选择");
+      return;
+    }
+    const win = this.chartWindow ?? this.fullWin;
+    this.opts.onSeriesQuery({
+      channels: [...this.selected].sort((a, b) => a - b),
+      // Before the first response the chart has no window yet: ask the backend
+      // to resolve the file's full extent (null window).
+      fromSec: win ? win.start : numOrNull(this.fromInput.value),
+      toSec: win ? win.end : numOrNull(this.toInput.value),
+      buckets: 2000,
+    });
+  }
+
+  /** Copy the chart window into the table inputs and reload that page. */
+  private applyChartWindow(): void {
+    const win = this.chartWindow;
+    if (!win) return;
+    this.fromInput.value = win.start.toFixed(6);
+    this.toInput.value = win.end.toFixed(6);
+    this.offset = 0;
+    this.query();
   }
 
   private syncButtons(): void {
@@ -265,16 +387,20 @@ export class Mf4View {
     const shown = this.opts.channels.filter(
       (c) => needle === "" || c.name.toLowerCase().includes(needle),
     );
+    const isChart = this.mode === "chart";
+    const cap = isChart ? 8 : MAX_COLS;
     for (const ch of shown) {
       const row = el("label", "mf4-channel");
       const box = document.createElement("input");
       box.type = "checkbox";
       box.checked = this.selected.has(ch.index);
+      // Waveforms only make sense for numeric channels, and eight is the cap.
+      box.disabled = isChart && ch.kind !== "number";
       box.addEventListener("change", () => {
         if (box.checked) {
-          if (this.selected.size >= MAX_COLS) {
+          if (this.selected.size >= cap) {
             box.checked = false;
-            this.setStatus(`最多选择 ${MAX_COLS} 个通道`);
+            this.setStatus(`最多选择 ${cap} 个通道`);
             return;
           }
           this.selected.add(ch.index);
@@ -283,7 +409,8 @@ export class Mf4View {
         }
         this.offset = 0;
         this.syncButtons();
-        this.query();
+        if (this.mode === "chart") this.emitSeries();
+        else this.query();
       });
       const label = el(
         "span",

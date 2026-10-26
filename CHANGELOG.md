@@ -21,6 +21,11 @@
 **Why:** hover 高频重绘只碰 overlay；DPR 只 `setTransform` 一次避免累积缩放；jsdom 无 canvas 实现时保证交互测试仍可跑。
 **验证:** `npm test` 112 pass（18 文件）+ `run build` 通过。
 
+### Task 5. dock tab + `main.ts` 注入
+**Files:** Modify `mf4-ui.ts`（「表格 / 波形」tab；`hasTimeAxis===false` 时波形 disabled；波形模式只允许数值通道且上限 8，切回表格恢复 32；`setSeries()` 记住全范围并重置窗口；图表窗口文案 + 「应用到表格」（写入起/止并重查）+ 「复位」；`emitSeries()` 在无窗口时发 `null` 窗口让后端自行解析全范围；`destroy()` 释放图表监听）、`mf4-ui.test.ts`（+2：切 tab 发 `onSeriesQuery`/文本通道禁用/应用到表格后 `onQuery` 窗口一致；无时间轴 tab disabled）、`main.ts`（`mf4Series` 注入 + `mf4SeriesToken` 丢弃旧响应 + `closeMf4` 递增 token 并 `destroy()`）、`ipc.ts`（`onSeriesQuery` 允许 `null` 窗口）。
+**Why:** 波形窗口独立（缩放不惊动分页），仅在「应用到表格」时同步；首帧无窗口时由后端解析全范围，避免前端猜 0/0。
+**验证:** `npm test` 114 pass（18 文件）+ `run build` 通过（49 modules）。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。

@@ -670,6 +670,35 @@ html.has-custom-titlebar .win-btns {
   font-size: 12px;
   border-radius: 4px;
 }
+.mf4-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border, #ddd);
+}
+.mf4-tab {
+  padding: 2px 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-size: 12px;
+}
+.mf4-tab.active {
+  border-bottom-color: var(--accent, #4e79a7);
+  font-weight: 600;
+}
+.mf4-chart-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.mf4-chart-host {
+  flex: 1 1 auto;
+  min-height: 240px;
+  position: relative;
+}
 .script-editor {
   flex: 1 1 auto;
   min-height: 180px;
