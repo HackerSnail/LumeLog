@@ -11,6 +11,11 @@
 **Why:** 波形必须保尖峰且不让整信号进前端；`aligned_signal_chunks` 提供同下标对齐，比逐通道重扫稳定；假定“同组等采样”已在注释写入（混采样留后续 `Raster`）。
 **验证:** `cargo test -p lumelog-app mf4::` 12 pass（新增桶数/包络/first-last/空桶/尖峰 999 保留/跨组与文本拒绝）；`cargo test --workspace` app 117 / core 89 / can 23；`clippy --workspace --all-targets -- -D warnings` 净；`npm test` 103 + `run build` 通过。
 
+### Task 3. 波形数学（`mf4-chart.ts` 纯函数）
+**Files:** Create `app/frontend/src/mf4-chart.ts`（`clampWindow`（全范围/最小窗宽 `fullSpan/1e6` 或 `1e-6`）、`zoomAt`（锚点时间不变）、`panBy`（两端夹紧）、`bucketIndex`（`t==end` 归末桶、零宽窗口归 0）、`nearestBucket`（跳空桶，全空返回 -1）、`xOf`、`yOf`（归一化；min==max 落中线、NaN→NaN））、`mf4-chart.test.ts`（6）。
+**Why:** 交互手感靠窗口数学，先以纯函数钉住（jsdom 无真像素，像素级留给手工验）。
+**验证:** `npm test` 109 pass（17 文件）+ `run build` 通过。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。
