@@ -542,6 +542,7 @@ html.has-custom-titlebar .win-btns {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
 }
@@ -646,7 +647,7 @@ html.has-custom-titlebar .win-btns {
 .mf4-chart {
   position: relative;
   flex: 1 1 auto;
-  min-height: 240px;
+  min-height: 0;
   overflow: hidden;
 }
 .mf4-chart-base,
@@ -696,7 +697,7 @@ html.has-custom-titlebar .win-btns {
 }
 .mf4-chart-host {
   flex: 1 1 auto;
-  min-height: 240px;
+  min-height: 0;
   position: relative;
 }
 .script-editor {

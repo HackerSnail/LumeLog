@@ -459,11 +459,20 @@ pub(crate) fn series(
             "请选择同一数据组内的通道",
         ));
     }
+    // `(data_group, channel_group)` is the record stream; aligned chunks assume
+    // the channel group's shared sampling, so mixing groups would misalign.
+    let channel_group = picked[0].1.channel_group_index;
+    if picked.iter().any(|(_, c)| c.channel_group_index != channel_group) {
+        return Err(IpcError::new(
+            "invalid_argument",
+            "请选择同一通道组内的通道",
+        ));
+    }
     let file = guard.file.lock().unwrap_or_else(|p| p.into_inner());
     let master = guard
         .channels
         .iter()
-        .find(|(_, c)| c.data_group_index == data_group && c.is_time_channel())
+        .find(|(_, c)| c.channel_group_index == channel_group && c.is_time_channel())
         .map(|(_, c)| c);
     let n = buckets as usize;
     let Some(master) = master else {
@@ -479,21 +488,39 @@ pub(crate) fn series(
                 .collect(),
         });
     };
-    // Resolve an open window from the master's own extent (first/last sample).
+    // Resolve an open window from the master's own extent. Zoom/pan always send
+    // both bounds, so the master is only scanned when a bound is missing.
     let (mut t_first, mut t_last) = (f64::INFINITY, f64::NEG_INFINITY);
-    for chunk in file.signal_chunks(master).map_err(classify)? {
-        let chunk = chunk.map_err(classify)?;
-        let vals = chunk.values_f64().map_err(classify)?;
-        if let Some(v) = vals.first() {
-            t_first = t_first.min(*v);
-        }
-        if let Some(v) = vals.last() {
-            t_last = t_last.max(*v);
+    if from_sec.is_none() || to_sec.is_none() {
+        for chunk in file.signal_chunks(master).map_err(classify)? {
+            let chunk = chunk.map_err(classify)?;
+            let vals = chunk.values_f64().map_err(classify)?;
+            if let Some(v) = vals.first() {
+                t_first = t_first.min(*v);
+            }
+            if let Some(v) = vals.last() {
+                t_last = t_last.max(*v);
+            }
         }
     }
     let win_from = from_sec.unwrap_or(t_first);
     let win_to = to_sec.unwrap_or(t_last);
-    let span = (win_to - win_from).max(1e-9);
+    if win_to <= win_from || !win_to.is_finite() || !win_from.is_finite() {
+        // Empty or inverted window (e.g. a start past the file end): draw nothing
+        // rather than inventing a span.
+        return Ok(Mf4SeriesJson {
+            has_time_axis: true,
+            from_sec: if win_from.is_finite() { win_from } else { 0.0 },
+            to_sec: if win_to.is_finite() { win_to } else { 0.0 },
+            bucket_sec: 0.0,
+            times: vec![None; n],
+            series: picked
+                .iter()
+                .map(|(m, _)| empty_series(m, n, false))
+                .collect(),
+        });
+    }
+    let span = win_to - win_from;
     let bucket_sec = span / buckets as f64;
 
     let mut entries: Vec<Mf4SeriesEntryJson> =

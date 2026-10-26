@@ -252,6 +252,7 @@ export class Mf4View {
     });
     this.chartWrap.append(chartBar, chartHost);
     host.append(tabs, this.chartWrap);
+    host.insertBefore(tabs, bar); // tabs stay above the toolbar in both modes
     this.renderChannels();
     this.syncButtons();
   }
@@ -289,15 +290,19 @@ export class Mf4View {
     this.cancelExportBtn.disabled = !exporting;
   }
 
-  /** Feed downsampled series (the waveform tab keeps its own window). */
+  /** Feed downsampled series. The file's full extent is fixed by the first
+   *  (windowless) response; later responses never move the user's window. */
   setSeries(data: Mf4Series): void {
-    this.fullWin = {
-      start: data.fromSec,
-      end: data.toSec > data.fromSec ? data.toSec : data.fromSec + 1,
-    };
+    if (!this.fullWin) {
+      this.fullWin = {
+        start: data.fromSec,
+        end: data.toSec > data.fromSec ? data.toSec : data.fromSec + 1,
+      };
+      this.chart.setFullRange(this.fullWin);
+      this.chartWindow = { ...this.fullWin };
+    }
     this.chart.setData(data);
-    this.chart.setWindow({ ...this.fullWin });
-    this.chartWindow = { ...this.fullWin };
+    this.chart.setWindow(this.chartWindow ?? this.fullWin);
     this.syncChartWindowLabel();
   }
 
@@ -309,6 +314,15 @@ export class Mf4View {
   private setMode(mode: "table" | "chart"): void {
     if (mode === "chart" && this.opts.hasTimeAxis === false) return;
     this.mode = mode;
+    if (mode === "chart") {
+      // Text/unknown channels and the time master itself cannot be plotted; drop
+      // them from the selection so the checkbox list and the chart agree.
+      for (const idx of [...this.selected]) {
+        const ch = this.opts.channels.find((c) => c.index === idx);
+        if (!ch || ch.kind !== "number" || ch.master) this.selected.delete(idx);
+      }
+      this.lastSelected = -1;
+    }
     this.tabTable.classList.toggle("active", mode === "table");
     this.tabChart.classList.toggle("active", mode === "chart");
     this.tableWrap.style.display = mode === "table" ? "" : "none";
@@ -327,19 +341,23 @@ export class Mf4View {
   /** Ask main for the envelope of the current selection over the chart window. */
   private emitSeries(): void {
     if (this.mode !== "chart" || !this.opts.onSeriesQuery) return;
-    if (this.selected.size === 0) {
-      this.setStatus("请先勾选通道");
+    const numeric = [...this.selected].filter((idx) => {
+      const ch = this.opts.channels.find((c) => c.index === idx);
+      return ch?.kind === "number" && !ch.master;
+    });
+    if (numeric.length === 0) {
+      this.setStatus("请先勾选数值通道");
       return;
     }
-    if (this.selected.size > 8) {
+    if (numeric.length > 8) {
       this.setStatus("波形最多显示 8 条序列，请先减少选择");
       return;
     }
     const win = this.chartWindow ?? this.fullWin;
     this.opts.onSeriesQuery({
-      channels: [...this.selected].sort((a, b) => a - b),
-      // Before the first response the chart has no window yet: ask the backend
-      // to resolve the file's full extent (null window).
+      channels: numeric.sort((a, b) => a - b),
+      // Before the first response the chart has no window: ask the backend to
+      // resolve that record stream's extent (null window).
       fromSec: win ? win.start : numOrNull(this.fromInput.value),
       toSec: win ? win.end : numOrNull(this.toInput.value),
       buckets: 2000,
@@ -423,7 +441,7 @@ export class Mf4View {
     if (shown.length === 0) this.listEl.append(el("div", "mf4-empty", "无匹配通道"));
     if (this.selected.size !== this.lastSelected) {
       this.lastSelected = this.selected.size;
-      this.setStatus(`已选 ${this.selected.size}/${MAX_COLS}`);
+      this.setStatus(`已选 ${this.selected.size}/${cap}`);
     }
   }
 }

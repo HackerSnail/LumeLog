@@ -119,6 +119,7 @@ export class Mf4Chart {
   private readonly overlayCtx: CanvasRenderingContext2D | null;
   private data: Mf4Series | null = null;
   private full: Win = { start: 0, end: 1 };
+  private hasFull = false;
   private win: Win = { start: 0, end: 1 };
   private windowCb: ((w: Win) => void) | null = null;
   private hoverT: number | null = null;
@@ -134,7 +135,8 @@ export class Mf4Chart {
     const plotW = Math.max(1, rect.width - PAD.left - PAD.right);
     const frac = Math.min(1, Math.max(0, (e.clientX - rect.left - PAD.left) / plotW));
     const anchor = this.win.start + frac * (this.win.end - this.win.start);
-    const factor = Math.pow(1.25, -e.deltaY / 100);
+    // Wheel up (deltaY < 0) zooms IN, matching browsers/maps/spreadsheets.
+    const factor = Math.pow(1.25, e.deltaY / 100);
     this.setWindow(zoomAt(this.win, factor, anchor, this.full));
     this.scheduleEmit();
   };
@@ -161,6 +163,10 @@ export class Mf4Chart {
   };
 
   private readonly onUp = (): void => {
+    this.dragging = null;
+  };
+
+  private readonly onCancel = (): void => {
     this.dragging = null;
   };
 
@@ -191,6 +197,8 @@ export class Mf4Chart {
     this.overlay.addEventListener("pointerdown", this.onDown);
     this.overlay.addEventListener("pointermove", this.onMove);
     this.overlay.addEventListener("pointerup", this.onUp);
+    this.overlay.addEventListener("pointercancel", this.onCancel);
+    this.overlay.addEventListener("lostpointercapture", this.onCancel);
     this.overlay.addEventListener("pointerleave", this.onLeave);
     this.overlay.addEventListener("dblclick", this.onDbl);
     this.resizeObserver =
@@ -199,10 +207,27 @@ export class Mf4Chart {
     this.resize();
   }
 
+  /** Replace the data WITHOUT snapping the view: responses to a zoom request
+   *  cover only that request's range, so they must never redefine the file's
+   *  full extent or reset the window. The very first response does define the
+   *  extent, unless the caller already set it via `setFullRange`. */
   setData(data: Mf4Series): void {
+    if (!this.hasFull) {
+      this.setFullRange({
+        start: data.fromSec,
+        end: data.toSec > data.fromSec ? data.toSec : data.fromSec + 1,
+      });
+    }
     this.data = data;
-    this.full = { start: data.fromSec, end: data.toSec > data.fromSec ? data.toSec : data.fromSec + 1 };
-    this.win = { ...this.full };
+    this.win = clampWindow(this.win, this.full);
+    this.scheduleDraw();
+  }
+
+  /** Set the file's full extent once (from the first, windowless response). */
+  setFullRange(full: Win): void {
+    this.hasFull = true;
+    this.full = full.end > full.start ? { ...full } : { start: full.start, end: full.start + 1 };
+    this.win = clampWindow(this.win, this.full);
     this.scheduleDraw();
   }
 
@@ -229,6 +254,8 @@ export class Mf4Chart {
     this.overlay.removeEventListener("pointerdown", this.onDown);
     this.overlay.removeEventListener("pointermove", this.onMove);
     this.overlay.removeEventListener("pointerup", this.onUp);
+    this.overlay.removeEventListener("pointercancel", this.onCancel);
+    this.overlay.removeEventListener("lostpointercapture", this.onCancel);
     this.overlay.removeEventListener("pointerleave", this.onLeave);
     this.overlay.removeEventListener("dblclick", this.onDbl);
     this.resizeObserver?.disconnect();
@@ -328,23 +355,35 @@ export class Mf4Chart {
       for (let i = 0; i < n; i += 1) {
         const mid = this.data!.times[i];
         if (mid === null || mid === undefined) continue;
+        if (mid < this.win.start || mid > this.win.end) continue; // outside the view
+        // A bucket with no finite value is a gap, not a spike: break the line.
+        if (
+          (s.min[i] === null || s.min[i] === undefined) &&
+          (s.max[i] === null || s.max[i] === undefined)
+        ) {
+          prevX = Number.NaN;
+          prevY = Number.NaN;
+          continue;
+        }
         const x = xOf(mid, this.win, p.left, p.width);
-        const tiny = yOf(s.max[i] ?? s.min[i] ?? lo, lo, hi, p.top, p.height);
-        const high = yOf(s.min[i] ?? s.max[i] ?? hi, lo, hi, p.top, p.height);
+        const hiVal = s.max[i] ?? s.min[i]!;
+        const loVal = s.min[i] ?? s.max[i]!;
+        const top = yOf(hiVal, lo, hi, p.top, p.height);
+        const bottom = yOf(loVal, lo, hi, p.top, p.height);
         ctx.beginPath();
-        ctx.moveTo(x, high);
-        ctx.lineTo(x, tiny);
+        ctx.moveTo(x, bottom);
+        ctx.lineTo(x, top);
         ctx.stroke();
         if (Number.isFinite(prevX)) {
           ctx.globalAlpha = 0.35;
           ctx.beginPath();
           ctx.moveTo(prevX, prevY);
-          ctx.lineTo(x, tiny);
+          ctx.lineTo(x, top);
           ctx.stroke();
           ctx.globalAlpha = 0.9;
         }
         prevX = x;
-        prevY = tiny;
+        prevY = top;
       }
     });
     ctx.globalAlpha = 1;

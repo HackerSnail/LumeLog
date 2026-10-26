@@ -26,6 +26,12 @@
 **Why:** 波形窗口独立（缩放不惊动分页），仅在「应用到表格」时同步；首帧无窗口时由后端解析全范围，避免前端猜 0/0。
 **验证:** `npm test` 114 pass（18 文件）+ `run build` 通过（49 modules）。
 
+### 终审修复波（0 Critical / 5 Important / 5 Minor）
+**Files:** `mf4-chart.ts`（**I1** `setData` 不再重定义 `full`/重置窗口：首帧才定全范围，「响应只换数据」——修正首次缩放后无法再缩小/平移/双击复位；`setFullRange` 独立；底图按 `data.from/from.to` 裁剪并把 `min/max` 均缺的桶断线（不再画成`lo/hi` 满幅假尖峰）；**I3** 滚轮方向改为“向上=放大”（`1.25^(deltaY/100)`）；**I2 配套** 新增 `pointercancel`/`lostpointercapture` 复位拖拽）；`mf4-ui.ts`（**I2** 切波形时把文本/未知/时间主通道从选择中剔掉并重新渲染，`emitSeries` 再次过滤防混选；状态行在波形模式显示 `已选 N/8`；tab 移到工具栏上方，两种模式不跳动）；`mf4.rs`（**I4** 仅在 `from/to` 缺一才扫主通道首末；**I5** 主通道与选择锁定到同一 `channel_group_index`（对齐假定与注释一致）；**I6** 窗口倒置/空 → 返回空桶而非虚构 span）；`styles.css`（`#mf4-dock{overflow:hidden}`、`.mf4-chart(-host){min-height:0}`）。新增前端测 2（缩放响应不改变全范围 + dblclick 仍回全范围；表格选文本通道→切波形自动剔除），Rust 12 测不回归。
+**Why:** I1 是导航性失效（只能单向放大）；缺值桶会被画成满幅假噪声；混选文本会令整次波形请求 `invalid_argument`。
+**Parked:** 图例/点击隐藏序列、波形页的 `⚠` 与“无样本”文案、tooltip 用桶首值而标题是光标时刻（最多差一桶）、`buckets` 固定 2000 而非按像素宽、resize 后不重采样。
+**验证:** `cargo test -p lumelog-app mf4::` 12 pass + `clippy --workspace --all-targets -- -D warnings` 净；`npm test` 115 pass（18 文件）+ `run build` 通过。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。

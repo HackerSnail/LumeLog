@@ -60,11 +60,27 @@ describe("Mf4Chart", () => {
     await wait(90);
     expect(seen.length).toBe(1); // two wheels inside one 60ms window
     const zoomed = seen[0];
-    expect(zoomed.end - zoomed.start).toBeCloseTo(2 * 1.25 * 1.25, 6);
+    expect(zoomed.end - zoomed.start).toBeCloseTo(2 / 1.25 / 1.25, 6);
 
     overlay.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     await wait(90);
     expect(seen[seen.length - 1]).toEqual({ start: 0, end: 10 });
+    chart.destroy();
+  });
+
+  it("keeps the full extent when a zoom response narrows the data", async () => {
+    const { host, chart } = mount();
+    const seen: Win[] = [];
+    chart.onWindowChange((w) => seen.push(w));
+    chart.setFullRange({ start: 0, end: 100 });
+    chart.setData(data());
+    chart.setWindow({ start: 40, end: 60 });
+    // A response covering only the requested window must not redefine `full`.
+    chart.setData({ ...data(), fromSec: 40, toSec: 60 });
+    const overlay = host.querySelector<HTMLCanvasElement>(".mf4-chart-overlay")!;
+    overlay.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    await wait(90);
+    expect(seen[seen.length - 1]).toEqual({ start: 0, end: 100 });
     chart.destroy();
   });
 

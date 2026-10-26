@@ -116,11 +116,14 @@ describe("Mf4View", () => {
       onClose: () => {},
     });
     host.querySelectorAll<HTMLInputElement>(".mf4-channel input")[0].click();
-    expect(queries.length).toBe(1);
+    // Selecting a text column is allowed in table mode …
+    host.querySelectorAll<HTMLInputElement>(".mf4-channel input")[3].click();
+    expect(queries.length).toBe(2);
 
     const tabs = host.querySelectorAll<HTMLButtonElement>(".mf4-tab");
     tabs[1].click();
     expect(series.length).toBe(1);
+    // … but the chart must drop it instead of failing the whole request.
     expect(series[0].channels).toEqual([1]);
     expect(series[0].fromSec).toBeNull();
     expect(series[0].toSec).toBeNull(); // null window = resolve full extent
