@@ -7,6 +7,7 @@ mod can_export;
 mod commands;
 mod dto;
 mod keymap;
+mod mf4;
 mod recovery;
 mod script;
 mod state;
@@ -17,6 +18,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state::AppDocs::default())
+        .manage(mf4::Mf4Sessions::default())
         .manage(watch::AppWatch::default())
         .invoke_handler(tauri::generate_handler![
             commands::app_ping,
@@ -31,6 +33,9 @@ pub fn run() {
             commands::keymap_get,
             commands::keymap_set,
             commands::keymap_reset,
+            commands::mf4_open,
+            commands::mf4_close,
+            commands::mf4_channels,
             commands::script_list,
             commands::script_read,
             commands::script_write,

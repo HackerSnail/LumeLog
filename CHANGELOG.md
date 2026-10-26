@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
+
+**依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。
+
+### Task 1. MSRV 1.89 + `falcon_mdf` + MF4 会话/通道
+**Files:** Modify `Cargo.toml`/`app/src-tauri/Cargo.toml`（`rust-version 1.87→1.89`；`falcon_mdf = { version = "0.7", default-features = false, features = ["mmap"] }`）、`Cargo.lock`、`.github/workflows/ci.yml`（工具链注释）；Create `app/src-tauri/src/mf4.rs`（`Mf4Sessions`（id→会话，上限 4）、`open_session/close_session/list_channels`、`Mf4InfoJson/Mf4ChannelJson/Mf4ChannelsPage/Mf4Kind`、错误分类 `mf4_not_mf4/mf4_encrypted/mf4_unsupported/io`、`kind_of` 按 `data_type` Debug 字串判定）、`commands.rs`（3 个 `#[tauri::command]`）、`lib.rs`（`mod mf4` + `manage` + 注册）；`MAX_COLUMNS/MAX_LIMIT/session.file/path` 临时 `#[allow(dead_code)]`（T2/T3 使用后剥）。
+**Why:** MF4 不能走文本/行索引链路 → 独立会话 + dock；`falcon_mdf` 类型只出现在 `mf4.rs`（可换库）；只开 `mmap` 避免 rayon/arrow 依赖面；打开失败一律归为结构错误（非真 I/O），避免把“不是 MF4”误报为 io。
+**验证:** `cargo test -p lumelog-app mf4::` 3 pass（夹具用 `Mf4Writer` 现写 MF4：计数/主通道/名称、大小写不敏感搜索+分页+越界空页、非 MF4 → `mf4_not_mf4`、会话上限 4 → `invalid_argument`、close 幂等、未知会话 `unknown_mf4`）；`cargo test --workspace`（app 108 / core 89 / can 23）+ `cargo clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

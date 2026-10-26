@@ -27,6 +27,7 @@ use crate::script::{
     delete_script_in, list_scripts_in, read_script_in, run_script, scripts_dir, write_script_in,
     ScriptConsole, ScriptStats, ScriptProgress,
 };
+use crate::mf4::{Mf4ChannelsPage, Mf4InfoJson, Mf4Sessions};
 use crate::watch::{AppWatch, ExternalEvent, WatchStatus};
 use crate::state::AppDocs;
 
@@ -1560,6 +1561,30 @@ mod tail_tests {
         let state = AppDocs::default();
         assert_eq!(tail_append(&state, 9).unwrap_err().code, "unknown_doc");
     }
+}
+
+// ---- MF4 measurement sessions (Roadmap-4 increment 1) ----------------------
+
+#[tauri::command]
+pub fn mf4_open(state: tauri::State<'_, Mf4Sessions>, path: String) -> Result<Mf4InfoJson, IpcError> {
+    crate::mf4::open_session(&state, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub fn mf4_close(state: tauri::State<'_, Mf4Sessions>, id: u64) -> Result<(), IpcError> {
+    crate::mf4::close_session(&state, id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn mf4_channels(
+    state: tauri::State<'_, Mf4Sessions>,
+    id: u64,
+    query: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Mf4ChannelsPage, IpcError> {
+    crate::mf4::list_channels(&state, id, query.as_deref(), limit.unwrap_or(500), offset.unwrap_or(0))
 }
 
 // ---- scripts (Roadmap-3) ---------------------------------------------------
