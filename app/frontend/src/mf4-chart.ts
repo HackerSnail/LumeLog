@@ -115,6 +115,7 @@ export class Mf4Chart {
   private readonly base: HTMLCanvasElement;
   private readonly overlay: HTMLCanvasElement;
   private readonly tooltip: HTMLDivElement;
+  private readonly legend: HTMLDivElement;
   private readonly baseCtx: CanvasRenderingContext2D | null;
   private readonly overlayCtx: CanvasRenderingContext2D | null;
   private data: Mf4Series | null = null;
@@ -122,6 +123,9 @@ export class Mf4Chart {
   private hasFull = false;
   private win: Win = { start: 0, end: 1 };
   private windowCb: ((w: Win) => void) | null = null;
+  private resizeCb: (() => void) | null = null;
+  private readonly hidden = new Set<number>();
+  private lastWidth = 0;
   private hoverT: number | null = null;
   private busy = false;
   private dragging: { x: number; from: Win } | null = null;
@@ -190,7 +194,9 @@ export class Mf4Chart {
     this.tooltip = document.createElement("div");
     this.tooltip.className = "mf4-chart-tip";
     this.tooltip.style.display = "none";
-    host.append(this.base, this.overlay, this.tooltip);
+    this.legend = document.createElement("div");
+    this.legend.className = "mf4-chart-legend";
+    host.append(this.base, this.overlay, this.tooltip, this.legend);
     this.baseCtx = this.base.getContext("2d");
     this.overlayCtx = this.overlay.getContext("2d");
     this.overlay.addEventListener("wheel", this.onWheel, { passive: false });
@@ -220,6 +226,7 @@ export class Mf4Chart {
     }
     this.data = data;
     this.win = clampWindow(this.win, this.full);
+    this.renderLegend();
     this.scheduleDraw();
   }
 
@@ -247,6 +254,11 @@ export class Mf4Chart {
 
   onWindowChange(cb: (w: Win) => void): void {
     this.windowCb = cb;
+  }
+
+  /** Fired when the canvas width changes enough to warrant different bucketing. */
+  onResize(cb: () => void): void {
+    this.resizeCb = cb;
   }
 
   destroy(): void {
@@ -286,6 +298,34 @@ export class Mf4Chart {
     this.baseCtx?.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.overlayCtx?.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.scheduleDraw();
+    // A >10% width change means the previous bucket budget no longer matches
+    // the pixels; ask the host to re-query at the new resolution.
+    const changed = this.lastWidth > 0 && Math.abs(w - this.lastWidth) / this.lastWidth > 0.1;
+    this.lastWidth = w;
+    if (changed) this.resizeCb?.();
+  }
+
+  /** Legend doubles as the show/hide control (per series, view-only). */
+  private renderLegend(): void {
+    this.legend.textContent = "";
+    if (!this.data) return;
+    this.data.series.forEach((s, i) => {
+      const item = document.createElement("button");
+      item.className = "mf4-chart-legend-item";
+      item.classList.toggle("hidden", this.hidden.has(s.index));
+      const dot = document.createElement("span");
+      dot.className = "mf4-chart-dot";
+      dot.style.background = PALETTE[i % PALETTE.length];
+      item.append(dot, document.createTextNode(s.degraded ? `⚠ ${s.name}` : s.name));
+      item.title = s.degraded ? "该序列无可绘制数据" : "点击显示/隐藏";
+      item.addEventListener("click", () => {
+        if (this.hidden.has(s.index)) this.hidden.delete(s.index);
+        else this.hidden.add(s.index);
+        item.classList.toggle("hidden", this.hidden.has(s.index));
+        this.scheduleDraw();
+      });
+      this.legend.append(item);
+    });
   }
 
   private scheduleDraw(): void {
@@ -338,7 +378,9 @@ export class Mf4Chart {
     }
     if (!this.data) return;
     const n = this.data.times.length;
+    let drawnSeries = 0;
     this.data.series.forEach((s, si) => {
+      if (this.hidden.has(s.index)) return;
       let lo = Infinity;
       let hi = -Infinity;
       for (let i = 0; i < n; i += 1) {
@@ -348,6 +390,7 @@ export class Mf4Chart {
         if (bucketHi !== null && bucketHi !== undefined) hi = Math.max(hi, bucketHi);
       }
       if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+      drawnSeries += 1;
       ctx.strokeStyle = PALETTE[si % PALETTE.length];
       ctx.globalAlpha = 0.9;
       let prevX = Number.NaN;
@@ -387,6 +430,15 @@ export class Mf4Chart {
       }
     });
     ctx.globalAlpha = 1;
+    if (drawnSeries === 0) {
+      const allDegraded = this.data.series.every((s) => s.degraded);
+      ctx.fillStyle = muted;
+      ctx.fillText(
+        allDegraded ? "无可绘制数据" : "该区间无样本",
+        p.left + p.width / 2 - 32,
+        p.top + p.height / 2,
+      );
+    }
   }
 
   private drawOverlay(): void {
@@ -407,9 +459,15 @@ export class Mf4Chart {
     ctx.stroke();
     ctx.setLineDash([]);
     const b = nearestBucket(this.data.times, this.hoverT);
-    const lines = [`t=${formatSeconds(this.hoverT)}`];
+    const bucketTime = b >= 0 ? this.data.times[b] : null;
+    const lines = [
+      bucketTime === null || bucketTime === undefined
+        ? `t=${formatSeconds(this.hoverT)}`
+        : `桶 t=${formatSeconds(bucketTime)}`,
+    ];
     if (b >= 0) {
       for (const s of this.data.series) {
+        if (this.hidden.has(s.index)) continue;
         const v = s.first[b];
         lines.push(`${s.name}${s.unit ? ` (${s.unit})` : ""}: ${v === null || v === undefined ? "—" : v.toPrecision(6)}`);
       }

@@ -32,6 +32,11 @@
 **Parked:** 图例/点击隐藏序列、波形页的 `⚠` 与“无样本”文案、tooltip 用桶首值而标题是光标时刻（最多差一桶）、`buckets` 固定 2000 而非按像素宽、resize 后不重采样。
 **验证:** `cargo test -p lumelog-app mf4::` 12 pass + `clippy --workspace --all-targets -- -D warnings` 净；`npm test` 115 pass（18 文件）+ `run build` 通过。
 
+### Parked 清理（波形 5 项）
+**Files:** `app/frontend/src/mf4-chart.ts`（**M1** 图例：每序列颜色点 + 名称，点击显隐（`hidden` 集合、断线重绘）；`degraded` 序列前缀 `⚠` 与 tooltip 说明；**M2** 底图在“无可见有限值”时居中显示「无可绘制数据」（全 `degraded`）或「该区间无样本」；**M3** tooltip 标题改为**桶时间**（与实际取值 `first[b]` 同源，不再“光标时刻 vs 桶首值”错位）；隐藏序列不进 tooltip；**M4/M5** 新增 `onResize`（宽度变化 >10% 才触发）、`destroy` 清防抖定时器）；`mf4-ui.ts`（`seriesBuckets()` = `clamp(宽 × dpr × 2, 200, 4000)`；`queueSeries()` 150ms 防抖用于 resize/tab 切换；`destroy` 清定时器）；`styles.css`（`.mf4-chart-legend*`、色点、隐藏态划线）。
+**Why:** 图例是 spec §4 明确项；`⚠`/「无样本」是 spec §5 要求的状态面；tooltip 时间必须与取值同源；桶数按像素宽才能兼顾清晰度与体积；窗口缩放后旧桶宽已失真。
+**验证:** `npm test` 116 pass（18 文件，`mf4-chart.dom` +1 图例显隐、`mf4-ui` 增加 buckets 区间断言）+ `run build` 通过；Rust 侧本轮无改动（mf4 12 测 + clippy 上轮已验证）。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。

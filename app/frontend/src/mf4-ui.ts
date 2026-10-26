@@ -87,9 +87,11 @@ export class Mf4View {
   private readonly tabChart: HTMLButtonElement;
   private readonly chartWrap: HTMLElement;
   private readonly chart: Mf4Chart;
+  private readonly chartHostEl: HTMLElement;
   private readonly chartWindowEl: HTMLElement;
   private chartWindow: Win | null = null;
   private fullWin: Win | null = null;
+  private seriesTimer: number | null = null;
   private readonly tableWrap: HTMLElement;
 
   constructor(host: HTMLElement, opts: Mf4UiOpts) {
@@ -244,12 +246,14 @@ export class Mf4View {
     });
     chartBar.append(this.chartWindowEl, applyBtn, resetBtn);
     const chartHost = el("div", "mf4-chart-host");
+    this.chartHostEl = chartHost;
     this.chart = new Mf4Chart(chartHost);
     this.chart.onWindowChange((w) => {
       this.chartWindow = w;
       this.syncChartWindowLabel();
       this.emitSeries();
     });
+    this.chart.onResize(() => this.queueSeries());
     this.chartWrap.append(chartBar, chartHost);
     host.append(tabs, this.chartWrap);
     host.insertBefore(tabs, bar); // tabs stay above the toolbar in both modes
@@ -308,6 +312,7 @@ export class Mf4View {
 
   /** Detach chart listeners before the dock is cleared. */
   destroy(): void {
+    if (this.seriesTimer !== null) window.clearTimeout(this.seriesTimer);
     this.chart.destroy();
   }
 
@@ -360,8 +365,24 @@ export class Mf4View {
       // resolve that record stream's extent (null window).
       fromSec: win ? win.start : numOrNull(this.fromInput.value),
       toSec: win ? win.end : numOrNull(this.toInput.value),
-      buckets: 2000,
+      buckets: this.seriesBuckets(),
     });
+  }
+
+  /** Two buckets per device pixel, kept inside the backend's limits. */
+  private seriesBuckets(): number {
+    const width = this.chartHostEl.clientWidth || 600;
+    const dpr = window.devicePixelRatio || 1;
+    return Math.min(4000, Math.max(200, Math.floor(width * dpr * 2)));
+  }
+
+  /** Resizes and tab flips can burst; coalesce them into one request. */
+  private queueSeries(): void {
+    if (this.seriesTimer !== null) return;
+    this.seriesTimer = window.setTimeout(() => {
+      this.seriesTimer = null;
+      this.emitSeries();
+    }, 150);
   }
 
   /** Copy the chart window into the table inputs and reload that page. */

@@ -84,6 +84,19 @@ describe("Mf4Chart", () => {
     chart.destroy();
   });
 
+  it("renders a legend that hides a series on click", async () => {
+    const { host, chart } = mount();
+    chart.setData(data());
+    await wait(20);
+    const item = host.querySelector<HTMLButtonElement>(".mf4-chart-legend-item")!;
+    expect(item.textContent).toContain("Speed");
+    item.click();
+    expect(item.classList.contains("hidden")).toBe(true);
+    item.click();
+    expect(item.classList.contains("hidden")).toBe(false);
+    chart.destroy();
+  });
+
   it("stops reacting after destroy", async () => {
     const { host, chart } = mount();
     const cb = vi.fn();

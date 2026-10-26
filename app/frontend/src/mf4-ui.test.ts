@@ -127,6 +127,8 @@ describe("Mf4View", () => {
     expect(series[0].channels).toEqual([1]);
     expect(series[0].fromSec).toBeNull();
     expect(series[0].toSec).toBeNull(); // null window = resolve full extent
+    expect(series[0].buckets).toBeGreaterThanOrEqual(200);
+    expect(series[0].buckets).toBeLessThanOrEqual(4000);
 
     view.setSeries({
       hasTimeAxis: true,

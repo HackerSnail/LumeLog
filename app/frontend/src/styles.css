@@ -671,6 +671,37 @@ html.has-custom-titlebar .win-btns {
   font-size: 12px;
   border-radius: 4px;
 }
+.mf4-chart-legend {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 70%;
+  z-index: 1;
+}
+.mf4-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mf4-chart-legend-item.hidden {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+.mf4-chart-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
 .mf4-tabs {
   display: flex;
   gap: 4px;
