@@ -55,6 +55,7 @@ import {
   mf4Summary,
   mf4Records,
   mf4ExportCsv,
+  mf4ExportCancel,
   type ExternalEvent,
   IpcError,
   type DocInfo,
@@ -569,6 +570,7 @@ let mf4SessionId: number | null = null;
 let mf4Path = "";
 let mf4Token = 0;
 let mf4Opening = false;
+let mf4ExportReq: number | null = null;
 
 function buildMf4Dock(): HTMLElement {
   if (mf4DockEl) return mf4DockEl;
@@ -609,6 +611,12 @@ async function openMf4File(): Promise<void> {
       channels: channels.items,
       onQuery: (q) => void runMf4Query(q),
       onExport: (a) => void exportMf4Csv(info.id, a),
+      onCancelExport: () => {
+        if (mf4ExportReq !== null) {
+          void mf4ExportCancel(mf4ExportReq).catch(() => {});
+          mf4View?.setStatus("取消导出…");
+        }
+      },
       onClose: () => closeMf4(),
     });
     const loaded = channels.items.length;
@@ -657,8 +665,9 @@ async function exportMf4Csv(
   if (typeof dest !== "string") return;
   mf4View?.setBusy(true);
   mf4View?.setStatus("导出中…");
+  mf4View?.setExporting(true);
   try {
-    await mf4ExportCsv({
+    mf4ExportReq = await mf4ExportCsv({
       id,
       channels: a.channels,
       fromSec: a.fromSec,
@@ -666,6 +675,8 @@ async function exportMf4Csv(
       targetPath: dest,
       onProgress: (p) => mf4View?.setStatus(`导出 ${p.written} 行…`),
       onDone: (s) => {
+        mf4ExportReq = null;
+        mf4View?.setExporting(false);
         mf4View?.setStatus(
           s.errored ? "导出失败" : s.cancelled ? "已取消导出" : `已导出 ${s.written} 行`,
         );
@@ -673,6 +684,8 @@ async function exportMf4Csv(
       },
     });
   } catch (err) {
+    mf4ExportReq = null;
+    mf4View?.setExporting(false);
     reportError(err);
     mf4View?.setBusy(false);
     mf4View?.setStatus("导出失败");
@@ -681,6 +694,10 @@ async function exportMf4Csv(
 
 function closeMf4(): void {
   mf4Token++;
+  if (mf4ExportReq !== null) {
+    void mf4ExportCancel(mf4ExportReq).catch(() => {});
+    mf4ExportReq = null;
+  }
   if (mf4SessionId !== null) {
     void mf4Close(mf4SessionId).catch(() => {});
     mf4SessionId = null;

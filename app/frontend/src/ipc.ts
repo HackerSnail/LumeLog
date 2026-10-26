@@ -752,7 +752,7 @@ export interface Mf4Summary {
   dataGroups: number;
   events: number;
   attachments: number;
-  groups: { index: number; channels: number }[];
+  groups: { index: number; dataGroup: number; channels: number }[];
 }
 
 export interface Mf4ExportStats {

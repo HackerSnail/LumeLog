@@ -39,6 +39,12 @@
 **Parked:** Minor 的 `Bytes/Complex → degraded`、导出 UI 取消按钮、`summary` 组合并同号组、无时间轴表头/行数一致性、跨分块降序/无时间轴/`busy` 点复选框等测试（详见 `docs/reviews/2026-10-26-mf4-review-findings.md`）。
 **验证:** `cargo test -p lumelog-app mf4::` 9 pass；`cargo test --workspace`（app 114 / core 89 / can 23）、`cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 102 pass；`run build` 通过。
 
+### Parked 清理（终审 Minor 全部消化）
+**Files:** `app/src-tauri/src/mf4.rs`（**M1** `cell_of` 返回 `Option`，`Bytes/VarBytes/Complex/Array` 等无单元格类型时 `cells_for_rows` 置 `degraded=true`（整列 `—` + `⚠`）；**M3** `Mf4GroupJson` 增 `dataGroup`，`summary` 以 `(data_group, group)` 为键并按序排序；**M4** 无时间轴导出改以“文件第一个通道”为行数基准（与表格一致），CSV 表头切为 `index`；新增 1 测（VLSD bytes → `degraded` + 全 `null`））；`ipc.ts`（`Mf4Summary.groups` 增 `dataGroup`）；`mf4-ui.ts`（工具栏新增「取消导出」按钮，`setExporting` 才武装；`summary` 类型同步 `dataGroup`）；`main.ts`（记录 `mf4ExportReq`，`onDone`/错误/`closeMf4` 都会清并/或发 `mf4ExportCancel`；新增 1 jsdom 测：`busy` 时不发查询 + 取消按钮只在导出时可用）。
+**Why:** 无单元格类型的列原先整列空且无提示；导出与表格在无时间轴文件上可能行数不一致；取消导出是 spec §4 明确项。
+**剩余（需真实样本/大夹具，单独立项）:** 跨 4 MiB 分块降序回归、无时间轴夹具、>`2000` 通道搜索走后端分页。
+**验证:** `cargo test -p lumelog-app mf4::` 10 pass，`cargo clippy --workspace --all-targets -- -D warnings` 净；`npm test` 103 pass（16 文件）+ `run build` 通过。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

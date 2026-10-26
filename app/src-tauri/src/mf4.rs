@@ -204,6 +204,7 @@ fn cells_for_rows(file: &Mf4File, ch: &Channel, rows: &[usize]) -> (Vec<Mf4CellJ
     // MDF stores booleans as integers; report them as `Bool` so the UI can render
     // a tick instead of 0/1.
     let as_bool = kind_of(ch) == Mf4Kind::Bool;
+    let mut unsupported = false;
     for chunk in chunks {
         let chunk = match chunk {
             Ok(c) => c,
@@ -216,13 +217,18 @@ fn cells_for_rows(file: &Mf4File, ch: &Channel, rows: &[usize]) -> (Vec<Mf4CellJ
         };
         while cursor < wanted && rows[cursor] < base + len {
             let local = rows[cursor] - base;
-            out[cursor] = {
-                let cell = cell_of(&vals, local, chunk.is_valid(local));
-                match (as_bool, cell) {
-                    (true, Mf4CellJson::Number(v)) => Mf4CellJson::Bool(v != 0.0),
-                    (_, other) => other,
+            match cell_of(&vals, local, chunk.is_valid(local)) {
+                Some(cell) => {
+                    out[cursor] = match (as_bool, cell) {
+                        (true, Mf4CellJson::Number(v)) => Mf4CellJson::Bool(v != 0.0),
+                        (_, other) => other,
+                    };
                 }
-            };
+                None => {
+                    unsupported = true;
+                    out[cursor] = Mf4CellJson::Null;
+                }
+            }
             cursor += 1;
         }
         base += len;
@@ -230,12 +236,12 @@ fn cells_for_rows(file: &Mf4File, ch: &Channel, rows: &[usize]) -> (Vec<Mf4CellJ
             break;
         }
     }
-    (out, false)
+    (out, unsupported)
 }
 
-fn cell_of(values: &SignalValues, local: usize, valid: bool) -> Mf4CellJson {
+fn cell_of(values: &SignalValues, local: usize, valid: bool) -> Option<Mf4CellJson> {
     if !valid {
-        return Mf4CellJson::Null;
+        return Some(Mf4CellJson::Null);
     }
     macro_rules! num {
         ($v:expr, $i:expr) => {
@@ -244,7 +250,7 @@ fn cell_of(values: &SignalValues, local: usize, valid: bool) -> Mf4CellJson {
                 .unwrap_or(Mf4CellJson::Null)
         };
     }
-    match values {
+    Some(match values {
         SignalValues::U8(v) => num!(v, local),
         SignalValues::U16(v) => num!(v, local),
         SignalValues::U32(v) => num!(v, local),
@@ -260,9 +266,10 @@ fn cell_of(values: &SignalValues, local: usize, valid: bool) -> Mf4CellJson {
             .cloned()
             .map(Mf4CellJson::Text)
             .unwrap_or(Mf4CellJson::Null),
-        // Anything else (bool, byte arrays, ratios, …) has no cell kind yet.
-        _ => Mf4CellJson::Null,
-    }
+        // Byte arrays, complex numbers, CANopen dates …: no cell kind yet, and
+        // the caller must flag the whole column as degraded instead of blank.
+        _ => return None,
+    })
 }
 
 /// Absolute sample rows inside `[from,to]` seconds, ordered by time and paged.
@@ -535,7 +542,10 @@ pub(crate) fn list_channels(
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Mf4GroupJson {
+    /// Channel-group index (unique only within its data group).
     pub index: u32,
+    /// Data-group index; `(data_group, index)` is the record stream identity.
+    pub data_group: u32,
     pub channels: u32,
 }
 
@@ -570,15 +580,19 @@ pub(crate) fn summary(sessions: &Mf4Sessions, id: u64) -> Result<Mf4SummaryJson,
     let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
     let guard = session.lock().unwrap_or_else(|p| p.into_inner());
     let file = guard.file.lock().unwrap_or_else(|p| p.into_inner());
-    let mut groups: HashMap<u32, u32> = HashMap::new();
+    let mut groups: HashMap<(u32, u32), u32> = HashMap::new();
     for (meta, _) in &guard.channels {
-        *groups.entry(meta.group).or_insert(0) += 1;
+        *groups.entry((meta.data_group, meta.group)).or_insert(0) += 1;
     }
     let mut groups: Vec<Mf4GroupJson> = groups
         .into_iter()
-        .map(|(index, channels)| Mf4GroupJson { index, channels })
+        .map(|((data_group, index), channels)| Mf4GroupJson {
+            index,
+            data_group,
+            channels,
+        })
         .collect();
-    groups.sort_by_key(|g| g.index);
+    groups.sort_by_key(|g| (g.data_group, g.index));
     Ok(Mf4SummaryJson {
         version: format!("{}", file.version()),
         path: guard.path.to_string_lossy().into_owned(),
@@ -607,8 +621,8 @@ fn csv_cell(c: &Mf4CellJson) -> String {
     }
 }
 
-fn csv_header(columns: &[(Mf4ChannelJson, Channel)]) -> String {
-    let mut out = String::from("timeMs");
+fn csv_header(columns: &[(Mf4ChannelJson, Channel)], has_axis: bool) -> String {
+    let mut out = String::from(if has_axis { "timeMs" } else { "index" });
     for (meta, _) in columns {
         out.push(',');
         if meta.unit.is_empty() {
@@ -701,7 +715,10 @@ pub(crate) fn export_csv(
         }
     };
     let mut writer = BufWriter::new(file);
-    if writer.write_all(csv_header(&picked).as_bytes()).is_err() {
+    if writer
+        .write_all(csv_header(&picked, master.is_some()).as_bytes())
+        .is_err()
+    {
         let _ = std::fs::remove_file(&tmp);
         stats.errored = true;
         return stats;
@@ -787,8 +804,26 @@ pub(crate) fn export_csv(
         } else {
             io_failed = true;
         }
-    } else if let Some((_, first)) = picked.first() {
-        let len = inner.signal(first).map(|s| s.len()).unwrap_or(0);
+    } else {
+        // No time axis: row count comes from the same channel the table pages by
+        // (the file's first channel), so export and table agree.
+        let mut len: usize = 0;
+        if let Some(first) = inner.channels().next() {
+            match inner.signal_chunks(first) {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        match chunk {
+                            Ok(c) => len += c.len(),
+                            Err(_) => {
+                                io_failed = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(_) => io_failed = true,
+            }
+        }
         for row in 0..len {
             if cancel() {
                 stats.cancelled = true;
@@ -935,6 +970,27 @@ mod tests {
             cancel_target.exists(),
             "cancelled run keeps the header prefix"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unsupported_sample_type_marks_column_degraded() {
+        let dir = std::env::temp_dir().join(format!("lumelog-mf4-deg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blob.mf4");
+        let mut w = Mf4Writer::new();
+        {
+            let g = w.add_group(&[0.0, 1.0]).unwrap();
+            g.add_channel_vlsd_bytes("Blob", "", &[&[1u8, 2], &[3]])
+                .unwrap();
+        }
+        w.write_to_file(&path).unwrap();
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let blob = channel_id(&sessions, info.id, "Blob");
+        let rows = records(&sessions, info.id, &[blob], None, None, "timeAsc", 10, 0).unwrap();
+        assert!(rows.columns[0].degraded, "array channel has no cell kind");
+        assert!(rows.columns[0].values.iter().all(|c| matches!(c, Mf4CellJson::Null)));
         std::fs::remove_dir_all(&dir).ok();
     }
 

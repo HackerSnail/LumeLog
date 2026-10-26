@@ -16,10 +16,15 @@ export interface Mf4Query {
 
 export interface Mf4UiOpts {
   info: { version: string; channelCount: number; dataGroups: number; comment: string };
-  summary: { events: number; attachments: number; groups: { index: number; channels: number }[] } | null;
+  summary: {
+    events: number;
+    attachments: number;
+    groups: { index: number; dataGroup: number; channels: number }[];
+  } | null;
   channels: Mf4Channel[];
   onQuery: (q: Mf4Query) => void;
   onExport: (a: { channels: number[]; fromSec: number | null; toSec: number | null }) => void;
+  onCancelExport?: () => void;
   onClose: () => void;
 }
 
@@ -58,6 +63,7 @@ export class Mf4View {
   private readonly nextBtn: HTMLButtonElement;
   private readonly pageLabel: HTMLElement;
   private readonly exportBtn: HTMLButtonElement;
+  private readonly cancelExportBtn: HTMLButtonElement;
   private readonly searchInput: HTMLInputElement;
   private readonly selected = new Set<number>();
   private limit = 500;
@@ -174,6 +180,14 @@ export class Mf4View {
       });
     });
     bar.append(this.exportBtn);
+    this.cancelExportBtn = el("button", "mf4-cancel-export", "取消导出");
+    this.cancelExportBtn.disabled = true;
+    this.cancelExportBtn.addEventListener("click", () => {
+      if (this.cancelExportBtn.disabled) return;
+      this.cancelExportBtn.disabled = true;
+      this.opts.onCancelExport?.();
+    });
+    bar.append(this.cancelExportBtn);
 
     this.statusEl = el("span", "mf4-status", "");
 
@@ -213,6 +227,11 @@ export class Mf4View {
   setBusy(busy: boolean): void {
     this.busy = busy;
     this.syncButtons();
+  }
+
+  /** Export runs in the backend with its own cancel hook; only then is it armed. */
+  setExporting(exporting: boolean): void {
+    this.cancelExportBtn.disabled = !exporting;
   }
 
   private syncButtons(): void {

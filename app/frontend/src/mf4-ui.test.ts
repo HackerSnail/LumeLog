@@ -38,7 +38,7 @@ function mount(): {
   let close = false;
   const view = new Mf4View(host, {
     info: { version: "4.10", channelCount: 3, dataGroups: 1, comment: "" },
-    summary: { events: 0, attachments: 0, groups: [{ index: 0, channels: 3 }] },
+    summary: { events: 0, attachments: 0, groups: [{ index: 0, dataGroup: 0, channels: 3 }] },
     channels,
     onQuery: (q) => queries.push(q),
     onExport: (a) => exports.push(a),
@@ -97,6 +97,41 @@ describe("Mf4View", () => {
     from.dispatchEvent(new Event("change"));
     exportBtn.click();
     expect(exports[exports.length - 1]).toEqual({ channels: [2], fromSec: 1.5, toSec: 9 });
+    host.remove();
+  });
+
+  it("does not query while busy and arms export cancellation", () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const queries: Mf4Query[] = [];
+    let cancelled = 0;
+    const view = new Mf4View(host, {
+      info: { version: "4.10", channelCount: 3, dataGroups: 1, comment: "" },
+      summary: null,
+      channels,
+      onQuery: (q) => queries.push(q),
+      onExport: () => {},
+      onCancelExport: () => {
+        cancelled += 1;
+      },
+      onClose: () => {},
+    });
+    const boxes = host.querySelectorAll<HTMLInputElement>(".mf4-channel input");
+    boxes[0].click();
+    expect(queries.length).toBe(1);
+    view.setBusy(true);
+    boxes[1].click();
+    expect(queries.length).toBe(1); // busy swallows the change
+    view.setBusy(false);
+    boxes[1].click();
+    expect(queries.length).toBe(2);
+
+    const cancelBtn = host.querySelector<HTMLButtonElement>(".mf4-cancel-export")!;
+    expect(cancelBtn.disabled).toBe(true);
+    view.setExporting(true);
+    expect(cancelBtn.disabled).toBe(false);
+    cancelBtn.click();
+    expect(cancelled).toBe(1);
     host.remove();
   });
 
