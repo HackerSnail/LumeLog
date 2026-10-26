@@ -16,6 +16,12 @@
 **Why:** spec §3/§5：不能把整信号物化到内存才能撑住大文件；`total_rows` 需要全窗口计数，因此只对时间轴做一遗扫描（页数据按块取）；排序语义固定为时间跳页、列仅本页（列排序需物化，本增量不做）。
 **验证:** `cargo test -p lumelog-app mf4::` 5 pass（新增窗口裁剪/分页与 total/timeDesc 反向/列顺序按选择/失效样本 Null/六类参数拒绝）；`cargo test --workspace` app 110 全绿；`cargo clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 3. `mf4_summary` + CSV 导出 + 命令注册
+**Files:** Modify `app/src-tauri/src/mf4.rs`（`Mf4SummaryJson`/`Mf4GroupJson`（按 `channel_group_index` 聚合）/`Mf4ExportProgress`/`Mf4ExportStats`；`summary()`（version/path/comment/计数/组聚合/events+attachments 数量）；`export_csv()`（500 行/批，复用 `cells_for_rows` 与表格同一映射；`timeMs` 头 + `名 (单位)` 头；文本引号加倍；取消保前缀；tmp→rename；进度每 5 万行）；`csv_cell/csv_header`）；`commands.rs`（`mf4_summary`、`mf4_export_csv`（跨 `Mf4Sessions`+`AppDocs` 两托管态，worker 内取会话、`begin_search`/`end_search`、`catch_unwind` 仍需 `on_done`）、`mf4_export_cancel`）；`lib.rs` 注册；新增 3 测（summary 计数/组、导出与表格一致+引号转义、空选择与取消前缀）。
+**Why:** 导出与表格必须同源映射（都走 `cells_for_rows`），否则两边会漂移；取消仍转成可读前缀（tmp→rename）。
+**偏差（记录）:** `falcon_mdf` 的 `Event`/`Attachment` 字段未深入封装，summary 先只给 events/attachments 的数量，事件明细留后续；列排序仅 timeAsc/timeDesc（列序在 UI 本页内做）。
+**验证:** `cargo test -p lumelog-app mf4::` 8 pass（+3）+ `cargo clippy -p lumelog-app --all-targets -- -D warnings` 净。
+
 ## 2026-10-25 — Plan 12 Roadmap QuickJS 脚本引擎（feat/roadmap-script）
 
 **依据：** spec `docs/specs/2026-10-25-roadmap-script-design.md`；计划 `docs/plans/2026-10-25-roadmap-script.md`（Roadmap：脚本管理器 + 逐行变换 + 控制台）。

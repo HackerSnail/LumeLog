@@ -27,7 +27,9 @@ use crate::script::{
     delete_script_in, list_scripts_in, read_script_in, run_script, scripts_dir, write_script_in,
     ScriptConsole, ScriptStats, ScriptProgress,
 };
-use crate::mf4::{Mf4ChannelsPage, Mf4InfoJson, Mf4Sessions};
+use crate::mf4::{
+    Mf4ChannelsPage, Mf4ExportProgress, Mf4ExportStats, Mf4InfoJson, Mf4Sessions, Mf4SummaryJson,
+};
 use crate::watch::{AppWatch, ExternalEvent, WatchStatus};
 use crate::state::AppDocs;
 
@@ -1610,6 +1612,91 @@ pub fn mf4_records(
         limit.unwrap_or(500),
         offset.unwrap_or(0),
     )
+}
+
+#[tauri::command]
+pub fn mf4_summary(
+    state: tauri::State<'_, Mf4Sessions>,
+    id: u64,
+) -> Result<Mf4SummaryJson, IpcError> {
+    crate::mf4::summary(&state, id)
+}
+
+/// Stream the selected channels/window to CSV; `mf4_export_cancel` stops it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // session + selection + window + sink
+pub fn mf4_export_csv(
+    state: tauri::State<'_, Mf4Sessions>,
+    docs: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    id: u64,
+    channels: Vec<u32>,
+    from_sec: Option<f64>,
+    to_sec: Option<f64>,
+    target_path: String,
+    on_progress: Channel<Mf4ExportProgress>,
+    on_done: Channel<Mf4ExportStats>,
+) -> Result<u64, IpcError> {
+    if channels.is_empty() {
+        return Err(IpcError::new("invalid_argument", "请先勾选至少一个通道"));
+    }
+    let source = {
+        let session = state
+            .get(id)
+            .ok_or_else(|| IpcError::new("unknown_mf4", format!("no measurement session {id}")))?;
+        let guard = session.lock().unwrap_or_else(|p| p.into_inner());
+        guard.path.clone()
+    };
+    let target = PathBuf::from(&target_path);
+    if same_path(&source, &target) {
+        return Err(IpcError::new(
+            "invalid_argument",
+            "输出文件不能是测量文件本身",
+        ));
+    }
+    let (req_id, cancel) = docs.begin_search();
+    tauri::async_runtime::spawn_blocking(move || {
+        let sessions = app.state::<Mf4Sessions>();
+        let cancel_fn = Arc::new(move || cancel.load(Ordering::Relaxed));
+        let mut prog = |n: u64| {
+            let _ = on_progress.send(Mf4ExportProgress { written: n });
+        };
+        let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::mf4::export_csv(
+                &sessions,
+                id,
+                &channels,
+                from_sec,
+                to_sec,
+                &target,
+                &mut prog,
+                cancel_fn,
+            )
+        }))
+        .unwrap_or(Mf4ExportStats {
+            written: 0,
+            cancelled: false,
+            errored: true,
+        });
+        let _ = on_done.send(stats);
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+#[tauri::command]
+pub fn mf4_export_cancel(
+    state: tauri::State<'_, AppDocs>,
+    request_id: u64,
+) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
 }
 
 // ---- scripts (Roadmap-3) ---------------------------------------------------

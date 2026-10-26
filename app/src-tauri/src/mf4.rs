@@ -7,6 +7,8 @@
 //! and windowed, so no call here materialises a whole signal.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -67,7 +69,6 @@ pub struct Mf4InfoJson {
 
 pub(crate) struct Mf4Session {
     pub file: Arc<Mutex<Mf4File>>,
-    #[allow(dead_code)] // the export path reports it (Task 3)
     pub path: PathBuf,
     /// Channel metadata in file order, paired with the handle used to read it.
     pub channels: Vec<(Mf4ChannelJson, Channel)>,
@@ -463,10 +464,287 @@ pub(crate) fn list_channels(
     Ok(Mf4ChannelsPage { items, total })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4GroupJson {
+    pub index: u32,
+    pub channels: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4SummaryJson {
+    pub version: String,
+    pub path: String,
+    pub comment: String,
+    pub channel_count: u32,
+    pub data_groups: u32,
+    pub events: u32,
+    pub attachments: u32,
+    pub groups: Vec<Mf4GroupJson>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4ExportProgress {
+    pub written: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mf4ExportStats {
+    pub written: u64,
+    pub cancelled: bool,
+    pub errored: bool,
+}
+
+pub(crate) fn summary(sessions: &Mf4Sessions, id: u64) -> Result<Mf4SummaryJson, IpcError> {
+    let session = sessions.get(id).ok_or_else(|| unknown_session(id))?;
+    let guard = session.lock().unwrap_or_else(|p| p.into_inner());
+    let file = guard.file.lock().unwrap_or_else(|p| p.into_inner());
+    let mut groups: HashMap<u32, u32> = HashMap::new();
+    for (meta, _) in &guard.channels {
+        *groups.entry(meta.group).or_insert(0) += 1;
+    }
+    let mut groups: Vec<Mf4GroupJson> = groups
+        .into_iter()
+        .map(|(index, channels)| Mf4GroupJson { index, channels })
+        .collect();
+    groups.sort_by_key(|g| g.index);
+    Ok(Mf4SummaryJson {
+        version: format!("{}", file.version()),
+        path: guard.path.to_string_lossy().into_owned(),
+        comment: file.comment().to_string(),
+        channel_count: guard.channels.len() as u32,
+        data_groups: file.data_group_count() as u32,
+        events: file.events().len() as u32,
+        attachments: file.attachments().len() as u32,
+        groups,
+    })
+}
+
+/// CSV cell text: numbers trimmed, text quoted, invalid/missing empty.
+fn csv_cell(c: &Mf4CellJson) -> String {
+    match c {
+        Mf4CellJson::Number(v) => {
+            if v.fract() == 0.0 && v.abs() < 1e15 {
+                format!("{v:.0}")
+            } else {
+                format!("{v}")
+            }
+        }
+        Mf4CellJson::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
+        Mf4CellJson::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Mf4CellJson::Null => String::new(),
+    }
+}
+
+fn csv_header(columns: &[(Mf4ChannelJson, Channel)]) -> String {
+    let mut out = String::from("timeMs");
+    for (meta, _) in columns {
+        out.push(',');
+        if meta.unit.is_empty() {
+            out.push_str(&format!("\"{}\"", meta.name.replace('"', "\"\"")));
+        } else {
+            out.push_str(&format!(
+                "\"{} ({})\"",
+                meta.name.replace('"', "\"\""),
+                meta.unit
+            ));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// Stream the selected channels in the window to `target` as CSV. Batches of~500
+/// rows are rendered through the same cell mapping as the table, so export and UI
+/// cannot drift. Cancelling or failing still leaves a readable prefix (tmp→rename).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn export_csv(
+    sessions: &Mf4Sessions,
+    id: u64,
+    channels: &[u32],
+    from_sec: Option<f64>,
+    to_sec: Option<f64>,
+    target: &Path,
+    on_progress: &mut dyn FnMut(u64),
+    cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Mf4ExportStats {
+    let mut stats = Mf4ExportStats {
+        written: 0,
+        cancelled: false,
+        errored: false,
+    };
+    if channels.is_empty() || channels.len() > MAX_COLUMNS {
+        stats.errored = true;
+        return stats;
+    }
+    let session = match sessions.get(id) {
+        Some(s) => s,
+        None => {
+            stats.errored = true;
+            return stats;
+        }
+    };
+    let guard = session.lock().unwrap_or_else(|p| p.into_inner());
+    let mut picked: Vec<(Mf4ChannelJson, Channel)> = Vec::with_capacity(channels.len());
+    for want in channels {
+        match guard.channels.iter().find(|(m, _)| m.index == *want) {
+            Some(found) => picked.push(found.clone()),
+            None => {
+                stats.errored = true;
+                return stats;
+            }
+        }
+    }
+    let tmp = target.with_file_name(format!(
+        ".{}.tmp-{}-{}",
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("mf4-out"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let file = match File::create(&tmp) {
+        Ok(f) => f,
+        Err(_) => {
+            stats.errored = true;
+            return stats;
+        }
+    };
+    let mut writer = BufWriter::new(file);
+    if writer.write_all(csv_header(&picked).as_bytes()).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        stats.errored = true;
+        return stats;
+    }
+    let inner = guard.file.lock().unwrap_or_else(|p| p.into_inner());
+    let master = guard.channels.iter().find(|(_, c)| c.is_master()).map(|(_, c)| c);
+
+    // Collector: batches of (row, ms) that render and flush together.
+    let mut batch: Vec<(usize, f64)> = Vec::with_capacity(500);
+    let mut written: u64 = 0;
+    let mut last_report: u64 = 0;
+    let mut io_failed = false;
+    let mut write_batch = |batch: &mut Vec<(usize, f64)>| -> bool {
+        if batch.is_empty() {
+            return true;
+        }
+        let rows: Vec<usize> = batch.iter().map(|p| p.0).collect();
+        let ms: Vec<f64> = batch.iter().map(|p| p.1).collect();
+        let cells: Vec<Vec<Mf4CellJson>> = picked
+            .iter()
+            .map(|(_, ch)| cells_for_rows(&inner, ch, &rows).0)
+            .collect();
+        for (k, &row) in rows.iter().enumerate() {
+            let mut line = if master.is_some() {
+                format!("{:.3}", ms[k])
+            } else {
+                row.to_string()
+            };
+            for col in &cells {
+                line.push(',');
+                line.push_str(&csv_cell(&col[k]));
+            }
+            line.push('\n');
+            if writer.write_all(line.as_bytes()).is_err() {
+                return false;
+            }
+            written += 1;
+        }
+        if written - last_report >= 50_000 {
+            last_report = written;
+            on_progress(written);
+        }
+        batch.clear();
+        true
+    };
+
+    if let Some(m) = master {
+        let mut base: usize = 0;
+        let chunks = inner.signal_chunks(m);
+        if let Ok(chunks) = chunks {
+        'outer: for chunk in chunks {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(_) => {
+                    io_failed = true;
+                    break;
+                }
+            };
+            let len = chunk.len();
+            let vals = match chunk.values_f64() {
+                Ok(v) => v,
+                Err(_) => {
+                    io_failed = true;
+                    break;
+                }
+            };
+            for (i, t) in vals.iter().enumerate() {
+                if cancel() {
+                    stats.cancelled = true;
+                    break 'outer;
+                }
+                let in_window = from_sec.is_none_or(|f| *t >= f) && to_sec.is_none_or(|v| *t <= v);
+                if in_window {
+                    batch.push((base + i, t * 1000.0));
+                    if batch.len() >= 500 && !write_batch(&mut batch) {
+                        io_failed = true;
+                        break 'outer;
+                    }
+                }
+            }
+            base += len;
+        }
+        } else {
+            io_failed = true;
+        }
+    } else if let Some((_, first)) = picked.first() {
+        let len = inner.signal(first).map(|s| s.len()).unwrap_or(0);
+        for row in 0..len {
+            if cancel() {
+                stats.cancelled = true;
+                break;
+            }
+            batch.push((row, 0.0));
+            if batch.len() >= 500 && !write_batch(&mut batch) {
+                io_failed = true;
+                break;
+            }
+        }
+    }
+    if !io_failed && !write_batch(&mut batch) {
+        io_failed = true;
+    }
+    drop(write_batch);
+    stats.written = written;
+    if writer.flush().is_err() {
+        io_failed = true;
+    }
+    if io_failed {
+        let _ = std::fs::remove_file(&tmp);
+        stats.errored = true;
+        return stats;
+    }
+    if std::fs::rename(&tmp, target).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        stats.errored = true;
+        return stats;
+    }
+    on_progress(stats.written);
+    stats
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use falcon_mdf::Mf4Writer;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     /// Fresh temp dir + a small written MF4 (master time channel + 2 channels).
     fn fixture(name: &str) -> (PathBuf, PathBuf) {
@@ -493,9 +771,94 @@ mod tests {
                 Some(&[true, false, true, true]),
             )
             .unwrap();
+            g.add_channel_vlsd_str("Note", "", &["a\"b", "ok", "", "z"])
+                .unwrap();
         }
         w.write_to_file(&path).unwrap();
         (dir, path)
+    }
+
+    #[test]
+    fn export_csv_matches_records_and_escapes() {
+        let (dir, path) = fixture("export");
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let speed = channel_id(&sessions, info.id, "Speed");
+        let note = channel_id(&sessions, info.id, "Note");
+        let target = dir.join("out.csv");
+        let mut seen = 0u64;
+        let stats = export_csv(
+            &sessions,
+            info.id,
+            &[speed, note],
+            None,
+            None,
+            &target,
+            &mut |n| seen = n,
+            Arc::new(|| false),
+        );
+        assert!(!stats.errored && !stats.cancelled);
+        assert_eq!(stats.written, 4);
+        assert_eq!(seen, 4);
+        let text = std::fs::read_to_string(&target).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5, "header + 4 rows");
+        assert!(lines[0].starts_with("timeMs"), "{}", lines[0]);
+        assert!(lines[0].contains("Speed (km/h)"));
+        assert!(lines[1].starts_with("0.000,10,"));
+        assert!(lines[1].contains("\"a\"\"b\""), "quotes doubled: {}", lines[1]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_rejects_empty_selection_and_honours_cancel() {
+        let (dir, path) = fixture("export-cancel");
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let speed = channel_id(&sessions, info.id, "Speed");
+        let mut none = |_n: u64| {};
+        let empty = export_csv(
+            &sessions,
+            info.id,
+            &[],
+            None,
+            None,
+            &dir.join("empty.csv"),
+            &mut none,
+            Arc::new(|| false),
+        );
+        assert!(empty.errored, "no columns is a caller error");
+
+        let flag = Arc::new(AtomicBool::new(true));
+        let f2 = flag.clone();
+        let cancel_target = dir.join("cancel.csv");
+        let cancelled = export_csv(
+            &sessions,
+            info.id,
+            &[speed],
+            None,
+            None,
+            &cancel_target,
+            &mut none,
+            Arc::new(move || f2.load(AtomicOrdering::Relaxed)),
+        );
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.written, 0);
+        assert!(cancel_target.exists(), "cancelled run keeps the header prefix");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn summary_lists_groups_and_counts() {
+        let (dir, path) = fixture("summary");
+        let sessions = Mf4Sessions::default();
+        let info = open_session(&sessions, &path).unwrap();
+        let s = summary(&sessions, info.id).unwrap();
+        assert_eq!(s.channel_count, info.channel_count);
+        assert_eq!(s.data_groups, 1);
+        assert_eq!(s.groups.iter().map(|g| g.channels).sum::<u32>(), s.channel_count);
+        assert!(!s.version.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
