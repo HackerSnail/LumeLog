@@ -641,6 +641,35 @@ html.has-custom-titlebar .win-btns {
   padding: 8px;
   font-size: 12px;
 }
+
+/* MF4 waveform (Roadmap-4 increment 2) */
+.mf4-chart {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 240px;
+  overflow: hidden;
+}
+.mf4-chart-base,
+.mf4-chart-overlay {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+.mf4-chart-overlay {
+  cursor: crosshair;
+  touch-action: none;
+}
+.mf4-chart-tip {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  white-space: pre;
+  background: var(--bg-panel, #fff);
+  border: 1px solid var(--border, #ddd);
+  padding: 4px 6px;
+  font-size: 12px;
+  border-radius: 4px;
+}
 .script-editor {
   flex: 1 1 auto;
   min-height: 180px;

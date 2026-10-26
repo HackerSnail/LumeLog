@@ -16,6 +16,11 @@
 **Why:** 交互手感靠窗口数学，先以纯函数钉住（jsdom 无真像素，像素级留给手工验）。
 **验证:** `npm test` 109 pass（17 文件）+ `run build` 通过。
 
+### Task 4. `Mf4Chart`（双层 canvas + 交互）
+**Files:** Modify `app/frontend/src/mf4-chart.ts`（`Mf4Chart`：base + overlay 两张 canvas、tooltip `div`；`ResizeObserver` + DPR（`setTransform` 只设一次）、`requestAnimationFrame` 合并重绘；底图网格/时间刻度/每序列 min–max 竖线 + 桶间细连线（10 色、归一化）；工具条层级：`setData/setWindow/setBusy/onWindowChange/destroy`；wheel（`passive:false`、1.25^…、光标为锚点）、pointer 拖拽（`setPointerCapture`）、dblclick 复位、hover 十字线 + tooltip（`nearestBucket` 的首值）；`getContext` 为空时安全降级（不抛错、只回调））、`styles.css`（`.mf4-chart*`：相对布局、叠层 canvas、tooltip；`mf4-chart.dom.test.ts`（3：双层与尺寸、60ms 节流只触发一次 + dblclick 复位、destroy 后不再响应）。
+**Why:** hover 高频重绘只碰 overlay；DPR 只 `setTransform` 一次避免累积缩放；jsdom 无 canvas 实现时保证交互测试仍可跑。
+**验证:** `npm test` 112 pass（18 文件）+ `run build` 通过。
+
 ## 2026-10-26 — Plan 13 Roadmap MF4 测量数据查看器（feat/roadmap-mf4-viewer）
 
 **依据：** spec `docs/specs/2026-10-26-roadmap-mf4-viewer-design.md`；计划 `docs/plans/2026-10-26-roadmap-mf4-viewer.md`（增量1：元数据 + 通道 + 分页记录表 + CSV 导出；波形为增量2）。
