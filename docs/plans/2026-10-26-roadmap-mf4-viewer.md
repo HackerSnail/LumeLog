@@ -97,6 +97,15 @@
 
 ---
 
+## 附录 A：`falcon_mdf 0.7.1` API 实测记录（已完成调研，T1 直接照此写）
+- 入口：`Mf4File::open(path)` / `open_mmap` / `from_bytes(Vec<u8>)`；`version() -> Mf4Version`（impl Display）、`channel_count()`、`data_group_count()`、`data_groups() -> &[DataGroup]`、`start_time() -> &RecordingTime`、`comment() -> &str`、`unfinalized()`、`channels()` 迭代、`find_channel(name)`、`signal(&Channel) -> Result<Signal>`、`signal_chunks(&Channel) -> Result<SignalChunks<'_>>`（逐窗口 yield `Signal`，与整读同序同量）、`signals_chunks(...)`、`aligned_signal_chunks(...)`。
+- `model::Channel` 字段：`id: usize`、`index`、`channel_group_index`、`data_group_index`、`name: String`、`unit: String`、`channel_type`、`sync_type`、`data_type`、`conversion`、`bit_count`（+ 更多；判断 VLSD/master 用 `is_vlsd()`/`is_master()` 需自行核实存在性）。
+- `Signal`：`name()`/`unit()`/`len()`/`channel()`/`value_at(i) -> Result<f64>`/`values() -> Result<SignalValues>`/`raw_values()`/`values_f64() -> Result<Vec<f64>>`/`iter()`/`min_max()`/`mean()`/`validity() -> Option<Vec<bool>>`/`is_valid(i)`/`valid_count()`。
+- `SignalValues` 变体：`U8/U16/U32/U64/I8/I16/I32/(I64)/F32/F64/Str(Vec<String>)/Bytes/...`（枚举型，含文本）。
+- 测试夹具（可直接用）：`Mf4Writer::new()` / `with_start_time_ns(i64)` → `add_group(&[f64]) -> Result<&mut WriteGroup>`（时间轴，允许乱序但不允许 NaN）/ `add_group_in(sibling, times)`；`WriteGroup::add_channel(name, unit, &[f64])`、`add_channel_with_validity(.., Option<&[bool]>)`、`add_channel_typed(name, unit, SignalValues)`、`add_channel_vlsd_str(name, unit, &[impl AsRef<str>])`、`add_channel_array(...)`；最后 `write_to_file(path) -> Result<()>`。`set_compression(bool)`/`WriteCodec` 可造压缩样本。
+- 错误型：`falcon_mdf::Mf4Error`（实现 `Display`/`Error`）；`Result<T> = std::result::Result<T, Mf4Error>`。分类靠 `Display` 文本关键词（magic/encrypt/unsupported/version）降级为 `mf4_not_mf4`/`mf4_encrypted`/`mf4_unsupported`/`io`。
+- 待现场核（写码时验证，不阻塞）：`Channel::is_vlsd()/is_master()` 是否存在与 `SyncType` 变体名；若不存在则用 `data_type`/`channel_type` 的 `Debug` 字串判定（`kind_of` 已按此设计，失败降级 `Unknown`）。
+
 ## 备注：接缝/决策
 - `falcon_mdf` 只在 `mf4.rs` 出现；DTO 全自定义，便于换库。
 - `Mf4File` 若非 `Sync`：`Arc<Mutex<..>>` 串行化同一会话取数（分页本就顺序，够用）。
