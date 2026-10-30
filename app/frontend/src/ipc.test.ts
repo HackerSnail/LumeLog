@@ -92,7 +92,7 @@ describe("ipc error → Chinese text (spec §9)", () => {
 });
 
 describe("encoding menu labels (Global Constraints, verbatim)", () => {
-  it("encoding_menu_labels_match_spec: the 9 fixed display names, in order", () => {
+  it("encoding_menu_labels_match_spec: the 13 fixed display names, in order", () => {
     expect(ENCODING_LABELS).toEqual([
       "UTF-8",
       "UTF-8 BOM",
@@ -103,6 +103,10 @@ describe("encoding menu labels (Global Constraints, verbatim)", () => {
       "BIG5",
       "Shift-JIS",
       "ISO-8859-1",
+      "EUC-JP",
+      "EUC-KR",
+      "KOI8-R",
+      "KOI8-U",
     ]);
   });
 });

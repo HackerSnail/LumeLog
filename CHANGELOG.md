@@ -12,6 +12,11 @@
 **Why:** 探针实测（`guess_assess`，1KB 样本）：EUC-KR/EUC-JP 带 `cn` hint 判成 GBK、无 hint 判对且 plausible；GBK/GB18030 中文样本无 hint 仍是 GBK——双 pass 不会翻转中文判定。KOI8 系 hint 判定即 KOI8-U，直接映射即可，不加则俄文永远兜底 GB18030。`bom_len`/`has_bom`/`IncrementalDecoder`/`encode_all` 零改动：四编码均无 BOM、无 U+FFFD 码点，走既有 legacy `?` 分支。
 **验证:** `cargo test -p lumelog-core` 95 pass（新增 roundtrip×4、emoji→单字节 `?` 无 `&#` 引用、别名 6 组、EUC-KR/EUC-JP 检出、俄文检出 KOI8-U；既有 `detect_gbk_sample_is_chinese`/`detect_falls_back_when_result_not_in_label_set` 不回归）；`cargo test --workspace` 全绿（app 117 / can 23 / core lib 95 / proptest 8）；`cargo clippy --workspace --all-targets -- -D warnings` 净。检测判定过程曾以临时探针 `tests/encoding_detect_probe.rs` 验证，结论记录于 spec §1.1 后删除，不入仓。
 
+### Task 2. 前端编码菜单 13 项
+**Files:** Modify `app/frontend/src/encoding-menu.ts`（`ENCODINGS` 末尾追加 EUC-JP/EUC-KR/KOI8-R/KOI8-U，display = label）、`app/frontend/src/ipc.test.ts`（`encoding_menu_labels_match_spec` 断言 9 → 13 项）。
+**Why:** 状态栏下拉、`changeEncoding` 链路都从 `ENCODINGS` 派生，加表即可全链路生效；label 直传 `EncodingLabel::from_label`（Rust），三个无连字符别名只做容错不进菜单。
+**验证:** `npm test` 127 pass（20 文件，断言更新无新增用例）+ `npm run build` 通过；Rust 侧本轮无改动。
+
 ## 2026-10-30 — Plan 15 语法高亮语言扩展（feat/syntax-languages）
 
 **依据：** spec `docs/specs/2026-10-30-syntax-languages-design.md`；计划 `docs/plans/2026-10-30-syntax-languages.md`。对应 `docs/features.md` 待做第 2 条。
