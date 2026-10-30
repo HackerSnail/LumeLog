@@ -11,6 +11,11 @@
 **Why:** 插件不执行任何代码，校验收在 Rust 侧（重逻辑原则）；正则编译校验放前端（JS `RegExp` 与 Rust `regex` 方言不同，见 Task 2）。
 **验证:** `cargo test -p lumelog-app plugins::` 8 pass（合法 manifest、非法 tag、未知字段、坏 JSON 不阻塞其它、id 重复后文件名排序后到者跳过、extensions/keywords 上限、非 .json 忽略、目录缺失返回空）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 2. 前端插件注册表（`language.ts` + `ipc.ts`）
+**Files:** Modify `app/frontend/src/language.ts`（`type ModeId = ModeChoice | \`plugin:${string}\``、`pluginModeId()`、`registerPluginLanguages()`（整表替换，坏正则单条跳过并回报 warning）、`autoModeId()`（内置扩展名优先、插件兜底）、`syntaxModes()`（内置 21 项 + 插件）、`resolveLanguage` 收 `ModeId` 并先查插件表）、`app/frontend/src/ipc.ts`（`SyntaxPlugin/SyntaxPluginsReply` + `syntaxPluginsList()`）；Modify `app/frontend/src/language.test.ts`（+3）、`app/frontend/src/ipc.test.ts`（+1 typeof）。
+**Why:** Rust 只验 shape，JS 正则方言（如 lookahead）由前端 `new RegExp(src, "y")` 编译把关；插件模式 id 带 `plugin:` 前缀，与内置 id 空间不相交，状态栏与 `applyMode` 无需特判。
+**验证:** `npx vitest run src/language.test.ts` 10 pass（插件解析出 `LanguageSupport` 且可 parse、AUTO 内置优先不被劫持、坏正则跳过且 warning 含插件名、`syntaxModes` 内置在前插件在后且空重载后消失、未知 `plugin:x` → null）+ `tsc --noEmit` 净。
+
 ## 2026-10-30 — Plan 16 编码扩展：EUC-JP / EUC-KR / KOI8-R / KOI8-U（feat/encoding-extension）
 
 **依据：** spec `docs/specs/2026-10-30-encoding-extension-design.md`；计划 `docs/plans/2026-10-30-encoding-extension.md`。对应 `docs/features.md` 待做第 3 条（原文把 Big5、Shift-JIS 列为缺口是笔误，两者 v1 已交付）。

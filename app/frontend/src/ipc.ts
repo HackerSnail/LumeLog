@@ -873,6 +873,32 @@ export function mf4Series(args: {
   });
 }
 
+// ---- Syntax plugins (plugin interface, increment 1) --------------------------
+
+export interface SyntaxPluginRule {
+  regex: string;
+  tag: string;
+}
+
+export interface SyntaxPlugin {
+  id: string;
+  name: string;
+  extensions: string[];
+  keywords: string[];
+  lineComment: string | null;
+  rules: SyntaxPluginRule[];
+}
+
+export interface SyntaxPluginsReply {
+  plugins: SyntaxPlugin[];
+  /** `<file>: <reason>` for every manifest the shell rejected. */
+  errors: string[];
+}
+
+export function syntaxPluginsList(): Promise<SyntaxPluginsReply> {
+  return call<SyntaxPluginsReply>("syntax_plugins_list", {});
+}
+
 // ---- User scripts (Roadmap-3: QuickJS) --------------------------------------
 
 export interface ScriptEntry {

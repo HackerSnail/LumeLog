@@ -44,6 +44,7 @@ import {
   mf4ExportCsv,
   mf4ExportCancel,
   mf4Series,
+  syntaxPluginsList,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -174,6 +175,10 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("tail_wrapper_is_a_function", () => {
     expect(typeof docTailAppend).toBe("function");
+  });
+
+  it("syntax_plugin_wrapper_is_a_function", () => {
+    expect(typeof syntaxPluginsList).toBe("function");
   });
 
   it("blf_wrappers_are_functions", () => {
