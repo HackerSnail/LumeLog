@@ -52,6 +52,8 @@ import {
   viewerRows,
   viewerClose,
   viewerExportCsv,
+  recentList,
+  recentClear,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -210,6 +212,12 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
   it("viewer_error_codes_have_zh_text", () => {
     expect(IPC_ERROR_CODES).toContain("viewer_unsupported");
     expect(/[\u4e00-\u9fff]/.test(ipcErrorZh("viewer_unsupported"))).toBe(true);
+  });
+
+  it("recent_wrappers_are_functions", () => {
+    for (const fn of [recentList, recentClear]) {
+      expect(typeof fn).toBe("function");
+    }
   });
 
   it("blf_wrappers_are_functions", () => {

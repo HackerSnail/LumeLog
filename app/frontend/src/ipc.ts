@@ -1039,6 +1039,18 @@ export function viewerExportCsv(args: {
   });
 }
 
+// ---- Recent files (M1 deferred debt) -----------------------------------------
+
+/** Most-recent-first paths that still exist on disk (cap 20, backend). */
+export function recentList(): Promise<string[]> {
+  return call<string[]>("recent_list", {});
+}
+
+/** Empty the recorded list. */
+export function recentClear(): Promise<void> {
+  return call<void>("recent_clear", {});
+}
+
 // ---- User scripts (Roadmap-3: QuickJS) --------------------------------------
 
 export interface ScriptEntry {
