@@ -1170,9 +1170,10 @@ html.has-custom-titlebar .win-btns {
    bounded flex child of `.center`, `.can-host`/`.canpanel` fill it, and
    `.can-scroll` (overflow:auto) is the windowed box whose clientHeight drives
    `visibleWindow`. Never let those collapse or the panel requests all rows. */
-/* #parser-dock shares the same definite-height contract (plugin parser table). */
+/* #parser-dock / #viewer-dock share the same definite-height contract. */
 #can-dock,
-#parser-dock {
+#parser-dock,
+#viewer-dock {
   flex: 0 0 auto;
   max-height: 55%;
   min-height: 0;

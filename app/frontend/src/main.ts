@@ -73,7 +73,12 @@ import {
   parserPluginsList,
   parserRun,
   parserCancel,
+  viewerOpen,
+  viewerRows,
+  viewerClose,
+  viewerExportCsv,
   type ParserPluginInfo,
+  type ViewerInfo,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
 import { pickTimelineInput, type TimelineSelection } from "./query";
@@ -249,6 +254,7 @@ function layout(): void {
     mkBtn("查询", "行过滤 / 高亮命中", () => openQueryPanel()),
     mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
     mkBtn("测量", "打开 MF4 测量文件（表格浏览与导出）", () => void openMf4File()),
+    mkBtn("查看", "查看 xlsx / docx 文档（表格与文本）", () => void openViewerFile()),
     mkBtn("脚本", "打开脚本管理器（QuickJS 逐行变换）", () => openScriptManager()),
     mkBtn("解析", "用解析插件把当前文档解析为表格（plugins 目录）", () => toggleParserDock()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
@@ -308,7 +314,7 @@ function layout(): void {
   panel.id = "search-panel";
   panel.className = "search-panel";
   panel.style.display = "none";
-  center.append(tabsEl, panel, buildCanDock(), buildMf4Dock(), buildParserDock());
+  center.append(tabsEl, panel, buildCanDock(), buildMf4Dock(), buildParserDock(), buildViewerDock());
 
   sidebarHandleEl = document.createElement("div");
   sidebarHandleEl.className = "pane-resizer";
@@ -613,6 +619,7 @@ async function openMf4File(): Promise<void> {
     mf4Path = picked;
     if (canDockVisible) toggleCanDock();
     if (parserDockVisible) toggleParserDock();
+    if (viewerDockVisible) toggleViewerDock();
     const host = buildMf4Dock();
     host.style.display = "";
     mf4View = new Mf4View(host, {
@@ -803,6 +810,7 @@ function toggleParserDock(): void {
     // One bottom dock at a time (CanPanel/MF4 同款互斥).
     if (mf4SessionId !== null) closeMf4();
     if (canDockVisible) toggleCanDock();
+    if (viewerDockVisible) toggleViewerDock();
     ensureParserPanel();
     void loadParserPlugins(false);
   }
@@ -944,6 +952,146 @@ function appendParserConsole(m: { level: string; text: string }): void {
   parserConsoleEl.scrollTop = parserConsoleEl.scrollHeight;
 }
 
+// ---- document viewer dock (doc-viewer increment 1) ---------------------------
+
+let viewerDockEl: HTMLElement | null = null;
+let viewerDockVisible = false;
+let viewerPanel: ParserPanel | null = null;
+let viewerHostEl: HTMLElement | null = null;
+let viewerSheetSel: HTMLSelectElement | null = null;
+let viewerMoreBtn: HTMLButtonElement | null = null;
+let viewerInfo: ViewerInfo | null = null;
+let viewerStore: RowStore | null = null;
+let viewerLoaded = 0;
+let viewerToken = 0;
+
+const VIEWER_WINDOW = 1000;
+
+function buildViewerDock(): HTMLElement {
+  if (viewerDockEl) return viewerDockEl;
+  const dock = document.createElement("div");
+  dock.id = "viewer-dock";
+  dock.className = "can-dock";
+  dock.style.display = "none";
+
+  const bar = document.createElement("div");
+  bar.className = "can-dockbar";
+  viewerSheetSel = document.createElement("select");
+  viewerSheetSel.className = "can-src";
+  viewerSheetSel.addEventListener("change", () => void loadViewerRows(true));
+  viewerMoreBtn = mkBtn("加载后续 1000 行", "继续取下一页行", () => void loadViewerRows(false));
+  viewerMoreBtn.style.display = "none";
+  const exportBtn = mkBtn("导出 CSV", "把当前工作表导出为 CSV（docx 为 TXT）", () => void exportViewer());
+  bar.append(document.createTextNode("工作表 "), viewerSheetSel, viewerMoreBtn, exportBtn);
+
+  dock.append(bar, (viewerHostEl = mkHost()));
+  viewerDockEl = dock;
+  return dock;
+}
+
+function toggleViewerDock(): void {
+  viewerDockVisible = !viewerDockVisible;
+  if (viewerDockEl) viewerDockEl.style.display = viewerDockVisible ? "" : "none";
+  if (viewerDockVisible) {
+    // One bottom dock at a time.
+    if (mf4SessionId !== null) closeMf4();
+    if (canDockVisible) toggleCanDock();
+    if (parserDockVisible) toggleParserDock();
+    ensureViewerPanel();
+  }
+  if (!viewerDockVisible && viewerInfo !== null) {
+    void viewerClose(viewerInfo.id).catch(() => {});
+    viewerInfo = null;
+  }
+}
+
+function ensureViewerPanel(): void {
+  if (viewerPanel || !viewerHostEl) return;
+  viewerPanel = new ParserPanel(viewerHostEl, {
+    // xlsx 行号可跳转没有任何意义（本文件不是文本源），不接线。
+    onRowActivate: () => {},
+    onError: (e) => toastMsg(e),
+  });
+}
+
+async function openViewerFile(): Promise<void> {
+  const picked = await open({
+    multiple: false,
+    filters: [{ name: "文档（xlsx/xlsm/docx）", extensions: ["xlsx", "xlsm", "docx"] }],
+  });
+  if (typeof picked !== "string") return;
+  try {
+    const info = await viewerOpen(picked);
+    if (viewerInfo !== null) void viewerClose(viewerInfo.id).catch(() => {});
+    viewerInfo = info;
+    if (!viewerDockVisible) toggleViewerDock();
+    const sel = viewerSheetSel;
+    if (sel) {
+      sel.textContent = "";
+      for (const s of info.sheets) {
+        const o = document.createElement("option");
+        o.value = s;
+        o.textContent = s;
+        sel.append(o);
+      }
+    }
+    await loadViewerRows(true);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/** Pull one window of rows; `reset` restarts from row 1 (sheet switch/open). */
+async function loadViewerRows(reset: boolean): Promise<void> {
+  if (!viewerInfo) return;
+  const token = ++viewerToken;
+  try {
+    const page = await viewerRows({
+      id: viewerInfo.id,
+      sheetIndex: viewerSheetSel?.selectedIndex ?? 0,
+      fromRow: reset ? 0 : viewerLoaded,
+      limit: VIEWER_WINDOW,
+    });
+    if (token !== viewerToken) return; // sheet switched / doc replaced
+    if (reset) {
+      viewerStore = new RowStore();
+      viewerPanel?.attachStore(viewerStore);
+    }
+    viewerPanel?.setColumns(page.columns.map((label, i) => ({ key: `c${i}`, label })));
+    viewerStore?.push(page.rows);
+    viewerLoaded = reset ? page.rows.length : viewerLoaded + page.rows.length;
+    viewerPanel?.render();
+    viewerPanel?.setStatus(
+      `${basenameOf(viewerInfo.path)} · ${viewerLoaded}/${page.total} 行` +
+        (viewerInfo.truncated ? " · 内容已截断" : ""),
+    );
+    if (viewerMoreBtn) viewerMoreBtn.style.display = viewerLoaded < page.total ? "" : "none";
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+async function exportViewer(): Promise<void> {
+  const info = viewerInfo;
+  if (!info) return;
+  const isDocx = info.kind === "docx";
+  const dest = await save({
+    defaultPath: basenameOf(info.path) + (isDocx ? ".txt" : ".csv"),
+    filters: [isDocx ? { name: "文本", extensions: ["txt"] } : { name: "CSV", extensions: ["csv"] }],
+  });
+  if (typeof dest !== "string") return;
+  try {
+    const stats = await viewerExportCsv({
+      id: info.id,
+      sheetIndex: viewerSheetSel?.selectedIndex ?? 0,
+      targetPath: dest,
+    });
+    toastMsg(`已导出 ${stats.written} 行 → ${dest}`);
+  } catch (err) {
+    reportError(err);
+  }
+}
+
 /** The view-filter toolbar; each change rebuilds the active doc's `CanFilter`. */
 function buildCanFilterRow(): HTMLElement {
   const row = document.createElement("div");
@@ -1044,6 +1192,7 @@ function toggleCanDock(): void {
   if (canDockVisible) {
     if (mf4SessionId !== null) closeMf4(); // one bottom dock at a time
     if (parserDockVisible) toggleParserDock();
+    if (viewerDockVisible) toggleViewerDock();
     ensurePanel();
     switchCanView();
   }
