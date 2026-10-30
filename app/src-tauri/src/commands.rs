@@ -1948,6 +1948,25 @@ pub async fn viewer_export_csv(
     .map_err(|e| IpcError::new("io", format!("导出任务失败：{e}")))?
 }
 
+/// Raw PDF bytes for the frontend renderer (pdf.js `getDocument({data})`).
+/// A binary `Response`, not a JSON number array — 64MB must not inflate 33%.
+#[tauri::command]
+pub fn viewer_pdf_bytes(
+    state: ViewerState<'_>,
+    id: u64,
+) -> Result<tauri::ipc::Response, IpcError> {
+    let sessions = lock_viewers(&state);
+    let session = sessions
+        .get(id)
+        .ok_or_else(|| IpcError::new("unknown_request", format!("no viewer session {id}")))?;
+    let path = session
+        .pdf_path
+        .as_ref()
+        .ok_or_else(|| IpcError::new("invalid_argument", "非 PDF 会话".to_string()))?;
+    let bytes = std::fs::read(path).map_err(|e| IpcError::new("io", format!("读取 PDF 失败：{e}")))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[cfg(test)]
 mod script_cmd_tests {
     use super::*;

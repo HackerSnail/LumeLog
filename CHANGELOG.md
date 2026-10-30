@@ -2,6 +2,14 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 22 PDF 真渲染 增量2：pdf.js（feat/pdf-render）
+
+**依据：** `docs/specs/2026-10-30-pdf-render-design.md`；立项文档比选后选路线 C（pdf.js，无原生库分发成本）。增量1 的文本提取保留为 TXT 导出/`rows()` 按需能力。
+
+### Task 1. Rust 会话改造 + 字节命令
+**Files:** Modify `app/src-tauri/src/viewers.rs`（会话加 `pdf_path`；`open_pdf` 不再在打开时提取——提取失败的 PDF 仍可渲染；`ensure_pdf_lines()`：`rows()`/`export()` 按需提取（catch_unwind 兜 panic 面）；`ViewerSession/get()` pub(crate) 供命令层）；Modify `app/src-tauri/src/commands.rs`（`viewer_pdf_bytes`：返回 `tauri::ipc::Response` 原始字节——JSON 数组会让 64MB 膨胀 33%）；`lib.rs` 注册。
+**验证:** `cargo test -p lumelog-app viewers::` 6 pass（新语义：畸形 PDF **open 成功**、`rows()`/`export()` 才报 `invalid_argument`；好 PDF 按需提取内容与 TXT 导出回归）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净。字节命令是薄层（会话路径 → fs read → Response），路径与读取由会话测试覆盖。
+
 ## 2026-10-30 — Plan 21 PDF 查看增量1：纯 Rust 文本提取（feat/pdf-text）
 
 **依据：** `docs/specs/2026-10-30-pdf-viewer-proposal.md` 建议的分步立项增量1（文本提取先行），延续 Plan 19 查看器体系。真渲染增量（pdf.js/pdfium）仍待需求反馈另立项。
