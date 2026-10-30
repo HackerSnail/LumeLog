@@ -74,7 +74,7 @@ Measure-Command { .\target\release\lumelog.exe search --file "$env:TEMP\bench_1g
 
 ## 4. 已知 deferred（归后续计划）
 
-- 拖放打开、最近 20 文件菜单：M1 未接线，归 Plan 2 GUI 打磨（`open` 对话框已覆盖“打开”主流程）
+- ~~拖放打开、最近 20 文件菜单~~：已交付（Plan 20 `feat/drop-recent`，`recent.json` + webview drag-drop；人工冒烟仍归 §2）
 - Save-As 后再切编码：壳侧 doc 仍绑原始文件（核心 Save-As 不重绑句柄），编码切换会重读原始内容；完整重绑归 Plan 2
 - 流式索引（threaded doc_open + 8MB 进度 tick）：GUI 侧路径已就绪（占位行/refresh/Channel），shell 线程化后接通
 - WKWebView/Safari IME 需叠 `keyCode!==229`（当前目标 WebView2 可靠）

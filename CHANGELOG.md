@@ -2,6 +2,12 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — docs：test-checklist §4 拖放/最近文件欠账标记已还清
+
+**Files:** Modify `docs/test-checklist.md`。
+**Why:** Plan 20 已交付拖放打开与最近文件，deferred 清单对应条目标记完成，避免双份追踪。
+**验证:** 纯文档措辞修改，未动代码，不涉及测试。
+
 ## 2026-10-30 — Plan 20 拖放打开 + 最近文件（feat/drop-recent）
 
 **依据：** spec `docs/specs/2026-10-30-drop-recent-design.md`；计划 `docs/plans/2026-10-30-drop-recent.md`。偿还 test-checklist §4 记录的 M1 欠账（拖放打开、最近 20 文件菜单未接线）。
