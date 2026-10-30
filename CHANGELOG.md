@@ -17,6 +17,10 @@
 **Why:** 状态栏下拉、`changeEncoding` 链路都从 `ENCODINGS` 派生，加表即可全链路生效；label 直传 `EncodingLabel::from_label`（Rust），三个无连字符别名只做容错不进菜单。
 **验证:** `npm test` 127 pass（20 文件，断言更新无新增用例）+ `npm run build` 通过；Rust 侧本轮无改动。
 
+### Task 3. 文档收尾
+**Files:** Modify `docs/specs/2026-10-24-lumelog-v1-design.md`（§5.1 支持集合补 4 项 + 检测补充说明）、`docs/features.md`（条目移入已交付，注明 Big5/Shift-JIS 原为笔误、UTF-32 不做）、`docs/test-checklist.md`（§2 冒烟补 EUC-KR/EUC-JP/KOI8 样例行）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+
 ## 2026-10-30 — Plan 15 语法高亮语言扩展（feat/syntax-languages）
 
 **依据：** spec `docs/specs/2026-10-30-syntax-languages-design.md`；计划 `docs/plans/2026-10-30-syntax-languages.md`。对应 `docs/features.md` 待做第 2 条。

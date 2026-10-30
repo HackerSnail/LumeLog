@@ -50,6 +50,7 @@ Measure-Command { .\target\release\lumelog.exe search --file "$env:TEMP\bench_1g
 
 - [ ] GBK 台架日志打开**不乱码**；状态栏显示 `GBK`；切 UTF-8 再切回，内容正确重解码
 - [ ] GB18030 样例（含四字节生僻字）打开正常；`BIG5` / `Shift-JIS` 样例正常
+- [ ] `EUC-KR`（韩文）、`EUC-JP`（日文）样例打开正常且自动识别（或手动切换后重解码正确）；俄文样例检出 `KOI8-U`、可手动切 `KOI8-R`
 - [ ] UTF-16 LE/BE 样例编辑模式打开正常（>200MB UTF-16 搜索 v1 明确拒绝并提示）
 - [ ] CRLF 日志编辑保存后磁盘仍是 CRLF；LF 文件保存后仍是 LF（EOL 保持）
 - [ ] 保存冲突：外部改文件后再保存 → 弹「保存冲突」**单确认**（若同时含无法映射字符，detail 会一并披露不可逆 `?` 后果）→ 强制覆盖成功
