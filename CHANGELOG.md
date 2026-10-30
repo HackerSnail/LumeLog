@@ -2,6 +2,12 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — docs：PDF 查看与 Wasm 插件宿主立项预研
+
+**Files:** Create `docs/specs/2026-10-30-pdf-viewer-proposal.md`、`docs/specs/2026-10-30-plugin-wasm-proposal.md`；Modify `docs/features.md`（两条待做挂立项文档链接）。
+**Why:** 剩余两项此前只有一句推迟理由，缺可比选的立项材料。PDF 给出三路线比选（pdfium 真渲染 / 纯 Rust 文本提取 / 前端 pdf.js），建议拆两步：文本提取先行（复用 Plan 19 查看器，半天级），真渲染默认 pdf.js（无原生分发成本、体积 1/3）；Wasm 宿主给出四路线比选，建议 wasmi 起步（体积约 wasmtime 的 1/10，wit 接口与运行时解耦，预留切换），附 wit 心智稿、沙箱边界与体积/门槛风险。两份均为预研，未批准实现；决策点（文本先行与否、路线选择、15MB 体积硬门槛）单列待拍板。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+
 ## 2026-10-30 — docs：test-checklist §4 拖放/最近文件欠账标记已还清
 
 **Files:** Modify `docs/test-checklist.md`。
