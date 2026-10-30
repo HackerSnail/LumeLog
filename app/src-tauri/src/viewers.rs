@@ -29,6 +29,9 @@ const SESSION_CAP: usize = 4;
 pub(crate) enum ViewerKind {
     Xlsx,
     Docx,
+    /// Text-extraction view (doc-viewer increment 1 of the PDF proposal):
+    /// no layout, lines land in the same single-column path as docx.
+    Pdf,
 }
 
 impl ViewerKind {
@@ -36,6 +39,7 @@ impl ViewerKind {
         match self {
             ViewerKind::Xlsx => "xlsx",
             ViewerKind::Docx => "docx",
+            ViewerKind::Pdf => "pdf",
         }
     }
 }
@@ -115,6 +119,7 @@ impl ViewerSessions {
         let session = match ext.as_str() {
             "xlsx" | "xlsm" => self.open_xlsx(path)?,
             "docx" => self.open_docx(path)?,
+            "pdf" => self.open_pdf(path)?,
             _ => {
                 return Err(IpcError::new(
                     "viewer_unsupported",
@@ -159,6 +164,50 @@ impl ViewerSessions {
         })
     }
 
+    /// PDF text extraction (proposal increment 1): no layout, same single-
+    /// column path as docx. `pdf-extract` is known to panic on some malformed
+    /// files — the call is unwound into an error, never into the IPC thread.
+    fn open_pdf(&mut self, path: &Path) -> Result<ViewerSession, IpcError> {
+        let shown = path.display().to_string();
+        let extracted = match std::panic::catch_unwind(|| pdf_extract::extract_text(&shown)) {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
+                return Err(IpcError::new(
+                    "invalid_argument",
+                    format!("PDF 文本提取失败：{e}"),
+                ))
+            }
+            Err(_) => {
+                return Err(IpcError::new(
+                    "invalid_argument",
+                    "PDF 解析器内部异常".to_string(),
+                ))
+            }
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut total = 0usize;
+        let mut truncated = false;
+        for line in extracted.lines() {
+            if lines.len() >= MAX_PARAGRAPHS || total + line.len() > MAX_PARA_TEXT_BYTES {
+                truncated = true;
+                break;
+            }
+            total += line.len();
+            lines.push(line.to_string());
+        }
+        if lines.is_empty() && !truncated {
+            // A scanned/empty PDF: still a valid session with zero rows.
+            lines.push(String::new());
+        }
+        Ok(ViewerSession {
+            kind: ViewerKind::Pdf,
+            workbook: None,
+            sheets: vec!["正文".into()],
+            docx_lines: Some(lines),
+            docx_truncated: truncated,
+        })
+    }
+
     pub(crate) fn close(&mut self, id: u64) -> bool {
         self.sessions.remove(&id).is_some()
     }
@@ -180,28 +229,27 @@ impl ViewerSessions {
                 format!("limit 须为 1–{MAX_WINDOW}"),
             ));
         }
-        match session.kind {
-            ViewerKind::Docx => {
-                let lines = session.docx_lines.as_ref().expect("docx lines");
-                let total = lines.len() as u64;
-                let start = from_row.min(total) as usize;
-                let end = (start + limit as usize).min(lines.len());
-                let rows = lines[start..end]
-                    .iter()
-                    .enumerate()
-                    .map(|(i, text)| ViewerRowJson {
-                        line: start as u64 + i as u64 + 1,
-                        cells: vec![text.clone()],
-                    })
-                    .collect();
-                Ok(ViewerPageJson {
-                    total,
-                    columns: vec!["内容".into()],
-                    rows,
+        // Text-line kinds (docx / pdf) share the single-column path; the
+        // workbook branch is the only other shape.
+        if let Some(lines) = &session.docx_lines {
+            let total = lines.len() as u64;
+            let start = from_row.min(total) as usize;
+            let end = (start + limit as usize).min(lines.len());
+            let rows = lines[start..end]
+                .iter()
+                .enumerate()
+                .map(|(i, text)| ViewerRowJson {
+                    line: start as u64 + i as u64 + 1,
+                    cells: vec![text.clone()],
                 })
-            }
-            ViewerKind::Xlsx => {
-                let wb = session.workbook.as_mut().expect("xlsx workbook");
+                .collect();
+            Ok(ViewerPageJson {
+                total,
+                columns: vec!["内容".into()],
+                rows,
+            })
+        } else {
+            let wb = session.workbook.as_mut().expect("xlsx workbook");
                 let name = session
                     .sheets
                     .get(sheet_index)
@@ -245,12 +293,12 @@ impl ViewerSessions {
                     columns: (0..width).map(column_letter).collect(),
                     rows,
                 })
-            }
         }
     }
 
     /// CSV (xlsx, raw dump without a header row — spreadsheet data *is* the
-    /// table) / TXT (docx paragraphs). Same cell mapping as `rows`.
+    /// table) / TXT (docx paragraphs, pdf extracted lines). Same cell mapping
+    /// as `rows`.
     pub(crate) fn export(
         &mut self,
         id: u64,
@@ -273,9 +321,10 @@ impl ViewerSessions {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        let result = match session.kind {
-            ViewerKind::Docx => export_docx_txt(session, &tmp),
-            ViewerKind::Xlsx => export_xlsx_csv(session, sheet_index, &tmp),
+        let result = if session.docx_lines.is_some() {
+            export_lines_txt(session, &tmp)
+        } else {
+            export_xlsx_csv(session, sheet_index, &tmp)
         };
         match result {
             Ok(written) => {
@@ -291,8 +340,8 @@ impl ViewerSessions {
     }
 }
 
-fn export_docx_txt(session: &ViewerSession, tmp: &Path) -> Result<u64, IpcError> {
-    let lines = session.docx_lines.as_ref().expect("docx lines");
+fn export_lines_txt(session: &ViewerSession, tmp: &Path) -> Result<u64, IpcError> {
+    let lines = session.docx_lines.as_ref().expect("text lines");
     let mut out = std::io::BufWriter::new(
         File::create(tmp).map_err(|e| IpcError::new("io", format!("创建导出文件失败：{e}")))?,
     );
@@ -526,6 +575,46 @@ mod tests {
         zw.finish().unwrap();
     }
 
+    /// Hand-assembled minimal single-page PDF: one Helvetica text object per
+    /// entry, newlines between them. Good enough for `pdf-extract`.
+    fn write_pdf(path: &Path, lines: &[&str]) {
+        let mut content = String::from("BT\n/F1 12 Tf\n72 720 Td\n");
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                content.push_str("0 -18 Td\n");
+            }
+            content.push_str(&format!("({line}) Tj\n"));
+        }
+        content.push_str("ET");
+        let objs = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        ];
+        let mut body = Vec::from(&b"%PDF-1.4\n"[..]);
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(body.len());
+            body.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref_pos = body.len();
+        body.extend_from_slice(format!("xref\n0 {}\n", objs.len() + 1).as_bytes());
+        body.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &offsets {
+            body.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        body.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n",
+                objs.len() + 1
+            )
+            .as_bytes(),
+        );
+        std::fs::write(path, body).unwrap();
+    }
+
     #[test]
     fn xlsx_open_rows_and_formatting() {
         let dir = temp_dir("xlsx");
@@ -579,6 +668,47 @@ mod tests {
         assert_eq!(page.rows[0].cells, vec!["Hello World"]);
         assert_eq!(page.rows[1].cells, vec!["第二段  保留空格"]);
         assert_eq!(page.rows[2].cells, vec![""]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pdf_text_extraction_and_malformed_input() {
+        let dir = temp_dir("pdf");
+        let p = dir.join("doc.pdf");
+        write_pdf(&p, &["Hello PDF", "Second line"]);
+        let mut sessions = ViewerSessions::default();
+        let info = sessions.open(&p).unwrap();
+        assert_eq!(info.kind, "pdf");
+        assert!(!info.truncated);
+
+        let page = sessions.rows(info.id, 0, 0, 1000).unwrap();
+        let joined = page
+            .rows
+            .iter()
+            .map(|r| r.cells.join(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Hello PDF"), "{joined:?}");
+        assert!(joined.contains("Second line"), "{joined:?}");
+        assert_eq!(page.columns, vec!["内容"]);
+
+        // TXT export rides the same text-lines path as docx.
+        let t = dir.join("out.txt");
+        let stats = sessions.export(info.id, 0, &t).unwrap();
+        let text = std::fs::read_to_string(&t).unwrap();
+        assert!(text.contains("Hello PDF") && text.contains("Second line"), "{text:?}");
+        assert!(stats.written >= 1);
+
+        // Malformed input: an error surfaced to the user, never a panic.
+        let bad = dir.join("bad.pdf");
+        std::fs::write(&bad, b"this is not a pdf at all").unwrap();
+        let err = sessions.open(&bad).unwrap_err();
+        assert!(
+            err.code == "invalid_argument" || err.code == "io",
+            "unexpected code {} ({})",
+            err.code,
+            err.detail.as_deref().unwrap_or("")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
