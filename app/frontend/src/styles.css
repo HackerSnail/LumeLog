@@ -1182,6 +1182,19 @@ html.has-custom-titlebar .win-btns {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
 }
+/* PDF render host (Plan 22): scrollable, canvas centered on a page-like card. */
+.pdf-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  padding: 8px;
+}
+.pdf-canvas {
+  background: #fff;
+  box-shadow: 0 1px 6px var(--shadow);
+}
 /* Parser plugin console output (script-console cap: 200 lines). */
 .parser-console {
   flex: 0 0 auto;

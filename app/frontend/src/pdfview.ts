@@ -60,9 +60,10 @@ export class PdfView {
     }
   }
 
-  /** Render `page` (1-based) at `scale`; cancels any in-flight render. */
-  async render(page: number, scale: number): Promise<void> {
-    if (this.destroyed || !this.doc) return;
+  /** Render `page` (1-based) at `scale`; cancels any in-flight render.
+   *  Resolves with the on-screen CSS width (fit-width math needs it). */
+  async render(page: number, scale: number): Promise<number | null> {
+    if (this.destroyed || !this.doc) return null;
     const doc = this.doc as {
       getPage(n: number): Promise<{
         getViewport(o: { scale: number }): { width: number; height: number };
@@ -76,7 +77,7 @@ export class PdfView {
     this.task?.cancel();
     try {
       const pdfPage = await doc.getPage(clampPage(page, (this.doc as { numPages: number }).numPages));
-      if (this.destroyed) return;
+      if (this.destroyed) return null;
       const dpr = window.devicePixelRatio || 1;
       const viewport = pdfPage.getViewport({ scale: scale * dpr });
       const canvas = this.canvas;
@@ -87,17 +88,19 @@ export class PdfView {
       const ctx = canvas.getContext("2d");
       if (!ctx) {
         this.opts.onError("当前环境不支持 canvas 渲染");
-        return;
+        return null;
       }
       const task = pdfPage.render({ canvasContext: ctx, viewport });
       this.task = task;
       await task.promise;
+      return viewport.width / dpr;
     } catch (e) {
       // A cancelled render (page/zoom changed mid-flight) rejects too — only
       // real failures surface.
       if (!this.destroyed && String(e) !== "Rendering cancelled") {
         this.opts.onError(`PDF 渲染失败：${String(e)}`);
       }
+      return null;
     } finally {
       this.task = null;
     }

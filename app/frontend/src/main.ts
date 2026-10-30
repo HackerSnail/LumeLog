@@ -81,8 +81,10 @@ import {
   type ViewerInfo,
   recentList,
   recentClear,
+  viewerPdfBytes,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
+import { PdfView, clampPage, stepZoom } from "./pdfview";
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
@@ -966,8 +968,23 @@ let viewerInfo: ViewerInfo | null = null;
 let viewerStore: RowStore | null = null;
 let viewerLoaded = 0;
 let viewerToken = 0;
+// pdf 两态（Plan 22）：kind==="pdf" 时表格路径整体让位给 canvas 渲染。
+let viewerPdfBar: HTMLElement | null = null;
+let viewerPdfHost: HTMLElement | null = null;
+let viewerPdf: PdfView | null = null;
+let viewerPdfPage = 1;
+let viewerPdfTotal = 0;
+let viewerPdfZoom = 1;
+let viewerPdfBaseWidth: number | null = null;
+let viewerPdfPrev: HTMLButtonElement | null = null;
+let viewerPdfNext: HTMLButtonElement | null = null;
+let viewerPdfPageInput: HTMLInputElement | null = null;
+let viewerPdfPageLabel: HTMLElement | null = null;
+let viewerPdfZoomSel: HTMLSelectElement | null = null;
+let viewerExportBtn: HTMLButtonElement | null = null;
 
 const VIEWER_WINDOW = 1000;
+const PDF_ZOOMS = ["0.5", "0.75", "1", "1.25", "1.5", "2", "3", "4"];
 
 function buildViewerDock(): HTMLElement {
   if (viewerDockEl) return viewerDockEl;
@@ -983,10 +1000,79 @@ function buildViewerDock(): HTMLElement {
   viewerSheetSel.addEventListener("change", () => void loadViewerRows(true));
   viewerMoreBtn = mkBtn("加载后续 1000 行", "继续取下一页行", () => void loadViewerRows(false));
   viewerMoreBtn.style.display = "none";
-  const exportBtn = mkBtn("导出 CSV", "把当前工作表导出为 CSV（docx 为 TXT）", () => void exportViewer());
-  bar.append(document.createTextNode("工作表 "), viewerSheetSel, viewerMoreBtn, exportBtn);
+  viewerExportBtn = mkBtn("导出 CSV", "把当前工作表导出为 CSV（docx/pdf 为 TXT）", () => void exportViewer());
+  bar.append(document.createTextNode("工作表 "), viewerSheetSel, viewerMoreBtn, viewerExportBtn!);
 
-  dock.append(bar, (viewerHostEl = mkHost()));
+  // pdf 工具条：默认隐藏，kind==="pdf" 时替换表格控件。
+  viewerPdfBar = document.createElement("div");
+  viewerPdfBar.className = "can-dockbar";
+  viewerPdfBar.style.display = "none";
+  viewerPdfPrev = mkBtn("◀", "上一页", () => {
+    viewerPdfPage = clampPage(viewerPdfPage - 1, viewerPdfTotal);
+    void renderViewerPdf();
+  });
+  viewerPdfNext = mkBtn("▶", "下一页", () => {
+    viewerPdfPage = clampPage(viewerPdfPage + 1, viewerPdfTotal);
+    void renderViewerPdf();
+  });
+  viewerPdfPageInput = document.createElement("input");
+  viewerPdfPageInput.type = "text";
+  viewerPdfPageInput.className = "can-fnum";
+  viewerPdfPageInput.style.width = "56px";
+  viewerPdfPageInput.addEventListener("change", () => {
+    viewerPdfPage = clampPage(Number(viewerPdfPageInput!.value), viewerPdfTotal);
+    void renderViewerPdf();
+  });
+  viewerPdfPageLabel = document.createElement("span");
+  viewerPdfPageLabel.className = "can-status";
+  viewerPdfZoomSel = document.createElement("select");
+  viewerPdfZoomSel.className = "can-src";
+  for (const z of PDF_ZOOMS) {
+    const o = document.createElement("option");
+    o.value = z;
+    o.textContent = `${Math.round(Number(z) * 100)}%`;
+    viewerPdfZoomSel.append(o);
+  }
+  viewerPdfZoomSel.value = "1";
+  viewerPdfZoomSel.addEventListener("change", () => {
+    viewerPdfZoom = Number(viewerPdfZoomSel!.value);
+    void renderViewerPdf();
+  });
+  const fitBtn = mkBtn("适应宽度", "缩放到当前面板宽度", () => {
+    if (viewerPdfBaseWidth && viewerPdfHost) {
+      viewerPdfZoom = Math.max(0.5, Math.min(4, (viewerPdfHost.clientWidth - 24) / viewerPdfBaseWidth));
+      viewerPdfZoomSel!.value = String(viewerPdfZoom);
+    }
+    void renderViewerPdf();
+  });
+  const zoomIn = mkBtn("＋", "放大（×1.25）", () => {
+    viewerPdfZoom = stepZoom(viewerPdfZoom, "in");
+    viewerPdfZoomSel!.value = String(viewerPdfZoom);
+    void renderViewerPdf();
+  });
+  const zoomOut = mkBtn("－", "缩小（×0.8）", () => {
+    viewerPdfZoom = stepZoom(viewerPdfZoom, "out");
+    viewerPdfZoomSel!.value = String(viewerPdfZoom);
+    void renderViewerPdf();
+  });
+  viewerPdfBar.append(
+    viewerPdfPrev!,
+    viewerPdfPageInput!,
+    viewerPdfPageLabel!,
+    viewerPdfNext!,
+    document.createTextNode(" 缩放 "),
+    zoomOut,
+    viewerPdfZoomSel!,
+    zoomIn,
+    fitBtn,
+  );
+
+  const pdfHost = document.createElement("div");
+  pdfHost.className = "pdf-host";
+  pdfHost.style.display = "none";
+  viewerPdfHost = pdfHost;
+
+  dock.append(bar, viewerPdfBar, (viewerHostEl = mkHost()), pdfHost);
   viewerDockEl = dock;
   return dock;
 }
@@ -1004,6 +1090,9 @@ function toggleViewerDock(): void {
   if (!viewerDockVisible && viewerInfo !== null) {
     void viewerClose(viewerInfo.id).catch(() => {});
     viewerInfo = null;
+    viewerPdf?.destroy();
+    viewerPdf = null;
+    viewerPdfTotal = 0;
   }
 }
 
@@ -1027,6 +1116,16 @@ async function openViewerFile(): Promise<void> {
     if (viewerInfo !== null) void viewerClose(viewerInfo.id).catch(() => {});
     viewerInfo = info;
     if (!viewerDockVisible) toggleViewerDock();
+    setViewerMode(info.kind === "pdf" ? "pdf" : "table");
+    if (info.kind === "pdf") {
+      // 渲染在前端：后端只出字节。
+      const bytes = await viewerPdfBytes(info.id);
+      viewerPdfTotal = (await viewerPdf?.load(bytes)) ?? 0;
+      viewerPdfPage = 1;
+      viewerPdfBaseWidth = null;
+      await renderViewerPdf();
+      return;
+    }
     const sel = viewerSheetSel;
     if (sel) {
       sel.textContent = "";
@@ -1041,6 +1140,36 @@ async function openViewerFile(): Promise<void> {
   } catch (err) {
     reportError(err);
   }
+}
+
+/** Switch the viewer dock between the table path (xlsx/docx) and pdf render. */
+function setViewerMode(mode: "table" | "pdf"): void {
+  const pdf = mode === "pdf";
+  if (viewerSheetSel) viewerSheetSel.style.display = pdf ? "none" : "";
+  if (viewerMoreBtn) viewerMoreBtn.style.display = "none";
+  if (viewerHostEl) viewerHostEl.style.display = pdf ? "none" : "";
+  if (viewerPdfBar) viewerPdfBar.style.display = pdf ? "" : "none";
+  if (viewerPdfHost) viewerPdfHost.style.display = pdf ? "" : "none";
+  if (viewerExportBtn) viewerExportBtn.textContent = pdf ? "导出 TXT" : "导出 CSV";
+  if (pdf && viewerPanel) {
+    // detach the table so its scroll window stops painting behind the canvas
+    viewerPanel.setStatus("");
+  }
+  if (!pdf) {
+    viewerPdf?.destroy();
+    viewerPdf = null;
+    viewerPdfTotal = 0;
+  }
+}
+
+async function renderViewerPdf(): Promise<void> {
+  if (!viewerPdf || viewerPdfTotal === 0) return;
+  const page = clampPage(viewerPdfPage, viewerPdfTotal);
+  viewerPdfPage = page;
+  if (viewerPdfPageInput) viewerPdfPageInput.value = String(page);
+  if (viewerPdfPageLabel) viewerPdfPageLabel.textContent = `/ ${viewerPdfTotal} 页`;
+  const width = await viewerPdf.render(page, viewerPdfZoom);
+  if (width !== null) viewerPdfBaseWidth = width / viewerPdfZoom;
 }
 
 /** Pull one window of rows; `reset` restarts from row 1 (sheet switch/open). */

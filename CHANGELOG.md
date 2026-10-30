@@ -15,6 +15,12 @@
 `PdfView`：动态 `import("pdfjs-dist")`（主包零增长）、worker 经 `?url` 静态 import 随本模块进 pdf chunk、`getDocument({data})` 直收后端字节；`render(page, scale)` 用 DPR 缩放 canvas，旧 RenderTask `cancel()` 防翻页竞态；纯函数 `clampPage/stepZoom`（×1.25，0.5–4）单独导出可测。文档销毁用 `cleanup()`（pdfjs-dist 6 的类型里 PDFDocumentProxy 无 destroy）。
 **验证:** `npx tsc --noEmit` 净；`npx vitest run src/pdfview.test.ts` 3 pass（页码钳制边界、缩放上下限、未 load/destroy 后 render 为 no-op 且零错误）。
 
+### Task 3. dock 两态切换（`main.ts` + 样式）
+**Files:** Modify `app/frontend/src/main.ts`（`buildViewerDock` 加 pdf 工具条（◀/页码输入/共 N 页/▶、缩放下拉 0.5–4 + ＋/－（`stepZoom`）+ 适应宽度）与 `.pdf-host` 宿主；`setViewerMode("pdf"|"table")` 两态互切（表格控件隐藏、导出按钮文案 CSV↔TXT）；`openViewerFile` kind==="pdf" 时 `viewerPdfBytes` → `pdfView.load` → 首页渲染；`renderViewerPdf` 同步页码/标签并记录 `viewerPdfBaseWidth`（适应宽度的基准）；dock 收起/切回表格即 destroy）；Modify `app/frontend/src/styles.css`（`.pdf-host` 滚动容器 + `.pdf-canvas` 页面卡片阴影）。
+**Why:** `render` 返回渲染后 CSS 宽度，`适应宽度` 才能从任意缩放换算基准页宽；表格路径在 pdf 模式下整体让位，避免隐藏的虚拟表格继续响应滚动。
+**验证:** `npx tsc --noEmit` 净；`npm test` 145 pass（22 文件）+ `npm run build` 通过；主 chunk 521.5KB（Plan 15 基线 506.9，增量来自 Plan 20/22 的 UI 代码），pdfjs 落独立异步 chunk（103.9KB）+ worker 按需资产（1.26MB），主包约束满足。另清掉误入上一提交的临时文件 `npm-out.txt`。
+**未验:** 真实多页 PDF 的翻页/缩放观感、CJK 字体渲染需 `npm run tauri dev` 人工过。
+
 ## 2026-10-30 — Plan 21 PDF 查看增量1：纯 Rust 文本提取（feat/pdf-text）
 
 **依据：** `docs/specs/2026-10-30-pdf-viewer-proposal.md` 建议的分步立项增量1（文本提取先行），延续 Plan 19 查看器体系。真渲染增量（pdf.js/pdfium）仍待需求反馈另立项。
