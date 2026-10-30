@@ -39,4 +39,5 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
 ## 待做
 
 - [ ] 插件接口，支持用户扩展解析器：冷门编程语言的高亮/解析、冷门日志与报文格式，都应能以插件形式补入，不改主程序
+      ↳ 增量1 已交付（Plan 17 `feat/plugin-syntax`，spec `docs/specs/2026-10-30-plugin-syntax-design.md`）：声明式语法高亮插件——`$APP_CONFIG/LumeLog/plugins/*.json` 一个文件一个语法（`id/name/extensions/lineComment/keywords/rules`，规则 `regex + tag`，tag 限 className/keyword/number/string/comment/propertyName/operator 七个），Rust `plugins.rs` 校验加载（坏文件逐条报错不阻塞、id 按文件名序去重、`deny_unknown_fields`），前端编译为 StreamLanguage（正则 JS 方言校验在前端，坏规则跳过并回报）；状态栏「语法」下拉出现插件模式（id `plugin:<id>`），AUTO 按扩展名匹配（内置优先）；命令面板「重载语法插件」。不执行插件内代码；冷门**数据格式**解析（QuickJS 沙箱）与 Wasm host 为增量2/3，待做。
 - [ ] 常见文档格式查看与导出（PDF、PPT、docx/xlsx 等 Office 格式）

@@ -21,6 +21,11 @@
 **Why:** 插件加载晚于 `Statusbar` 构造，下拉必须可重建；重载只影响新开文档与手动切换，不重建已打开编辑器。
 **验证:** `npx tsc --noEmit` 净；`npm test` 132 pass（20 文件；新增 statusbar 重建下拉/保选中/回传 `plugin:<id>`）+ `npm run build` 通过。
 
+### Task 4. 文档收尾
+**Files:** Modify `docs/features.md`（待做第 1 条加增量1 交付注记：manifest 路径、字段摘要、增量2/3 边界）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+**未验:** 插件实际高亮观感需 `npm run tauri dev` 放一个示例 JSON 人工过（自动化只覆盖到解析器挂载与下拉）。
+
 ## 2026-10-30 — Plan 16 编码扩展：EUC-JP / EUC-KR / KOI8-R / KOI8-U（feat/encoding-extension）
 
 **依据：** spec `docs/specs/2026-10-30-encoding-extension-design.md`；计划 `docs/plans/2026-10-30-encoding-extension.md`。对应 `docs/features.md` 待做第 3 条（原文把 Big5、Shift-JIS 列为缺口是笔误，两者 v1 已交付）。
