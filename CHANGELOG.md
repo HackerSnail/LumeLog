@@ -16,6 +16,11 @@
 **Why:** Rust 只验 shape，JS 正则方言（如 lookahead）由前端 `new RegExp(src, "y")` 编译把关；插件模式 id 带 `plugin:` 前缀，与内置 id 空间不相交，状态栏与 `applyMode` 无需特判。
 **验证:** `npx vitest run src/language.test.ts` 10 pass（插件解析出 `LanguageSupport` 且可 parse、AUTO 内置优先不被劫持、坏正则跳过且 warning 含插件名、`syntaxModes` 内置在前插件在后且空重载后消失、未知 `plugin:x` → null）+ `tsc --noEmit` 净。
 
+### Task 3. 接线（`statusbar.ts` + `editor.ts` + `main.ts`）
+**Files:** Modify `app/frontend/src/statusbar.ts`（`SyntaxModeOption`、`setSyntaxModes()` 重建下拉且保住仍在列表中的当前选中、`onMode` 回调签名放宽为 `(mode: string) => void`）、`app/frontend/src/editor.ts`（`setMode(mode: ModeId | null)`、首语言走 `autoModeId(opts.ext)`）、`app/frontend/src/main.ts`（`initSyntaxPlugins()`：启动加载 + `pluginsInFlight` 合并连点 + 汇总 toast/console.warn，末尾 bootstrap 处 `void initSyntaxPlugins()`；`applyMode` 收 string 并在 AUTO 时走 `autoModeId`；命令面板新增「重载语法插件」palette-only 条目，不占 keymap 动作位）；Modify `app/frontend/src/statusbar.test.ts`（+1）。
+**Why:** 插件加载晚于 `Statusbar` 构造，下拉必须可重建；重载只影响新开文档与手动切换，不重建已打开编辑器。
+**验证:** `npx tsc --noEmit` 净；`npm test` 132 pass（20 文件；新增 statusbar 重建下拉/保选中/回传 `plugin:<id>`）+ `npm run build` 通过。
+
 ## 2026-10-30 — Plan 16 编码扩展：EUC-JP / EUC-KR / KOI8-R / KOI8-U（feat/encoding-extension）
 
 **依据：** spec `docs/specs/2026-10-30-encoding-extension-design.md`；计划 `docs/plans/2026-10-30-encoding-extension.md`。对应 `docs/features.md` 待做第 3 条（原文把 Big5、Shift-JIS 列为缺口是笔误，两者 v1 已交付）。

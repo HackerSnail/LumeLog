@@ -14,6 +14,7 @@ import {
   StreamLanguage,
   syntaxHighlighting,
   LanguageSupport,
+  type StreamParser,
   type StringStream,
 } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
@@ -250,7 +251,7 @@ export function registerPluginLanguages(plugins: SyntaxPlugin[]): string[] {
  * never hijack a language the app ships.
  */
 export function autoModeId(ext: string): ModeId | null {
-  return modeIdForExt(ext) ?? pluginExts.get((ext ?? "").trim().toLowerCase()) ?? null;
+  return modeIdForExt(ext) ?? (pluginExts.get((ext ?? "").trim().toLowerCase()) as ModeId | undefined) ?? null;
 }
 
 /** Status-bar dropdown entries: built-ins first, then plugin modes. */
@@ -290,8 +291,11 @@ function buildPluginLanguage(
         return rule.tag;
       }
     }
-    const word = stream.match(/^\w+/);
-    if (word) return keywords.has(word[0]) ? "keyword" : null;
+    const word = /^\w+/.exec(stream.string.slice(stream.pos));
+    if (word) {
+      stream.pos += word[0].length;
+      return keywords.has(word[0]) ? "keyword" : null;
+    }
     stream.next();
     return null;
   };

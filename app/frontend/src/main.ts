@@ -69,6 +69,7 @@ import {
   type TimeFormat,
   type CanExportStats,
   type RecoveryEntry,
+  syntaxPluginsList,
 } from "./ipc";
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
@@ -83,7 +84,7 @@ import { type CanFilter } from "./canfilter";
 import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
-import { modeIdForExt, type ModeChoice } from "./language";
+import { autoModeId, registerPluginLanguages, syntaxModes, type ModeId } from "./language";
 import { initTheme } from "./theme";
 import {
   makeResizable,
@@ -1404,6 +1405,32 @@ async function initRecovery(): Promise<void> {
   if (recoveryOn) void checkRecovery();
 }
 
+// ---- syntax plugins (plugin interface, increment 1) -------------------------
+
+/** Plugin loads replace the whole registry, so overlapping calls are merged. */
+let pluginsInFlight: Promise<void> | null = null;
+
+async function initSyntaxPlugins(): Promise<void> {
+  if (pluginsInFlight) return pluginsInFlight;
+  pluginsInFlight = (async () => {
+    try {
+      const reply = await syntaxPluginsList();
+      const warnings = registerPluginLanguages(reply.plugins);
+      status.setSyntaxModes(syntaxModes());
+      const problems = [...warnings, ...reply.errors];
+      for (const p of problems) console.warn(p);
+      if (problems.length > 0) {
+        toastMsg(`${problems.length} 条语法插件问题（详情见控制台）`);
+      }
+    } catch {
+      // Plugin loading is optional; a shell without the command stays usable.
+    } finally {
+      pluginsInFlight = null;
+    }
+  })();
+  return pluginsInFlight;
+}
+
 // ---- external modification watcher (spec §4.4/A10, M3 B2) -------------------
 
 async function initWatch(): Promise<void> {
@@ -1884,11 +1911,13 @@ async function changeEncoding(label: string): Promise<void> {
   }
 }
 
-function applyMode(docId: number, mode: ModeChoice): void {
+function applyMode(docId: number, mode: string): void {
   const ds = docStates.get(docId);
   const handle = editors.get(docId); // read-only docs have no syntax mode
   if (!ds || !handle) return;
-  const resolved = mode === "auto" ? modeIdForExt(extOf(ds.path)) : mode;
+  // `mode` comes from the dropdown / caller as a plain string (builtin name or
+  // `plugin:<id>`); only AUTO needs resolution against the doc's extension.
+  const resolved = (mode === "auto" ? autoModeId(extOf(ds.path)) : mode) as ModeId | null;
   handle.setMode(resolved === "plain" ? null : resolved); // reconfigure language only
 }
 
@@ -2660,6 +2689,7 @@ function buildCommands(): Command[] {
     ...bound,
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "script", title: "脚本…", run: () => openScriptManager() },
+    { id: "reload-plugins", title: "重载语法插件", run: () => void initSyntaxPlugins() },
     { id: "mf4", title: "测量数据…", run: () => void openMf4File() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
@@ -2813,4 +2843,5 @@ registerShortcuts();
 void appPing().catch(() => {});
 void initRecovery();
 void initWatch();
+void initSyntaxPlugins();
 void initKeymap();
