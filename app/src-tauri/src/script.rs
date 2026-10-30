@@ -27,8 +27,8 @@ pub(crate) const MAX_SCRIPT_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub(crate) const MAX_SECONDS: u64 = 300;
 pub(crate) const PROGRESS_EVERY: u64 = 100_000;
-const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
-const STACK_LIMIT: usize = 1024 * 1024;
+pub(crate) const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+pub(crate) const STACK_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,7 +224,7 @@ pub(crate) fn delete_script_in(dir: &Path, name: &str) -> Result<(), IpcError> {
 /// `console.*` shim: formats arguments (objects via JSON) and forwards one
 /// string to the host `__log`. Formatting lives in JS so no value marshalling is
 /// needed in Rust.
-const CONSOLE_SHIM: &str = r#"
+pub(crate) const CONSOLE_SHIM: &str = r#"
 (function () {
   const emit = globalThis.__log;
   const fmt = (v) => {
@@ -246,7 +246,7 @@ enum RunStop {
     Cancelled,
 }
 
-fn catch_message(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
+pub(crate) fn catch_message(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
     let caught = ctx.catch();
     if caught.is_object() {
         if let Ok(obj) = Object::from_js(ctx, caught.clone()) {

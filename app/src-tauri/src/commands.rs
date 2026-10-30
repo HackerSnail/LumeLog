@@ -1822,6 +1822,75 @@ pub fn script_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Resul
     }
 }
 
+// ---- parser plugins (increment 2) --------------------------------------------
+
+/// Stream-parse the document with a QuickJS parser plugin (`plugins/*.js`).
+/// Async double-channel like `can_parse`: returns a request id immediately,
+/// rows arrive on `on_batch`, the tally on `on_done`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // IPC args: doc/plugin id + 3 channels
+pub fn parser_run(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    plugin_id: String,
+    on_batch: Channel<Vec<crate::plugins::ParserRowJson>>,
+    on_console: Channel<crate::script::ScriptConsole>,
+    on_done: Channel<crate::plugins::ParserStats>,
+) -> Result<u64, IpcError> {
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    // The frontend names the plugin by id; the path is resolved backend-side.
+    let dir = match crate::plugins::plugins_dir(&app) {
+        Ok(d) => d,
+        Err(e) => return Err(fail(e)),
+    };
+    let plugin_path = match crate::plugins::find_parser_plugin(&dir, &plugin_id) {
+        Ok(p) => p,
+        Err(e) => return Err(fail(e)),
+    };
+    let _handle = tauri::async_runtime::spawn_blocking(move || {
+        let cancel_fn = Arc::new(move || cancel.load(Ordering::Relaxed));
+        let mut batch = |rows| {
+            let _ = on_batch.send(rows);
+        };
+        let mut console = |m| {
+            let _ = on_console.send(m);
+        };
+        // A panic inside the runner must still release the cancel registration
+        // and answer the front end, or the dock stays locked forever.
+        let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::plugins::run_parser_plugin(doc_arc, &plugin_path, &mut batch, &mut console, cancel_fn)
+        }))
+        .unwrap_or_else(|_| crate::plugins::ParserStats {
+            error: Some("解析运行器内部异常".into()),
+            ..Default::default()
+        });
+        let _ = on_done.send(stats);
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+#[tauri::command]
+pub fn parser_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod script_cmd_tests {
     use super::*;

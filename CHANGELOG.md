@@ -2,6 +2,40 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 18 插件接口 增量2：QuickJS 数据解析插件（feat/plugin-parser）
+
+**依据：** spec `docs/specs/2026-10-30-plugin-parser-design.md`；计划 `docs/plans/2026-10-30-plugin-parser.md`。接 Plan 17，覆盖 `docs/features.md` 待做第 1 条的「冷门日志与报文格式」；Wasm host 为增量3。
+
+### Task 1. 解析器元数据加载（`plugins.rs` + `parser_plugins_list`）
+**Files:** Modify `app/src-tauri/src/plugins.rs`（共享校验助手 `check_id/check_name/check_extension` 抽出供两类插件复用；`ParserColumnJson/ParserPluginInfo/ParserPluginsReply`；`load_parser_metadata()`：rquickjs 沙箱执行 `*.js` 一次、读顶层 `plugin` 对象（`var` 走 global、`const/let` 走 script.rs 同款回退 eval）、校验 id/name/extensions/columns（key 1–32 `[A-Za-z0-9_]` 不重复、label 1–64、列 1–32）且 `parseLine` 必须为函数；`list_parser_plugins()`：文件名序、单文件失败不阻塞、id first wins、单文件 5s 超时 + 全表 15s 预算；命令 `parser_plugins_list`）；Modify `app/src-tauri/src/script.rs`（`MEMORY_LIMIT/STACK_LIMIT/CONSOLE_SHIM/catch_message` 改 `pub(crate)` 供复用）；`lib.rs` 注册。
+**Why:** 元数据（id/列定义）必须执行才能拿到，但只执行一次且不调用 `parseLine`；列定义在前端建表格需要 Rust 侧先验形状。15s 预算防「一个死循环插件拖死整个列表」。
+**验证:** `cargo test -p lumelog-app plugins::` 13 pass（新增：合法元数据、坏形状 4 例各自报错带文件名、顶层 `const plugin` 可读到、坏 JS 不阻塞其它、id 重复 first wins、`.json` 不混入解析器列表）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 2. 流式执行 + 命令（`run_parser_plugin` + `parser_run/parser_cancel`）
+**Files:** Modify `app/src-tauri/src/plugins.rs`（`ParserRowJson{line,cells}`/`ParserStats{rows,lines,skipped,cancelled,error}`；`CELLS_SHIM`：行对象→列序字符串数组的转换放 JS（`String(number)` 保持 JS 语义），不支持的值类型返回 `null` → Rust 置空 + 一次性 console warning；单元格截断 4096 字符；`run_parser_plugin()`：独立沙箱（64MiB/1MiB 栈/300s + interrupt handler）、`DocLines` 逐行调 `parseLine(line, ctx)`、512 行/批 emit、`find_parser_plugin()` 按 id 后端定位文件；`read_columns()` 运行时复读列 key）；Modify `app/src-tauri/src/commands.rs`（`parser_run`：can_parse 式异步双通道 + `on_console` 第三通道、`begin_search/end_search` 取消注册、`spawn_blocking` + `catch_unwind` 兜底"解析运行器内部异常"；`parser_cancel`）。
+**Why:** 前端只传插件 id 不传路径（防注入）；取消注册复用全局 cancel 表；值转换放 JS 避免 Rust 重写 JS 数字格式化。
+**验证:** `cargo test -p lumelog-app plugins::` 17 pass（端到端：行→cells 顺序/number→"1"/对象列置空+一次性 warning、null 跳过计数、cancel 恰停 1 行、JS 抛错带行号、console.log 透传、按 id 定位/未知 id `plugin_not_found`）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净。
+
+### Task 3. 前端桥（`ipc.ts` + 错误码）
+**Files:** Modify `app/frontend/src/ipc.ts`（`ParserColumn/ParserPluginInfo/ParserPluginsReply/ParserRow/ParserStats` + `parserPluginsList/parserRun/parserCancel`（双通道 + `onConsole` 照 canParse）；错误码 `plugin_not_found`/`plugin_bad_manifest` 进 `IpcErrorCode` 与中文表）；Modify `app/frontend/src/ipc.test.ts`（+2）。
+**验证:** `npx tsc --noEmit` 净；`npx vitest run src/ipc.test.ts` 21 pass。
+
+### Task 4. `ParserPanel`（新 `parserpanel.ts`）
+**Files:** Create `app/frontend/src/parserpanel.ts`、`parserpanel.test.ts`（5）；Modify `app/frontend/src/styles.css`（`#parser-dock` 并入 `#can-dock` 的高度契约选择器）。
+`RowStore`（纯数据累加器，同 FrameStore）+ `ParserPanel`：列模型由插件 `columns` 动态生成（首列固定「行号」）、自写虚拟滚动镜像 canpanel（`ROW_HEIGHT` + spacer + 可视窗 + rAF 合并重绘）、行点击回传 1-based 源行、`setStatus` 状态行；无过滤/导出/列显隐（spec §4）。CSS 复用 `can-*` 类，两表观感一致。
+**Why:** canpanel 的列定义/过滤是 CAN 专用的，mf4-table 无虚拟化，均不可直接复用；取 canpanel 骨架裁剪是最小改动路径。
+**验证:** `npx vitest run src/parserpanel.test.ts` 5 pass（列头动态渲染、批量 push 累积、行点击回传、状态行、destroy 后不再响应；rAF 合并用「等一个完整 rAF tick」的 flush 消除 jsdom 16ms 定时器抖动）+ `npx tsc --noEmit` 净。
+
+### Task 5. dock 接线（`main.ts`）
+**Files:** Modify `app/frontend/src/main.ts`（工具栏「解析」按钮；`buildParserDock()`（插件下拉 + 解析/停止 + 重载 + 清空 + 控制台区）；`toggleParserDock()`（与报文/测量 dock 三向互斥，收起即停跑）；`loadParserPlugins()`（按活动文档扩展名预选、错误汇总 toast + console.warn）；`applyParserColumns()` 切插件即重建 store/列；`onParserRunClick()`：parserToken 丢弃旧响应、onDone 出汇总文案；`appendParserConsole()` 200 行上限；handleClose 停跑）。
+**Why:** 解析结果是一次性内存态，dock 隐藏/文档关闭都直接停跑，不做按文档缓存。
+**验证:** `npx tsc --noEmit` 净；`npm test` 139 pass（21 文件）+ `npm run build` 通过。
+**未验:** dock 实际交互（放示例插件解析、点行跳转）需 `npm run tauri dev` 人工过。
+
+### Task 6. 文档收尾
+**Files:** Modify `docs/features.md`（待做第 1 条注记更新：增量2 已交付、剩余 Wasm host 与表格过滤/导出增强）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+
 ## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。

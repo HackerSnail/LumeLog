@@ -70,7 +70,12 @@ import {
   type CanExportStats,
   type RecoveryEntry,
   syntaxPluginsList,
+  parserPluginsList,
+  parserRun,
+  parserCancel,
+  type ParserPluginInfo,
 } from "./ipc";
+import { ParserPanel, RowStore } from "./parserpanel";
 import { pickTimelineInput, type TimelineSelection } from "./query";
 import { Debouncer, formatSavedAt, humanSize } from "./recovery";
 import { eventToAccel, DEFAULT_BINDINGS, mergeBindings, type ActionId } from "./keymap";
@@ -245,6 +250,7 @@ function layout(): void {
     mkBtn("报文面板", "显示 / 隐藏 CAN 报文面板", () => toggleCanDock()),
     mkBtn("测量", "打开 MF4 测量文件（表格浏览与导出）", () => void openMf4File()),
     mkBtn("脚本", "打开脚本管理器（QuickJS 逐行变换）", () => openScriptManager()),
+    mkBtn("解析", "用解析插件把当前文档解析为表格（plugins 目录）", () => toggleParserDock()),
     mkBtn("侧栏", "显示 / 隐藏侧栏", () => toggleSidebar()),
     mkBtn("信息", "显示 / 隐藏文档信息栏", () => toggleInspector()),
     mkBtn("主题", "切换主题（浅色 / 暗黑 / 吸血鬼 / 跟随系统）", () => theme.cycle()),
@@ -302,7 +308,7 @@ function layout(): void {
   panel.id = "search-panel";
   panel.className = "search-panel";
   panel.style.display = "none";
-  center.append(tabsEl, panel, buildCanDock(), buildMf4Dock());
+  center.append(tabsEl, panel, buildCanDock(), buildMf4Dock(), buildParserDock());
 
   sidebarHandleEl = document.createElement("div");
   sidebarHandleEl.className = "pane-resizer";
@@ -606,6 +612,7 @@ async function openMf4File(): Promise<void> {
     opened = null; // the session now belongs to mf4SessionId/closeMf4
     mf4Path = picked;
     if (canDockVisible) toggleCanDock();
+    if (parserDockVisible) toggleParserDock();
     const host = buildMf4Dock();
     host.style.display = "";
     mf4View = new Mf4View(host, {
@@ -744,6 +751,199 @@ function closeMf4(): void {
   }
 }
 
+// ---- parser plugin dock (plugin interface, increment 2) ---------------------
+
+let parserDockEl: HTMLElement | null = null;
+let parserDockVisible = false;
+let parserPanel: ParserPanel | null = null;
+let parserHostEl: HTMLElement | null = null;
+let parserSel: HTMLSelectElement | null = null;
+let parserRunBtn: HTMLButtonElement | null = null;
+let parserConsoleEl: HTMLElement | null = null;
+let parserStore: RowStore | null = null;
+let parserList: ParserPluginInfo[] = [];
+let parserReqId: number | null = null;
+let parserToken = 0;
+
+function buildParserDock(): HTMLElement {
+  if (parserDockEl) return parserDockEl;
+  const dock = document.createElement("div");
+  dock.id = "parser-dock";
+  dock.className = "can-dock";
+  dock.style.display = "none";
+
+  const bar = document.createElement("div");
+  bar.className = "can-dockbar";
+  parserSel = document.createElement("select");
+  parserSel.className = "can-src";
+  parserSel.addEventListener("change", () => applyParserColumns());
+  parserRunBtn = mkBtn("解析", "用选中的解析插件解析当前文档", () => void onParserRunClick());
+  const reloadBtn = mkBtn("重载插件", "重新扫描 plugins 目录", () => void loadParserPlugins(true));
+  const clearBtn = mkBtn("清空", "清空解析结果", () => {
+    parserStore?.clear();
+    parserPanel?.render();
+    parserPanel?.setStatus("已清空");
+  });
+  bar.append(document.createTextNode("插件 "), parserSel, parserRunBtn, reloadBtn, clearBtn);
+
+  const consoleBox = document.createElement("div");
+  consoleBox.className = "parser-console";
+  consoleBox.style.display = "none";
+  parserConsoleEl = consoleBox;
+
+  dock.append(bar, (parserHostEl = mkHost()), consoleBox);
+  parserDockEl = dock;
+  return dock;
+}
+
+function toggleParserDock(): void {
+  parserDockVisible = !parserDockVisible;
+  if (parserDockEl) parserDockEl.style.display = parserDockVisible ? "" : "none";
+  if (parserDockVisible) {
+    // One bottom dock at a time (CanPanel/MF4 同款互斥).
+    if (mf4SessionId !== null) closeMf4();
+    if (canDockVisible) toggleCanDock();
+    ensureParserPanel();
+    void loadParserPlugins(false);
+  }
+  if (!parserDockVisible && parserReqId !== null) {
+    stopParserRun(); // hiding the dock stops the run (results are ephemeral)
+  }
+}
+
+function ensureParserPanel(): void {
+  if (parserPanel || !parserHostEl) return;
+  parserPanel = new ParserPanel(parserHostEl, {
+    onRowActivate: (lineNumber) => revealSourceLine(lineNumber),
+    onError: (e) => toastMsg(e),
+  });
+}
+
+/** Refresh the plugin dropdown; preselects the plugin matching the active
+ *  document's extension. `report` surfaces load errors as a toast. */
+async function loadParserPlugins(report: boolean): Promise<void> {
+  const token = ++parserToken;
+  try {
+    const reply = await parserPluginsList();
+    if (token !== parserToken) return;
+    for (const e of reply.errors) console.warn(e);
+    if (reply.errors.length > 0 && report) {
+      toastMsg(`${reply.errors.length} 个解析插件加载失败（详情见控制台）`);
+    }
+    parserList = reply.parsers;
+    const sel = parserSel;
+    if (!sel) return;
+    sel.textContent = "";
+    for (const p of reply.parsers) {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = `${p.name}（${p.columns.length} 列）`;
+      sel.append(o);
+    }
+    // Preselect by the active doc's extension, else the first plugin.
+    const a = tabs.active();
+    const ds = a ? docStates.get(a.info.docId) : undefined;
+    const ext = ds ? extOf(ds.path) : "";
+    const match = reply.parsers.find((p) =>
+      p.extensions.some((e) => e.toLowerCase() === ext),
+    );
+    if (match) sel.value = match.id;
+    applyParserColumns();
+    if (reply.parsers.length === 0) parserPanel?.setStatus("plugins 目录没有可用的解析插件");
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/** Swap the column set for the selected plugin; rows from other plugins are
+ *  dropped (different shape). */
+function applyParserColumns(): void {
+  const id = parserSel?.value;
+  const plugin = parserList.find((p) => p.id === id);
+  if (!plugin) {
+    parserPanel?.setColumns([]);
+    return;
+  }
+  parserStore = new RowStore();
+  parserPanel?.attachStore(parserStore);
+  parserPanel?.setColumns(plugin.columns);
+  parserPanel?.render();
+  parserPanel?.setStatus(`已选插件：${plugin.name}，点「解析」开始`);
+}
+
+async function onParserRunClick(): Promise<void> {
+  if (parserReqId !== null) {
+    stopParserRun();
+    return;
+  }
+  const a = tabs.active();
+  if (!a) {
+    toastMsg("请先打开一个文档");
+    return;
+  }
+  const pluginId = parserSel?.value;
+  if (!pluginId) {
+    toastMsg("没有可用的解析插件");
+    return;
+  }
+  const plugin = parserList.find((p) => p.id === pluginId);
+  if (!plugin) return;
+  parserStore = new RowStore();
+  parserPanel?.attachStore(parserStore);
+  parserPanel?.setColumns(plugin.columns);
+  parserPanel?.setStatus("解析中…");
+  setParserBusy(true);
+  if (parserConsoleEl) parserConsoleEl.textContent = "";
+  const token = ++parserToken;
+  try {
+    parserReqId = await parserRun({
+      docId: a.info.docId,
+      pluginId,
+      onBatch: (rows) => {
+        if (token !== parserToken) return; // dock closed / plugin switched
+        parserStore?.push(rows);
+        parserPanel?.render();
+      },
+      onConsole: (m) => appendParserConsole(m),
+      onDone: (s) => {
+        if (token !== parserToken) return;
+        parserReqId = null;
+        setParserBusy(false);
+        parserPanel?.setStatus(
+          s.error
+            ? `解析失败：${s.error}`
+            : s.cancelled
+              ? "已取消"
+              : `已解析 ${s.rows} 行 · 跳过 ${s.skipped} 行 · 共扫描 ${s.lines} 行`,
+        );
+      },
+    });
+  } catch (err) {
+    parserReqId = null;
+    setParserBusy(false);
+    reportError(err);
+  }
+}
+
+function stopParserRun(): void {
+  if (parserReqId !== null) void parserCancel(parserReqId).catch(() => {});
+}
+
+function setParserBusy(busy: boolean): void {
+  if (parserRunBtn) parserRunBtn.textContent = busy ? "停止" : "解析";
+}
+
+function appendParserConsole(m: { level: string; text: string }): void {
+  if (!parserConsoleEl) return;
+  parserConsoleEl.style.display = "";
+  const line = document.createElement("div");
+  line.textContent = `[${m.level}] ${m.text}`;
+  parserConsoleEl.append(line);
+  // Same 200-line cap as the script console.
+  while (parserConsoleEl.childElementCount > 200) parserConsoleEl.firstElementChild?.remove();
+  parserConsoleEl.scrollTop = parserConsoleEl.scrollHeight;
+}
+
 /** The view-filter toolbar; each change rebuilds the active doc's `CanFilter`. */
 function buildCanFilterRow(): HTMLElement {
   const row = document.createElement("div");
@@ -843,6 +1043,7 @@ function toggleCanDock(): void {
   if (canDockEl) canDockEl.style.display = canDockVisible ? "" : "none";
   if (canDockVisible) {
     if (mf4SessionId !== null) closeMf4(); // one bottom dock at a time
+    if (parserDockVisible) toggleParserDock();
     ensurePanel();
     switchCanView();
   }
@@ -1935,6 +2136,7 @@ async function handleClose(docId: number): Promise<boolean> {
   }
   const closing = docStates.get(docId);
   if (closing) cancelRecovery(docId, closing.path);
+  if (parserReqId !== null) stopParserRun(); // results are per-run, not per-doc
   hideExtBar(docId);
   followStates.delete(docId);
   tailToast.delete(docId);
