@@ -2,6 +2,30 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
+
+**依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。
+
+### Task 1. Rust 插件仓库（`plugins.rs` + `syntax_plugins_list`）
+**Files:** Create `app/src-tauri/src/plugins.rs`（manifest 结构 `SyntaxPluginJson/SyntaxRuleJson`（serde camelCase + `deny_unknown_fields` 防字段拼错静默失效）、`validate()`（id/name/扩展名/关键词/lineComment 字符集与上限、tag 限 7 个枚举、规则 ≤32、文件 ≤256KB、目录 ≤64 个）、`load_syntax_plugins()`（文件名序、坏 JSON 单文件报错不阻塞、id 重复后到者跳过）、`plugins_dir()`、命令 `syntax_plugins_list`）；Modify `app/src-tauri/src/lib.rs`（mod + 注册）。
+**Why:** 插件不执行任何代码，校验收在 Rust 侧（重逻辑原则）；正则编译校验放前端（JS `RegExp` 与 Rust `regex` 方言不同，见 Task 2）。
+**验证:** `cargo test -p lumelog-app plugins::` 8 pass（合法 manifest、非法 tag、未知字段、坏 JSON 不阻塞其它、id 重复后文件名排序后到者跳过、extensions/keywords 上限、非 .json 忽略、目录缺失返回空）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 2. 前端插件注册表（`language.ts` + `ipc.ts`）
+**Files:** Modify `app/frontend/src/language.ts`（`type ModeId = ModeChoice | \`plugin:${string}\``、`pluginModeId()`、`registerPluginLanguages()`（整表替换，坏正则单条跳过并回报 warning）、`autoModeId()`（内置扩展名优先、插件兜底）、`syntaxModes()`（内置 21 项 + 插件）、`resolveLanguage` 收 `ModeId` 并先查插件表）、`app/frontend/src/ipc.ts`（`SyntaxPlugin/SyntaxPluginsReply` + `syntaxPluginsList()`）；Modify `app/frontend/src/language.test.ts`（+3）、`app/frontend/src/ipc.test.ts`（+1 typeof）。
+**Why:** Rust 只验 shape，JS 正则方言（如 lookahead）由前端 `new RegExp(src, "y")` 编译把关；插件模式 id 带 `plugin:` 前缀，与内置 id 空间不相交，状态栏与 `applyMode` 无需特判。
+**验证:** `npx vitest run src/language.test.ts` 10 pass（插件解析出 `LanguageSupport` 且可 parse、AUTO 内置优先不被劫持、坏正则跳过且 warning 含插件名、`syntaxModes` 内置在前插件在后且空重载后消失、未知 `plugin:x` → null）+ `tsc --noEmit` 净。
+
+### Task 3. 接线（`statusbar.ts` + `editor.ts` + `main.ts`）
+**Files:** Modify `app/frontend/src/statusbar.ts`（`SyntaxModeOption`、`setSyntaxModes()` 重建下拉且保住仍在列表中的当前选中、`onMode` 回调签名放宽为 `(mode: string) => void`）、`app/frontend/src/editor.ts`（`setMode(mode: ModeId | null)`、首语言走 `autoModeId(opts.ext)`）、`app/frontend/src/main.ts`（`initSyntaxPlugins()`：启动加载 + `pluginsInFlight` 合并连点 + 汇总 toast/console.warn，末尾 bootstrap 处 `void initSyntaxPlugins()`；`applyMode` 收 string 并在 AUTO 时走 `autoModeId`；命令面板新增「重载语法插件」palette-only 条目，不占 keymap 动作位）；Modify `app/frontend/src/statusbar.test.ts`（+1）。
+**Why:** 插件加载晚于 `Statusbar` 构造，下拉必须可重建；重载只影响新开文档与手动切换，不重建已打开编辑器。
+**验证:** `npx tsc --noEmit` 净；`npm test` 132 pass（20 文件；新增 statusbar 重建下拉/保选中/回传 `plugin:<id>`）+ `npm run build` 通过。
+
+### Task 4. 文档收尾
+**Files:** Modify `docs/features.md`（待做第 1 条加增量1 交付注记：manifest 路径、字段摘要、增量2/3 边界）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+**未验:** 插件实际高亮观感需 `npm run tauri dev` 放一个示例 JSON 人工过（自动化只覆盖到解析器挂载与下拉）。
+
 ## 2026-10-30 — Plan 16 编码扩展：EUC-JP / EUC-KR / KOI8-R / KOI8-U（feat/encoding-extension）
 
 **依据：** spec `docs/specs/2026-10-30-encoding-extension-design.md`；计划 `docs/plans/2026-10-30-encoding-extension.md`。对应 `docs/features.md` 待做第 3 条（原文把 Big5、Shift-JIS 列为缺口是笔误，两者 v1 已交付）。

@@ -54,6 +54,32 @@ describe("Statusbar syntax dropdown (spec §8)", () => {
     sel.dispatchEvent(new Event("change"));
     expect(seen).toEqual(["javascript"]);
   });
+
+  it("rebuilds options for syntax plugins and keeps the selection", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const seen: string[] = [];
+    const bar = new Statusbar(root, { onMode: (m) => seen.push(m) });
+    const sel = root.querySelector(".mode") as HTMLSelectElement;
+    sel.value = "javascript";
+
+    bar.setSyntaxModes([
+      { id: "auto", label: "Auto" },
+      { id: "javascript", label: "JavaScript" },
+      { id: "plugin:plc-log", label: "PLC 日志" },
+    ]);
+    expect(Array.from(sel.options).map((o) => o.value)).toEqual([
+      "auto",
+      "javascript",
+      "plugin:plc-log",
+    ]);
+    expect(sel.options[2].textContent).toBe("PLC 日志");
+    expect(sel.value).toBe("javascript"); // still offered → selection survives
+
+    sel.value = "plugin:plc-log";
+    sel.dispatchEvent(new Event("change"));
+    expect(seen).toEqual(["plugin:plc-log"]);
+  });
 });
 
 describe("Statusbar tail follow (Roadmap)", () => {

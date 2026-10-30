@@ -4,10 +4,15 @@ import { LanguageSupport } from "@codemirror/language";
 import {
   AVAILABLE_MODES,
   MODE_LABELS,
+  autoModeId,
   modeIdForExt,
+  pluginModeId,
+  registerPluginLanguages,
   resolveLanguage,
+  syntaxModes,
   type ModeChoice,
 } from "./language";
+import type { SyntaxPlugin } from "./ipc";
 
 /** True when the language's parser reports a syntax error node for `src`. */
 function hasError(lang: LanguageSupport, src: string): boolean {
@@ -105,5 +110,57 @@ describe("MODE_LABELS", () => {
     for (const mode of AVAILABLE_MODES) {
       expect(MODE_LABELS[mode], mode).toBeTruthy();
     }
+  });
+});
+
+describe("syntax plugins (plugin interface, increment 1)", () => {
+  function plugin(overrides: Partial<SyntaxPlugin> = {}): SyntaxPlugin {
+    return {
+      id: "plc-log",
+      name: "PLC 日志",
+      extensions: ["plc", "plclog"],
+      keywords: ["START", "STOP"],
+      lineComment: "#",
+      rules: [{ regex: "^\\d{2}:\\d{2}", tag: "className" }],
+      ...overrides,
+    };
+  }
+
+  it("resolves registered plugins and keeps builtin priority on AUTO", async () => {
+    const warnings = registerPluginLanguages([plugin()]);
+    expect(warnings).toEqual([]);
+
+    const support = await resolveLanguage(pluginModeId("plc-log"));
+    expect(support).toBeInstanceOf(LanguageSupport);
+    expect(() => support!.language.parser.parse("12:00 START x")).not.toThrow();
+
+    expect(autoModeId("plc")).toBe("plugin:plc-log");
+    expect(autoModeId("PLCLOG")).toBe("plugin:plc-log");
+    expect(autoModeId("py")).toBe("python"); // builtins are never hijacked
+    expect(await resolveLanguage(pluginModeId("nope"))).toBeNull();
+  });
+
+  it("drops rules whose regex does not compile, with a warning", () => {
+    const warnings = registerPluginLanguages([
+      plugin({
+        id: "bad",
+        name: "坏规则",
+        rules: [{ regex: "([unclosed", tag: "number" }],
+      }),
+    ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("坏规则");
+    expect(syntaxModes().some((m) => m.id === "plugin:bad")).toBe(true); // mode survives
+  });
+
+  it("lists builtin modes first, then plugin modes", () => {
+    registerPluginLanguages([plugin(), plugin({ id: "second", name: "第二" })]);
+    const modes = syntaxModes();
+    expect(modes.slice(0, AVAILABLE_MODES.length).map((m) => m.id)).toEqual([
+      ...AVAILABLE_MODES,
+    ]);
+    expect(modes.slice(-2).map((m) => m.label)).toEqual(["PLC 日志", "第二"]);
+    registerPluginLanguages([]); // reload with none → plugins disappear
+    expect(syntaxModes()).toHaveLength(AVAILABLE_MODES.length);
   });
 });

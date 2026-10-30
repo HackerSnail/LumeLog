@@ -15,8 +15,10 @@ import {
   syntaxHighlighting,
   LanguageSupport,
   type StreamParser,
+  type StringStream,
 } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
+import type { SyntaxPlugin } from "./ipc";
 
 /** Log-style highlighting: timestamps, levels, numbers, hex, strings. */
 const logLanguage = StreamLanguage.define<{ inQuotes: boolean }>({
@@ -117,6 +119,8 @@ export const AVAILABLE_MODES = [
   "powershell",
 ] as const;
 export type ModeChoice = (typeof AVAILABLE_MODES)[number];
+/** Everything `resolveLanguage` accepts: built-ins plus `plugin:<id>`. */
+export type ModeId = ModeChoice | `plugin:${string}`;
 
 /** Dropdown text — mode ids stay stable, these are only what the user reads. */
 export const MODE_LABELS: Record<ModeChoice, string> = {
@@ -196,12 +200,106 @@ const EXT_MODES: Record<string, ModeChoice> = {
 };
 
 /**
- * Synchronous extension → mode lookup (drives AUTO). Returns null for anything
- * unknown, which the caller turns into PlainText — never throws.
+ * Synchronous extension → mode lookup (drives AUTO). Built-ins win over plugin
+ * extensions; returns null for anything unknown, which the caller turns into
+ * PlainText — never throws.
  */
 export function modeIdForExt(ext: string): ModeChoice | null {
   const e = (ext ?? "").trim().toLowerCase();
   return EXT_MODES[e] ?? null;
+}
+
+/** `id -> "plugin:<id>"` — the mode id space never collides with built-ins. */
+export function pluginModeId(id: string): ModeId {
+  return `plugin:${id}`;
+}
+
+interface PluginMode {
+  label: string;
+  exts: string[];
+  support: LanguageSupport;
+}
+
+const pluginModes = new Map<string, PluginMode>();
+const pluginExts = new Map<string, string>(); // ext (lowercased) -> mode id
+
+/**
+ * Compile manifests from the shell into stream languages, replacing any
+ * previous set (a reload is a full swap). Rules that fail to compile as JS
+ * regexes are dropped with a warning (Rust validated shape, not JS dialect).
+ * Returns user-facing warning strings.
+ */
+export function registerPluginLanguages(plugins: SyntaxPlugin[]): string[] {
+  pluginModes.clear();
+  pluginExts.clear();
+  const warnings: string[] = [];
+  for (const p of plugins) {
+    const support = buildPluginLanguage(p, warnings);
+    if (!support) continue;
+    const id = pluginModeId(p.id);
+    pluginModes.set(id, { label: p.name, exts: p.extensions, support });
+    for (const ext of p.extensions) {
+      const key = ext.toLowerCase();
+      if (!pluginExts.has(key)) pluginExts.set(key, id); // first plugin wins
+    }
+  }
+  return warnings;
+}
+
+/**
+ * AUTO resolution over built-ins AND plugins: built-ins win so a plugin can
+ * never hijack a language the app ships.
+ */
+export function autoModeId(ext: string): ModeId | null {
+  return modeIdForExt(ext) ?? (pluginExts.get((ext ?? "").trim().toLowerCase()) as ModeId | undefined) ?? null;
+}
+
+/** Status-bar dropdown entries: built-ins first, then plugin modes. */
+export function syntaxModes(): Array<{ id: ModeId; label: string }> {
+  const builtin = AVAILABLE_MODES.map((id) => ({ id: id as ModeId, label: MODE_LABELS[id] }));
+  const extra = [...pluginModes.entries()].map(([id, m]) => ({ id: id as ModeId, label: m.label }));
+  return [...builtin, ...extra];
+}
+
+function buildPluginLanguage(
+  p: SyntaxPlugin,
+  warnings: string[],
+): LanguageSupport | null {
+  // Sticky (`y`) regexes anchored at the stream position — `exec` on the full
+  // line, advancing the stream manually when a rule matches.
+  const rules: Array<{ re: RegExp; tag: string }> = [];
+  p.rules.forEach((rule, i) => {
+    try {
+      rules.push({ re: new RegExp(rule.regex, "y"), tag: rule.tag });
+    } catch {
+      warnings.push(`语法插件「${p.name}」：第 ${i + 1} 条规则的正则无法编译，已跳过`);
+    }
+  });
+  const keywords = new Set(p.keywords);
+  const comment = p.lineComment;
+  const token = (stream: StringStream): string | null => {
+    if (stream.eatSpace()) return null;
+    if (comment && stream.string.slice(stream.pos).startsWith(comment)) {
+      stream.skipToEnd();
+      return "comment";
+    }
+    for (const rule of rules) {
+      rule.re.lastIndex = stream.pos;
+      const m = rule.re.exec(stream.string);
+      if (m && m[0].length > 0) {
+        stream.pos += m[0].length;
+        return rule.tag;
+      }
+    }
+    const word = /^\w+/.exec(stream.string.slice(stream.pos));
+    if (word) {
+      stream.pos += word[0].length;
+      return keywords.has(word[0]) ? "keyword" : null;
+    }
+    stream.next();
+    return null;
+  };
+  return new LanguageSupport(StreamLanguage.define({ token }));
 }
 
 const loaded = new Map<ModeChoice, LanguageSupport | null>();
@@ -209,21 +307,24 @@ const inFlight = new Map<ModeChoice, Promise<LanguageSupport | null>>();
 
 /**
  * Load (once) the language for a mode. `auto`/`plain`/null → null = PlainText.
- * Concurrent callers share a single import so a fast mode switch does not
- * fetch the same grammar twice.
+ * Plugin modes resolve synchronously from the registry (they were compiled at
+ * load time); built-in grammars are imported on demand and cached.
  */
-export async function resolveLanguage(mode: ModeChoice | null): Promise<LanguageSupport | null> {
+export async function resolveLanguage(mode: ModeId | null): Promise<LanguageSupport | null> {
   if (!mode || mode === "auto" || mode === "plain") return null;
-  const done = loaded.get(mode);
+  const plugin = pluginModes.get(mode);
+  if (plugin) return plugin.support;
+  const builtin = mode as ModeChoice;
+  const done = loaded.get(builtin);
   if (done !== undefined) return done;
-  let p = inFlight.get(mode);
+  let p = inFlight.get(builtin);
   if (!p) {
-    p = loadLanguage(mode).then((lang) => {
-      loaded.set(mode, lang);
-      inFlight.delete(mode);
+    p = loadLanguage(builtin).then((lang) => {
+      loaded.set(builtin, lang);
+      inFlight.delete(builtin);
       return lang;
     });
-    inFlight.set(mode, p);
+    inFlight.set(builtin, p);
   }
   return p;
 }

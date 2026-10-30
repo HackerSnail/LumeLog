@@ -26,7 +26,7 @@ import {
   type LanguageSupport,
 } from "@codemirror/language";
 import { loadAllText, type DocInfo } from "./ipc";
-import { modeIdForExt, resolveLanguage, type ModeChoice } from "./language";
+import { autoModeId, resolveLanguage, type ModeId } from "./language";
 
 export interface EditorHandle {
   readonly docId: number;
@@ -39,7 +39,7 @@ export interface EditorHandle {
   /** Replace the whole buffer (encoding re-decode re-render); marks dirty. */
   replaceText(text: string): void;
   /** Reconfigure only the language extension — keeps undo history + scroll. */
-  setMode(mode: ModeChoice | null): void;
+  setMode(mode: ModeId | null): void;
   setEol(eol: string): void;
   eol(): string;
   focus(): void;
@@ -90,7 +90,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     if (first) opts.onDirty?.();
   };
 
-  const lang = await resolveLanguage(modeIdForExt(opts.ext));
+  const lang = await resolveLanguage(autoModeId(opts.ext));
   const view = new EditorView({
     state: buildState(text, lang, langConf, onDocChanged),
     parent: opts.parent,
@@ -113,7 +113,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       opts.onEdit?.();
       opts.onDirty?.();
     },
-    setMode: (mode: ModeChoice | null) => {
+    setMode: (mode: ModeId | null) => {
       const token = ++modeToken;
       void resolveLanguage(mode).then((next) => {
         if (destroyed || token !== modeToken) return;

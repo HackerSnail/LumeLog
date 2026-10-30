@@ -4,14 +4,21 @@
 //! reports the choice — it never mutates the editor itself.
 
 import { ENCODINGS, EOL_OPTIONS } from "./encoding-menu";
-import { AVAILABLE_MODES, MODE_LABELS, type ModeChoice } from "./language";
+import { AVAILABLE_MODES, MODE_LABELS } from "./language";
 
 export interface StatusbarCallbacks {
   onEncoding?: (label: string) => void;
   onEol?: (eol: string) => void;
-  onMode?: (mode: ModeChoice) => void;
+  /** Mode id — a builtin name or `plugin:<id>` from the plugin registry. */
+  onMode?: (mode: string) => void;
   /** Tail follow toggle (read-only docs only). */
   onFollow?: (on: boolean) => void;
+}
+
+/** One entry of the syntax dropdown: display text + the id sent back on change. */
+export interface SyntaxModeOption {
+  id: string;
+  label: string;
 }
 
 const EOL_CHOICES = EOL_OPTIONS;
@@ -38,15 +45,14 @@ export class Statusbar {
     this.eolSel.addEventListener("change", () => cb.onEol?.(this.eolSel.value));
 
     // Display names are user-facing text; the option values stay mode ids so
-    // `onMode` keeps handing back the id (spec §8 registry).
+    // `onMode` keeps handing back the id (spec §8 registry). `setSyntaxModes`
+    // rebuilds this when syntax plugins load.
     this.modeSel = mkSelect(
       "mode",
       AVAILABLE_MODES.map((m) => MODE_LABELS[m]),
       AVAILABLE_MODES,
     );
-    this.modeSel.addEventListener("change", () =>
-      cb.onMode?.(this.modeSel.value as ModeChoice),
-    );
+    this.modeSel.addEventListener("change", () => cb.onMode?.(this.modeSel.value));
 
     this.dirtyEl = mkSpan("dirty-flag", "");
     this.posEl = mkSpan("doc-pos", "");
@@ -86,6 +92,22 @@ export class Statusbar {
   setFollowAvailable(on: boolean): void {
     this.followBtn.style.display = on ? "" : "none";
     if (!on) this.setFollow(false);
+  }
+
+  /**
+   * Rebuild the syntax dropdown (called when syntax plugins load/reload).
+   * The current selection survives if its id is still offered.
+   */
+  setSyntaxModes(modes: readonly SyntaxModeOption[]): void {
+    const current = this.modeSel.value;
+    this.modeSel.textContent = "";
+    for (const m of modes) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.label;
+      this.modeSel.append(opt);
+    }
+    if (modes.some((m) => m.id === current)) this.modeSel.value = current;
   }
 
   /** Reflect the follow state on the button. */
