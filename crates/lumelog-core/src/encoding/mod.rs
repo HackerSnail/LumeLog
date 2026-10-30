@@ -17,6 +17,10 @@ pub enum EncodingLabel {
     Big5,
     ShiftJis,
     Iso88591,
+    EucJp,
+    EucKr,
+    Koi8R,
+    Koi8U,
 }
 
 impl EncodingLabel {
@@ -32,6 +36,10 @@ impl EncodingLabel {
             EncodingLabel::Big5 => "BIG5",
             EncodingLabel::ShiftJis => "Shift-JIS",
             EncodingLabel::Iso88591 => "ISO-8859-1",
+            EncodingLabel::EucJp => "EUC-JP",
+            EncodingLabel::EucKr => "EUC-KR",
+            EncodingLabel::Koi8R => "KOI8-R",
+            EncodingLabel::Koi8U => "KOI8-U",
         }
     }
 
@@ -47,6 +55,10 @@ impl EncodingLabel {
             "BIG5" => Some(EncodingLabel::Big5),
             "Shift-JIS" | "SHIFT_JIS" | "CP932" => Some(EncodingLabel::ShiftJis),
             "ISO-8859-1" | "windows-1252" | "WINDOWS-1252" => Some(EncodingLabel::Iso88591),
+            "EUC-JP" | "EUCJP" => Some(EncodingLabel::EucJp),
+            "EUC-KR" | "EUCKR" => Some(EncodingLabel::EucKr),
+            "KOI8-R" | "KOI8R" => Some(EncodingLabel::Koi8R),
+            "KOI8-U" | "KOI8U" => Some(EncodingLabel::Koi8U),
             _ => None,
         }
     }
@@ -62,6 +74,10 @@ impl EncodingLabel {
             EncodingLabel::Big5 => encoding_rs::BIG5,
             EncodingLabel::ShiftJis => encoding_rs::SHIFT_JIS,
             EncodingLabel::Iso88591 => encoding_rs::WINDOWS_1252,
+            EncodingLabel::EucJp => encoding_rs::EUC_JP,
+            EncodingLabel::EucKr => encoding_rs::EUC_KR,
+            EncodingLabel::Koi8R => encoding_rs::KOI8_R,
+            EncodingLabel::Koi8U => encoding_rs::KOI8_U,
         }
     }
 }
@@ -141,6 +157,23 @@ pub fn detect(head: &[u8]) -> EncodingLabel {
     let (enc, plausible) = det.guess_assess(Some(b"cn"), true);
     if plausible {
         if let Some(label) = label_from_encoding(enc) {
+            // The `cn` hint pushes double-byte EUC families toward GBK: a 1KB
+            // Korean/Japanese sample already reads as plausible GBK. Re-ask
+            // WITHOUT the hint and accept only the verdicts that pass cannot
+            // produce for real Chinese text (probed: GBK/GB18030 samples stay
+            // GBK without a hint). Everything else keeps the hinted answer.
+            if matches!(label, EncodingLabel::Gbk | EncodingLabel::Gb18030) {
+                let mut unbiased = chardetng::EncodingDetector::new();
+                unbiased.feed(head, true);
+                let (enc2, plausible2) = unbiased.guess_assess(None, true);
+                if plausible2 {
+                    if let Some(retry) = label_from_encoding(enc2) {
+                        if matches!(retry, EncodingLabel::EucJp | EncodingLabel::EucKr) {
+                            return retry;
+                        }
+                    }
+                }
+            }
             return label;
         }
     }
@@ -166,6 +199,17 @@ fn label_from_encoding(enc: &'static Encoding) -> Option<EncodingLabel> {
         Some(EncodingLabel::ShiftJis)
     } else if enc == encoding_rs::WINDOWS_1252 {
         Some(EncodingLabel::Iso88591)
+    } else if enc == encoding_rs::EUC_JP {
+        Some(EncodingLabel::EucJp)
+    } else if enc == encoding_rs::EUC_KR {
+        Some(EncodingLabel::EucKr)
+    } else if enc == encoding_rs::KOI8_R {
+        Some(EncodingLabel::Koi8R)
+    } else if enc == encoding_rs::KOI8_U {
+        // chardetng reports KOI8-U for Russian text too — Russian letters sit at
+        // identical code points in both variants, so the decode is correct
+        // either way (see spec §1.1 / §3).
+        Some(EncodingLabel::Koi8U)
     } else {
         None
     }
@@ -431,6 +475,82 @@ mod tests {
             Some(EncodingLabel::Gbk)
         );
         assert_eq!(EncodingLabel::Gbk.as_str(), "GBK");
+    }
+
+    #[test]
+    fn from_label_accepts_new_labels_and_aliases() {
+        for (name, label) in [
+            ("EUC-JP", EncodingLabel::EucJp),
+            ("EUCJP", EncodingLabel::EucJp),
+            ("EUC-KR", EncodingLabel::EucKr),
+            ("EUCKR", EncodingLabel::EucKr),
+            ("KOI8-R", EncodingLabel::Koi8R),
+            ("KOI8R", EncodingLabel::Koi8R),
+            ("KOI8-U", EncodingLabel::Koi8U),
+            ("KOI8U", EncodingLabel::Koi8U),
+        ] {
+            assert_eq!(EncodingLabel::from_label(name), Some(label), "{name}");
+        }
+        assert_eq!(EncodingLabel::EucJp.as_str(), "EUC-JP");
+        assert_eq!(EncodingLabel::EucKr.as_str(), "EUC-KR");
+        assert_eq!(EncodingLabel::Koi8R.as_str(), "KOI8-R");
+        assert_eq!(EncodingLabel::Koi8U.as_str(), "KOI8-U");
+    }
+
+    #[test]
+    fn eucjp_euckr_koi8r_roundtrip() {
+        let cases = [
+            (EncodingLabel::EucJp, "システム起動ログ: 温度センサー値を記録"),
+            (EncodingLabel::EucKr, "시스템 로그 테스트: 모터 토크 값 기록"),
+            (EncodingLabel::Koi8R, "Запуск системы: журнал тестирования"),
+            (EncodingLabel::Koi8U, "Запуск системы: журнал тестирования"),
+        ];
+        for (label, text) in cases {
+            let enc = encode_all(label, text);
+            assert_eq!(enc.replace_count, 0, "{label:?}");
+            let dec = decode_all(label, &enc.bytes);
+            assert_eq!(dec.text, text, "{label:?}");
+            assert_eq!(dec.invalid_count, 0, "{label:?}");
+        }
+    }
+
+    #[test]
+    fn korean_emoji_is_unmappable() {
+        // Same contract as `gbk_emoji_is_unmappable`: EUC-KR has no U+FFFD code
+        // point, so the marker is a single `?` — no numeric reference, and the
+        // placeholder must survive a re-decode.
+        let enc = encode_all(EncodingLabel::EucKr, "ok💩");
+        assert_eq!(enc.replace_count, 1);
+        let dec = decode_all(EncodingLabel::EucKr, &enc.bytes);
+        assert_eq!(dec.text, "ok?");
+        assert!(!enc.bytes.windows(2).any(|w| w == b"&#"));
+    }
+
+    #[test]
+    fn detect_euckr_sample() {
+        let line = "시스템 로그 테스트: 모터 토크 값 기록 완료 2026-10-30\n";
+        let text = line.repeat(20);
+        let raw = encoding_rs::EUC_KR.encode(&text).0;
+        assert_eq!(detect(&raw), EncodingLabel::EucKr);
+    }
+
+    #[test]
+    fn detect_eucjp_sample() {
+        let line = "システム起動ログ: 温度センサー値を記録しました 2026-10-30\n";
+        let text = line.repeat(20);
+        let raw = encoding_rs::EUC_JP.encode(&text).0;
+        assert_eq!(detect(&raw), EncodingLabel::EucJp);
+    }
+
+    #[test]
+    fn detect_cyrillic_sample_is_koi8u() {
+        // chardetng reports KOI8-U for Russian text (both hint passes); Russian
+        // letters share code points with KOI8-R so the decode is correct. The
+        // strict KOI8-R label stays available for manual selection.
+        let line = "Запуск системы: журнал тестирования датчиков 2026-10-30\n";
+        let text = line.repeat(20);
+        let raw = encoding_rs::KOI8_R.encode(&text).0;
+        assert_eq!(detect(&raw), EncodingLabel::Koi8U);
     }
 
     #[test]

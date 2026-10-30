@@ -71,6 +71,10 @@ fn label_pool() -> Vec<EncodingLabel> {
         EncodingLabel::ShiftJis,
         EncodingLabel::Utf16Le,
         EncodingLabel::Utf16Be,
+        EncodingLabel::EucJp,
+        EncodingLabel::EucKr,
+        EncodingLabel::Koi8R,
+        EncodingLabel::Koi8U,
     ]
 }
 
