@@ -1,4 +1,4 @@
-//! Encoding menu data + extension inference. The nine display names are pinned
+//! Encoding menu data + extension inference. The display names are pinned
 //! verbatim by the plan's Global Constraints (spec §5) — `ENCODINGS` below is the
 //! single source of truth the status-bar dropdown renders and the vitest
 //! `encoding_menu_labels_match_spec` case asserts against, one label at a time.
@@ -11,7 +11,7 @@ export interface EncodingOption {
 }
 
 /**
- * The 9 supported encodings, in spec order. `GB2312` is decoded as `GBK`
+ * The 13 supported encodings, in spec order. `GB2312` is decoded as `GBK`
  * (superset) so it is not listed separately; detection falls back to `GB18030`.
  */
 export const ENCODINGS: readonly EncodingOption[] = [
@@ -24,9 +24,13 @@ export const ENCODINGS: readonly EncodingOption[] = [
   { label: "BIG5", display: "BIG5" },
   { label: "Shift-JIS", display: "Shift-JIS" },
   { label: "ISO-8859-1", display: "ISO-8859-1" },
+  { label: "EUC-JP", display: "EUC-JP" },
+  { label: "EUC-KR", display: "EUC-KR" },
+  { label: "KOI8-R", display: "KOI8-R" },
+  { label: "KOI8-U", display: "KOI8-U" },
 ] as const;
 
-/** The 9 labels, in order — handy for building a `<select>`. */
+/** The 13 labels, in order — handy for building a `<select>`. */
 export const ENCODING_LABELS = ENCODINGS.map((e) => e.label);
 
 /** Line-ending options surfaced next to the encoding (spec §4.4). Single source

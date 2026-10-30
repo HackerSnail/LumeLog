@@ -98,8 +98,9 @@ LumeLog 是面向电控、HIL、嵌入式测试工程师的跨平台轻量文本
 
 ### 5.1 支持集合
 
-- 显示给用户：`UTF-8`、`UTF-8 BOM`、`UTF-16 LE/BE`、`GBK`、`GB18030`、`BIG5`、`Shift-JIS`、`ISO-8859-1`。
+- 显示给用户：`UTF-8`、`UTF-8 BOM`、`UTF-16 LE/BE`、`GBK`、`GB18030`、`BIG5`、`Shift-JIS`、`ISO-8859-1`、`EUC-JP`、`EUC-KR`、`KOI8-R`、`KOI8-U`（后四项为 Plan 16 扩展，见 `docs/specs/2026-10-30-encoding-extension-design.md`）。
 - 实现映射：`GBK / GB2312 → encoding_rs::GBK`（GB2312 实际用 GBK 超集解码，业界惯例）；`GB18030 → encoding_rs::GB18030`。
+- 检测补充：带 `cn` hint 判定为 GBK/GB18030 时用无 hint 复核一次，仅采纳 EUC-JP/EUC-KR；俄文检出为 KOI8-U（chardetng 行为，俄文字节与 KOI8-R 一致）。UTF-32 无 WHATWG 编码，不支持。
 - UTF-16：BOM 判定字节序；行索引按 `0x0A 0x00`（LE）/`0x00 0x0A`（BE）扫描，且命中位置按文件字节序校验偶数对齐（防在双字节中间误匹配）。v1 范围决定：UTF-16 大文件（>200MB）**仅只读模式**，后端逐块解码后交给虚拟列表（与 §4.3 两档策略一致），不支持编辑。
 
 ### 5.2 自动检测顺序
