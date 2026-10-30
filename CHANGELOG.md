@@ -10,6 +10,11 @@
 **Files:** Modify `app/src-tauri/src/viewers.rs`（会话加 `pdf_path`；`open_pdf` 不再在打开时提取——提取失败的 PDF 仍可渲染；`ensure_pdf_lines()`：`rows()`/`export()` 按需提取（catch_unwind 兜 panic 面）；`ViewerSession/get()` pub(crate) 供命令层）；Modify `app/src-tauri/src/commands.rs`（`viewer_pdf_bytes`：返回 `tauri::ipc::Response` 原始字节——JSON 数组会让 64MB 膨胀 33%）；`lib.rs` 注册。
 **验证:** `cargo test -p lumelog-app viewers::` 6 pass（新语义：畸形 PDF **open 成功**、`rows()`/`export()` 才报 `invalid_argument`；好 PDF 按需提取内容与 TXT 导出回归）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净。字节命令是薄层（会话路径 → fs read → Response），路径与读取由会话测试覆盖。
 
+### Task 2. `pdfview.ts` + 前端桥
+**Files:** Modify `app/frontend/package.json`（`pdfjs-dist@6`）；Create `app/frontend/src/pdfview.ts`、`pdfview.test.ts`（3）；Modify `app/frontend/src/ipc.ts`（`viewerPdfBytes(id): Promise<ArrayBuffer>`，错误翻译与 `call` 同路）。
+`PdfView`：动态 `import("pdfjs-dist")`（主包零增长）、worker 经 `?url` 静态 import 随本模块进 pdf chunk、`getDocument({data})` 直收后端字节；`render(page, scale)` 用 DPR 缩放 canvas，旧 RenderTask `cancel()` 防翻页竞态；纯函数 `clampPage/stepZoom`（×1.25，0.5–4）单独导出可测。文档销毁用 `cleanup()`（pdfjs-dist 6 的类型里 PDFDocumentProxy 无 destroy）。
+**验证:** `npx tsc --noEmit` 净；`npx vitest run src/pdfview.test.ts` 3 pass（页码钳制边界、缩放上下限、未 load/destroy 后 render 为 no-op 且零错误）。
+
 ## 2026-10-30 — Plan 21 PDF 查看增量1：纯 Rust 文本提取（feat/pdf-text）
 
 **依据：** `docs/specs/2026-10-30-pdf-viewer-proposal.md` 建议的分步立项增量1（文本提取先行），延续 Plan 19 查看器体系。真渲染增量（pdf.js/pdfium）仍待需求反馈另立项。

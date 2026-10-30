@@ -1039,6 +1039,19 @@ export function viewerExportCsv(args: {
   });
 }
 
+/**
+ * Raw PDF bytes for the frontend renderer. The shell answers with a binary
+ * `Response` (ArrayBuffer), not a JSON number array; errors keep the same
+ * `{ code, … }` shape `call` translates.
+ */
+export async function viewerPdfBytes(id: number): Promise<ArrayBuffer> {
+  try {
+    return (await invoke("viewer_pdf_bytes", { id })) as unknown as ArrayBuffer;
+  } catch (err) {
+    throw new IpcError(toIpcError(err));
+  }
+}
+
 // ---- Recent files (M1 deferred debt) -----------------------------------------
 
 /** Most-recent-first paths that still exist on disk (cap 20, backend). */
