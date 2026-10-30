@@ -50,6 +50,8 @@ pub fn run() {
             commands::script_cancel,
             plugins::syntax_plugins_list,
             plugins::parser_plugins_list,
+            commands::parser_run,
+            commands::parser_cancel,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,

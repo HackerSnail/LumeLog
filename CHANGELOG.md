@@ -11,6 +11,11 @@
 **Why:** 元数据（id/列定义）必须执行才能拿到，但只执行一次且不调用 `parseLine`；列定义在前端建表格需要 Rust 侧先验形状。15s 预算防「一个死循环插件拖死整个列表」。
 **验证:** `cargo test -p lumelog-app plugins::` 13 pass（新增：合法元数据、坏形状 4 例各自报错带文件名、顶层 `const plugin` 可读到、坏 JS 不阻塞其它、id 重复 first wins、`.json` 不混入解析器列表）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 2. 流式执行 + 命令（`run_parser_plugin` + `parser_run/parser_cancel`）
+**Files:** Modify `app/src-tauri/src/plugins.rs`（`ParserRowJson{line,cells}`/`ParserStats{rows,lines,skipped,cancelled,error}`；`CELLS_SHIM`：行对象→列序字符串数组的转换放 JS（`String(number)` 保持 JS 语义），不支持的值类型返回 `null` → Rust 置空 + 一次性 console warning；单元格截断 4096 字符；`run_parser_plugin()`：独立沙箱（64MiB/1MiB 栈/300s + interrupt handler）、`DocLines` 逐行调 `parseLine(line, ctx)`、512 行/批 emit、`find_parser_plugin()` 按 id 后端定位文件；`read_columns()` 运行时复读列 key）；Modify `app/src-tauri/src/commands.rs`（`parser_run`：can_parse 式异步双通道 + `on_console` 第三通道、`begin_search/end_search` 取消注册、`spawn_blocking` + `catch_unwind` 兜底"解析运行器内部异常"；`parser_cancel`）。
+**Why:** 前端只传插件 id 不传路径（防注入）；取消注册复用全局 cancel 表；值转换放 JS 避免 Rust 重写 JS 数字格式化。
+**验证:** `cargo test -p lumelog-app plugins::` 17 pass（端到端：行→cells 顺序/number→"1"/对象列置空+一次性 warning、null 跳过计数、cancel 恰停 1 行、JS 抛错带行号、console.log 透传、按 id 定位/未知 id `plugin_not_found`）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净。
+
 ## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。

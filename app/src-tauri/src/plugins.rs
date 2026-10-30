@@ -7,6 +7,7 @@
 //! (`StreamLanguage`), where CodeMirror lives.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -435,6 +436,352 @@ pub fn parser_plugins_list(app: tauri::AppHandle) -> Result<ParserPluginsReply, 
     Ok(ParserPluginsReply { parsers, errors })
 }
 
+/// Locate a parser plugin by id (never trust a path from the frontend).
+pub(crate) fn find_parser_plugin(dir: &Path, plugin_id: &str) -> Result<PathBuf, IpcError> {
+    let (parsers, _errors) = list_parser_plugins(dir);
+    if parsers.iter().any(|p| p.id == plugin_id) {
+        // Metadata was validated for this id; resolve the file by re-walking in
+        // the same (sorted) order the listing used.
+        let rd = std::fs::read_dir(dir)
+            .map_err(|e| IpcError::new("io", format!("读取插件目录失败: {e}")))?;
+        let mut files: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "js"))
+            .collect();
+        files.sort();
+        for path in files {
+            if let Ok(meta) = load_parser_metadata(&path) {
+                if meta.id == plugin_id {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    Err(IpcError::new(
+        "plugin_not_found",
+        format!("解析插件 `{plugin_id}` 不存在"),
+    ))
+}
+
+/// Rows per IPC frame (`can_parse`'s 512/batch policy).
+pub(crate) const PARSER_BATCH: usize = 512;
+/// Total wall-clock budget for one parse run (script engine parity).
+pub(crate) const RUN_SECONDS: u64 = crate::script::MAX_SECONDS;
+/// One cell that huge would wreck the IPC frame more than help anyone.
+const MAX_CELL_CHARS: usize = 4096;
+
+/// One parsed row: the 1-based source line (editor jump) plus the cell strings
+/// in the plugin's declared column order.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserRowJson {
+    pub line: u64,
+    pub cells: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserStats {
+    pub rows: u64,
+    pub lines: u64,
+    pub skipped: u64,
+    pub cancelled: bool,
+    pub error: Option<String>,
+}
+
+/// Row-object → cells conversion lives in JS so `String(number)` keeps JS
+/// formatting; `null` marks a value type the table cannot show (warned once).
+const CELLS_SHIM: &str = r#"
+globalThis.__cells = function (row, keys) {
+  var out = new Array(keys.length);
+  for (var i = 0; i < keys.length; i++) {
+    var v = row[keys[i]];
+    if (v === undefined || v === null) out[i] = "";
+    else if (typeof v === "string") out[i] = v;
+    else if (typeof v === "number" || typeof v === "boolean") out[i] = String(v);
+    else out[i] = null;
+  }
+  return out;
+};
+"#;
+
+enum ParseStop {
+    Js(String),
+    Cancelled,
+}
+
+/// Execute `plugin.parseLine(line, ctx)` over the whole document, streaming
+/// `ParserRowJson` batches. Runs in its own sandbox (script-engine limits);
+/// the plugin file is loaded and metadata re-validated here so a run never
+/// depends on a previous listing.
+pub(crate) fn run_parser_plugin(
+    doc: Arc<Mutex<lumelog_core::doc::DocFile>>,
+    plugin_path: &Path,
+    on_batch: &mut dyn FnMut(Vec<ParserRowJson>),
+    on_console: &mut dyn FnMut(crate::script::ScriptConsole),
+    cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> ParserStats {
+    use rquickjs::{Array, Context, Function, Object, Runtime, Value};
+    use rquickjs::function::Func;
+    use crate::commands::DocLines;
+
+    let mut stats = ParserStats::default();
+    if let Ok(meta) = std::fs::metadata(plugin_path) {
+        if meta.len() > MAX_PLUGIN_JS_BYTES {
+            stats.error = Some(format!("插件文件过大（超过 {MAX_PLUGIN_JS_BYTES} 字节）"));
+            return stats;
+        }
+    }
+    let code = match std::fs::read_to_string(plugin_path) {
+        Ok(c) => c,
+        Err(e) => {
+            stats.error = Some(format!("读取插件失败：{e}"));
+            return stats;
+        }
+    };
+    let source_path = doc
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .path()
+        .to_string_lossy()
+        .into_owned();
+    let mut lines = DocLines::new(doc);
+
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            stats.error = Some(format!("创建 JS 运行时失败：{e}"));
+            return stats;
+        }
+    };
+    rt.set_memory_limit(crate::script::MEMORY_LIMIT);
+    rt.set_max_stack_size(crate::script::STACK_LIMIT);
+    let start = Instant::now();
+    let deadline = Duration::from_secs(RUN_SECONDS);
+    {
+        let cancel = cancel.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            cancel() || start.elapsed() > deadline
+        })));
+    }
+    let ctx = match Context::full(&rt) {
+        Ok(c) => c,
+        Err(e) => {
+            stats.error = Some(format!("创建 JS 上下文失败：{e}"));
+            return stats;
+        }
+    };
+
+    let console_pending: std::rc::Rc<std::cell::RefCell<Vec<crate::script::ScriptConsole>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let console_buf = std::rc::Rc::new(std::cell::RefCell::new(crate::script::ConsoleBuf::new()));
+    let mut cancelled = false;
+    let mut script_error: Option<String> = None;
+
+    let result = ctx.with(|ctx| -> Result<(), ParseStop> {
+        let globals = ctx.globals();
+        let log = {
+            let pending = console_pending.clone();
+            let buf = console_buf.clone();
+            Func::from(move |level: String, text: String| {
+                if let Some(msg) = buf.borrow_mut().push(&level, text) {
+                    pending.borrow_mut().push(msg);
+                }
+            })
+        };
+        globals
+            .set("__log", log)
+            .map_err(|e| ParseStop::Js(format!("注入 console 失败：{e}")))?;
+        ctx.eval::<(), _>(crate::script::CONSOLE_SHIM)
+            .map_err(|e| ParseStop::Js(crate::script::catch_message(&ctx, e)))?;
+        ctx.eval::<(), _>(CELLS_SHIM)
+            .map_err(|e| ParseStop::Js(crate::script::catch_message(&ctx, e)))?;
+        ctx.eval::<(), _>(code.as_str())
+            .map_err(|e| ParseStop::Js(format!("插件错误：{}", crate::script::catch_message(&ctx, e))))?;
+
+        let value: Value = match globals.get::<_, Value>("plugin") {
+            Ok(v) if !v.is_undefined() => v,
+            _ => ctx
+                .eval("typeof plugin === 'object' && plugin !== null ? plugin : undefined")
+                .map_err(|e| ParseStop::Js(crate::script::catch_message(&ctx, e)))?,
+        };
+        let obj =
+            Object::from_js(&ctx, value).map_err(|_| ParseStop::Js("必须定义 plugin 对象".into()))?;
+        let parse_line: Value = obj
+            .get("parseLine")
+            .map_err(|e| ParseStop::Js(format!("plugin.parseLine: {e}")))?;
+        if !parse_line.is_function() {
+            return Err(ParseStop::Js("plugin.parseLine(line, ctx) 必须是函数".into()));
+        }
+        let parse_line = Function::from_js(&ctx, parse_line)
+            .map_err(|_| ParseStop::Js("plugin.parseLine(line, ctx) 必须是函数".into()))?;
+
+        let columns = read_columns(&ctx, &obj)?;
+        let keys = Array::new(ctx.clone())
+            .map_err(|e| ParseStop::Js(format!("构建列参数失败：{e}")))?;
+        for (i, col) in columns.iter().enumerate() {
+            keys.set(i, col.key.as_str())
+                .map_err(|e| ParseStop::Js(format!("构建列参数失败：{e}")))?;
+        }
+        let keys_value = keys.clone().into_value();
+        let cells_fn: Function = globals
+            .get("__cells")
+            .map_err(|e| ParseStop::Js(format!("内部转换器缺失：{e}")))?;
+
+        let mut batch: Vec<ParserRowJson> = Vec::new();
+        let mut warned_unsupported = false;
+        for (line_number, text) in lines.by_ref() {
+            if cancel() {
+                cancelled = true;
+                break;
+            }
+            if start.elapsed() > deadline {
+                script_error = Some(format!("解析超时（{RUN_SECONDS}s）"));
+                break;
+            }
+            stats.lines += 1;
+            let ctx_obj = Object::new(ctx.clone())
+                .map_err(|e| ParseStop::Js(format!("创建 ctx 失败：{e}")))?;
+            ctx_obj
+                .set("lineNumber", line_number as f64)
+                .map_err(|e| ParseStop::Js(format!("设置 ctx.lineNumber 失败：{e}")))?;
+            ctx_obj
+                .set("index", line_number.saturating_sub(1) as f64)
+                .map_err(|e| ParseStop::Js(format!("设置 ctx.index 失败：{e}")))?;
+            ctx_obj
+                .set("path", source_path.as_str())
+                .map_err(|e| ParseStop::Js(format!("设置 ctx.path 失败：{e}")))?;
+
+            let row: Value = parse_line.call((text, ctx_obj)).map_err(|e| {
+                if cancel() {
+                    ParseStop::Cancelled
+                } else if start.elapsed() > deadline {
+                    ParseStop::Js(format!("解析超时（{RUN_SECONDS}s）"))
+                } else {
+                    ParseStop::Js(format!(
+                        "第 {line_number} 行：{}",
+                        crate::script::catch_message(&ctx, e)
+                    ))
+                }
+            })?;
+            if row.is_null() || row.is_undefined() {
+                stats.skipped += 1;
+            } else if row.is_object() {
+                let cells_val: Value = cells_fn.call((row, keys_value.clone())).map_err(|e| {
+                    if cancel() {
+                        ParseStop::Cancelled
+                    } else {
+                        ParseStop::Js(format!(
+                            "第 {line_number} 行：{}",
+                            crate::script::catch_message(&ctx, e)
+                        ))
+                    }
+                })?;
+                let cells_arr = Array::from_js(&ctx, cells_val)
+                    .map_err(|_| ParseStop::Js("内部转换器返回异常".into()))?;
+                let mut cells = Vec::with_capacity(columns.len());
+                for cv in cells_arr.iter::<Value>() {
+                    let cv = cv.map_err(|e| ParseStop::Js(format!("第 {line_number} 行：{e}")))?;
+                    if cv.is_string() {
+                        let mut s = rquickjs::String::from_js(&ctx, cv)
+                            .map_err(|e| ParseStop::Js(format!("第 {line_number} 行：{e}")))?
+                            .to_string()
+                            .map_err(|e| ParseStop::Js(format!("第 {line_number} 行：{e}")))?;
+                        if s.chars().count() > MAX_CELL_CHARS {
+                            s = s.chars().take(MAX_CELL_CHARS).collect();
+                        }
+                        cells.push(s);
+                    } else {
+                        // __cells only emits null for unsupported value types.
+                        if !warned_unsupported {
+                            warned_unsupported = true;
+                            on_console(crate::script::ScriptConsole {
+                                level: "warn".into(),
+                                text: "parseLine 返回的列值类型不受支持，已置空".into(),
+                            });
+                        }
+                        cells.push(String::new());
+                    }
+                }
+                stats.rows += 1;
+                batch.push(ParserRowJson {
+                    line: line_number,
+                    cells,
+                });
+                if batch.len() >= PARSER_BATCH {
+                    on_batch(std::mem::take(&mut batch));
+                }
+            } else {
+                return Err(ParseStop::Js(format!(
+                    "第 {line_number} 行：parseLine 必须返回对象、null 或 undefined"
+                )));
+            }
+
+            let msgs: Vec<_> = console_pending.borrow_mut().drain(..).collect();
+            for m in msgs {
+                on_console(m);
+            }
+        }
+        if !batch.is_empty() {
+            on_batch(std::mem::take(&mut batch));
+        }
+        Ok(())
+    });
+
+    let msgs: Vec<_> = console_pending.borrow_mut().drain(..).collect();
+    for m in msgs {
+        on_console(m);
+    }
+    if let Err(stop) = result {
+        match stop {
+            ParseStop::Js(msg) => script_error = Some(msg),
+            ParseStop::Cancelled => cancelled = true,
+        }
+    }
+    stats.cancelled = cancelled;
+    stats.error = script_error;
+    stats
+}
+
+/// Re-read `plugin.columns` inside the run context (shape re-validated).
+fn read_columns<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    obj: &rquickjs::Object<'js>,
+) -> Result<Vec<ParserColumnJson>, ParseStop> {
+    use rquickjs::{Array, FromJs, Object, Value};
+    let cols_val: Value = obj
+        .get("columns")
+        .map_err(|e| ParseStop::Js(format!("plugin.columns: {e}")))?;
+    let cols =
+        Array::from_js(ctx, cols_val).map_err(|_| ParseStop::Js("plugin.columns 必须是数组".into()))?;
+    let mut columns = Vec::new();
+    for item in cols.iter::<Value>() {
+        let item = item.map_err(|e| ParseStop::Js(format!("plugin.columns: {e}")))?;
+        let col = Object::from_js(ctx, item)
+            .map_err(|_| ParseStop::Js("plugin.columns 的元素必须是对象".into()))?;
+        let key: Value = col.get("key").map_err(|e| ParseStop::Js(format!("plugin.columns: {e}")))?;
+        let key = if key.is_string() {
+            rquickjs::String::from_js(ctx, key)
+                .map_err(|e| ParseStop::Js(format!("plugin.columns: {e}")))?
+                .to_string()
+                .map_err(|e| ParseStop::Js(format!("plugin.columns: {e}")))?
+        } else {
+            return Err(ParseStop::Js("plugin.columns 的 key 必须是字符串".into()));
+        };
+        columns.push(ParserColumnJson {
+            key,
+            label: String::new(), // labels were validated at listing time; runs only need keys
+        });
+    }
+    if columns.is_empty() || columns.len() > MAX_COLUMNS {
+        return Err(ParseStop::Js(format!(
+            "plugin.columns 须为 1–{MAX_COLUMNS} 列"
+        )));
+    }
+    Ok(columns)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,6 +1006,141 @@ mod tests {
         assert_eq!(parsers[0].name, "My 格式");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].starts_with("b.js:"), "{errors:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- parser run (increment 2) -------------------------------------------
+
+    use std::cell::RefCell;
+    use std::sync::{Arc, Mutex};
+
+    const PARSER_RUN: &str = r##"
+        var plugin = {
+            id: "runfmt",
+            name: "Run",
+            extensions: ["rlog"],
+            columns: [
+                { key: "word", label: "W" },
+                { key: "num", label: "N" },
+                { key: "bad", label: "B" },
+            ],
+            parseLine(line, ctx) {
+                if (line === "skip") return null;
+                var parts = line.split(" ");
+                return { word: parts[0], num: ctx.lineNumber, bad: { obj: true } };
+            },
+        };
+    "##;
+
+    fn open_doc(path: &std::path::Path) -> Arc<Mutex<lumelog_core::doc::DocFile>> {
+        Arc::new(Mutex::new(
+            lumelog_core::doc::DocFile::open(path, 1 << 20).unwrap(),
+        ))
+    }
+
+    #[test]
+    fn parser_run_end_to_end() {
+        let dir = temp_dir("prun");
+        let doc_path = dir.join("in.rlog");
+        std::fs::write(&doc_path, "START 1\nskip\nSTOP 2\n").unwrap();
+        write(&dir, "p.js", PARSER_RUN);
+
+        let batches: RefCell<Vec<Vec<ParserRowJson>>> = RefCell::new(Vec::new());
+        let consoles: RefCell<Vec<crate::script::ScriptConsole>> = RefCell::new(Vec::new());
+        let cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| false);
+        let stats = run_parser_plugin(
+            open_doc(&doc_path),
+            &dir.join("p.js"),
+            &mut |rows| batches.borrow_mut().push(rows),
+            &mut |m| consoles.borrow_mut().push(m),
+            cancel,
+        );
+        assert_eq!(stats.error, None, "{stats:?}");
+        assert_eq!(stats.lines, 3);
+        assert_eq!(stats.rows, 2);
+        assert_eq!(stats.skipped, 1);
+        assert!(!stats.cancelled);
+
+        let all: Vec<ParserRowJson> = batches.into_inner().into_iter().flatten().collect();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].line, 1);
+        assert_eq!(all[0].cells, vec!["START", "1", ""]); // number -> JS String()
+        assert_eq!(all[1].line, 3);
+        assert_eq!(all[1].cells[0], "STOP");
+        // the object-valued column collapses to "" with a one-time warning
+        assert!(consoles
+            .into_inner()
+            .iter()
+            .any(|m| m.level == "warn" && m.text.contains("不受支持")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parser_run_honours_cancel() {
+        let dir = temp_dir("pcancel");
+        let doc_path = dir.join("in.rlog");
+        std::fs::write(&doc_path, "a\nb\nc\nd\n").unwrap();
+        write(
+            &dir,
+            "p.js",
+            r#"var plugin = { id: "p", name: "P", extensions: ["rlog"], columns: [{key:"k",label:"K"}], parseLine(line) { return { k: line }; } };"#,
+        );
+        // 1st check (loop) passes, 2nd (post-call) passes, 3rd cancels: exactly
+        // one row lands before the run stops.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let cancel: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+            let n = calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            n >= 2
+        });
+        let batches: RefCell<Vec<Vec<ParserRowJson>>> = RefCell::new(Vec::new());
+        let stats = run_parser_plugin(
+            open_doc(&doc_path),
+            &dir.join("p.js"),
+            &mut |rows| batches.borrow_mut().push(rows),
+            &mut |_| {},
+            cancel,
+        );
+        assert!(stats.cancelled, "{stats:?}");
+        assert!(stats.error.is_none());
+        let all: Vec<ParserRowJson> = batches.into_inner().into_iter().flatten().collect();
+        assert_eq!(all.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parser_run_surfaces_console_and_js_errors() {
+        let dir = temp_dir("perr");
+        let doc_path = dir.join("in.rlog");
+        std::fs::write(&doc_path, "x\n").unwrap();
+        write(
+            &dir,
+            "p.js",
+            r#"var plugin = { id: "p", name: "P", extensions: ["rlog"], columns: [{key:"k",label:"K"}], parseLine(line) { console.log("hi", line); if (line === "x") throw new Error("boom"); return {k: line}; } };"#,
+        );
+        let consoles: RefCell<Vec<crate::script::ScriptConsole>> = RefCell::new(Vec::new());
+        let stats = run_parser_plugin(
+            open_doc(&doc_path),
+            &dir.join("p.js"),
+            &mut |_| {},
+            &mut |m| consoles.borrow_mut().push(m),
+            Arc::new(|| false),
+        );
+        assert!(stats.error.as_deref().unwrap_or("").contains("boom"), "{stats:?}");
+        assert!(consoles
+            .into_inner()
+            .iter()
+            .any(|m| m.level == "log" && m.text == "hi x"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn find_parser_plugin_by_id() {
+        let dir = temp_dir("pfind");
+        write(&dir, "p.js", PARSER_RUN);
+        let path = find_parser_plugin(&dir, "runfmt").unwrap();
+        assert!(path.file_name().unwrap() == "p.js");
+        let err = find_parser_plugin(&dir, "nope").unwrap_err();
+        assert_eq!(err.code, "plugin_not_found");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
