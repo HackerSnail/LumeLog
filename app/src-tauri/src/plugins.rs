@@ -229,7 +229,7 @@ pub fn syntax_plugins_list(app: tauri::AppHandle) -> Result<SyntaxPluginsReply, 
 // ---- parser plugins (increment 2: QuickJS `parseLine`) ----------------------
 
 /// One table column a parser plugin emits.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParserColumnJson {
     pub key: String,
@@ -237,7 +237,7 @@ pub struct ParserColumnJson {
 }
 
 /// Metadata read by executing the plugin once in the sandbox.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParserPluginInfo {
     pub id: String,
@@ -385,9 +385,62 @@ pub(crate) fn load_parser_metadata(path: &Path) -> Result<ParserPluginInfo, Stri
     })
 }
 
-/// Walk `dir` for `*.js` parser plugins (file-name order, one bad file never
-/// blocks the rest, first id wins). A stalled eval is bounded by `META_TIMEOUT`
-/// per file and the whole listing by `LIST_BUDGET`.
+/// Load parser-plugin metadata for either kind: `.wasm` runs in the wasmi
+/// host, everything else goes through the QuickJS path.
+fn load_parser_plugin_any(path: &Path) -> Result<ParserPluginInfo, String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match ext {
+        "wasm" => {
+            let bytes = std::fs::read(path).map_err(|e| format!("读取失败: {e}"))?;
+            if bytes.len() as u64 > crate::wasmi_host::MAX_WASM_BYTES {
+                return Err(format!(
+                    "wasm 文件过大（超过 {} 字节）",
+                    crate::wasmi_host::MAX_WASM_BYTES
+                ));
+            }
+            let mut plugin = crate::wasmi_host::WasmPlugin::instantiate(&bytes)?;
+            let info = plugin.meta()?;
+            validate_parser_info(&info)?;
+            Ok(info)
+        }
+        _ => load_parser_metadata(path),
+    }
+}
+
+/// Shared shape checks for wasm `meta()` output (JS path validates inline).
+fn validate_parser_info(info: &ParserPluginInfo) -> Result<(), String> {
+    check_id(&info.id)?;
+    check_name(&info.name)?;
+    if info.extensions.is_empty() || info.extensions.len() > MAX_EXTENSIONS {
+        return Err(format!("extensions 须为 1–{MAX_EXTENSIONS} 个"));
+    }
+    for ext in &info.extensions {
+        check_extension(ext)?;
+    }
+    if info.columns.is_empty() || info.columns.len() > MAX_COLUMNS {
+        return Err(format!("columns 须为 1–{MAX_COLUMNS} 列"));
+    }
+    for col in &info.columns {
+        if col.key.is_empty() || col.key.chars().count() > 32 {
+            return Err(format!("列 key `{}` 长度须为 1–32", col.key));
+        }
+        if !col
+            .key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Err(format!("列 key `{}` 只允许字母、数字、`_`", col.key));
+        }
+        if col.label.trim().is_empty() || col.label.chars().count() > 64 {
+            return Err(format!("列 `{}` 的 label 长度须为 1–64", col.key));
+        }
+    }
+    Ok(())
+}
+
+/// Walk `dir` for `*.js` / `*.wasm` parser plugins (file-name order, one bad
+/// file never blocks the rest, first id wins). A stalled eval/instantiation is
+/// bounded by per-file fuel/timeouts and the whole listing by `LIST_BUDGET`.
 pub(crate) fn list_parser_plugins(dir: &Path) -> (Vec<ParserPluginInfo>, Vec<String>) {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -397,7 +450,10 @@ pub(crate) fn list_parser_plugins(dir: &Path) -> (Vec<ParserPluginInfo>, Vec<Str
     let mut files: Vec<PathBuf> = rd
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "js"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x == "js" || x == "wasm")
+        })
         .collect();
     files.sort();
     let mut parsers = Vec::new();
@@ -413,7 +469,7 @@ pub(crate) fn list_parser_plugins(dir: &Path) -> (Vec<ParserPluginInfo>, Vec<Str
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        match load_parser_metadata(path) {
+        match load_parser_plugin_any(path) {
             Ok(info) => {
                 if seen.contains(&info.id) {
                     errors.push(format!("{file}: 插件 id `{}` 重复，已跳过", info.id));
@@ -447,11 +503,14 @@ pub(crate) fn find_parser_plugin(dir: &Path, plugin_id: &str) -> Result<PathBuf,
         let mut files: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "js"))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|x| x == "js" || x == "wasm")
+            })
             .collect();
         files.sort();
         for path in files {
-            if let Ok(meta) = load_parser_metadata(&path) {
+            if let Ok(meta) = load_parser_plugin_any(&path) {
                 if meta.id == plugin_id {
                     return Ok(path);
                 }
@@ -473,7 +532,7 @@ const MAX_CELL_CHARS: usize = 4096;
 
 /// One parsed row: the 1-based source line (editor jump) plus the cell strings
 /// in the plugin's declared column order.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParserRowJson {
     pub line: u64,

@@ -28,7 +28,9 @@ calamine = { version = "0.37.0", features = ["chrono"] }
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
 pdf-extract = "0.12.1"
+wasmi = "2.0.0"
 
 [dev-dependencies]
 rust_xlsxwriter = "0.102.0"
 tempfile = "3"
+wasm-encoder = "0.262.0"

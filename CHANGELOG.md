@@ -2,7 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — Plan 22 PDF 真渲染 增量2：pdf.js（feat/pdf-render）
+## 2026-10-30 — Plan 23 插件接口 增量3：wasmi Wasm 解析插件（feat/plugin-wasm）
+
+**依据：** `docs/specs/2026-10-30-plugin-wasm-impl-design.md`（立项 `2026-10-30-plugin-wasm-proposal.md` 建议路线 B：wasmi 解释器）。插件接口三增量至此全部交付。
+
+### Task. wasmi 宿主 + 列表/运行分派
+**Files:** Create `app/src-tauri/src/wasmi_host.rs`（`WasmPlugin`：wasmi 2.0 实例化 + `StoreLimitsBuilder.memory_size(16MB)` + 每次调用重置 fuel 5×10⁸（单次死循环被截断）；朴素 wasm ABI——插件导出 `memory/alloc/meta/parse/finish`，i64 打包 `(ptr<<32)|len` 指向插件内存内的 UTF-8 JSON，`parse(chunk, base_line)` 喂 256KB 完整行块、行号约定 `base_line + 块内换行计数`，EOF 调 `finish` 冲刷尾记录；`run_wasm_parser`：`DocLines` 逐行累积 → `parse` → 512 行/批发帧，`RunCtx` 统一取消/deadline/错误处理）；Modify `app/src-tauri/src/plugins.rs`（`ParserPluginInfo/ParserColumnJson/ParserRowJson` 加 Deserialize；`list_parser_plugins`/`find_parser_plugin` 扩到 `*.js|*.wasm`，wasm 走 wasmi 实例化 + `meta()` 且元数据过 `validate_parser_info` 形状校验；id 去重/文件名序/单文件失败不阻塞沿用）；Modify `app/src-tauri/src/commands.rs`（`parser_run` 按扩展名分派 js/wasm）；Modify `app/src-tauri/Cargo.toml`（`wasmi 2.0`；dev-dep `wasm-encoder 0.262`）；`lib.rs` 注册。
+**Why:** ABI 用朴素 wasm 而非 wit-bindgen——首版把 ABI 面压到最小，JSON 进出与前端 `ParserRow` 同构（表格/导出零改动），wit 冻结推迟到有第二实现时；wasmi（解释器）按立项比选，体积约为 wasmtime 的 1/10。
+**验证:** `cargo test -p lumelog-app wasmi_host::` 2 pass——fixture 用 `wasm-encoder` 程序化构建 wasm 模块（无需 wasm 工具链；坑：函数体需显式 `End`、data 段偏移的 LEB128 手写 2048/4096）：常量行插件列表出数 + `parser_run` 出行（尾块 1 行 + finish 1 行）、空输出插件 lines 计数正确、坏 wasm 报错不阻塞其它插件；`cargo test --workspace` 全绿 + `clippy -D warnings` 净；`npm test` 142 + `npm run build` 通过（前端零改动）。体积核对：release `lumelog-app.exe` 基线 16,732,160 → 含 wasmi 18,904,576（+2.07MB，符合立项预估 2–3MB）。
+**未验:** 真实 Rust 编译的 wasm 插件（cargo 模板见 `docs/specs/2026-10-30-plugin-wasm-impl-design.md` §3）走通"编译→丢进 plugins→表格出数"需人工过。
 
 **依据：** `docs/specs/2026-10-30-pdf-render-design.md`；立项文档比选后选路线 C（pdf.js，无原生库分发成本）。增量1 的文本提取保留为 TXT 导出/`rows()` 按需能力。
 
