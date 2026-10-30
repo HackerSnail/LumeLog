@@ -1135,7 +1135,12 @@ function ensureViewerPanel(): void {
 async function openViewerFile(): Promise<void> {
   const picked = await open({
     multiple: false,
-    filters: [{ name: "文档（xlsx/xlsm/docx/pdf）", extensions: ["xlsx", "xlsm", "docx", "pdf"] }],
+    filters: [
+      {
+        name: "文档（xlsx/xlsm/docx/pdf/pptx）",
+        extensions: ["xlsx", "xlsm", "docx", "pdf", "pptx"],
+      },
+    ],
   });
   if (typeof picked !== "string") return;
   try {

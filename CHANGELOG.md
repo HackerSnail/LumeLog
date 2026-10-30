@@ -2,7 +2,14 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — Plan 24 PDF 文本搜索（feat/pdf-search）
+## 2026-10-30 — Plan 25 PPTX 文本提取查看（feat/pptx-text）
+
+**依据：** `docs/specs/2026-10-30-pptx-text-design.md`。PPT 真渲染（版式/主题/图片）明确不做，本增量以文本提取收口 features.md 的 Office 条目；.ppt 老二进制格式不支持。
+
+### Task. `viewers.rs` 接入 pptx
+**Files:** Modify `app/src-tauri/src/viewers.rs`（`ViewerKind::Pptx`；`open_pptx()`：zip 收集 `ppt/slides/slide<N>.xml` **按 N 数值排序**（字典序会把 slide10 排到 slide2 前），每张幻灯片前插 `── 幻灯片 N ──` 分隔行，`<a:p>` 段落 → 行、`<a:t>` 跨 run 拼接；段落/文本上限沿用，超限截断标记；无 slides 条目 → `invalid_argument`）；新增共享解析器 `xml_paragraph_texts(xml, p_tag, t_tag)` 并把 docx 提取重构到其上（消除两份几乎相同的 quick-xml 循环；行为差异：docx XML 截断从报错改为容忍已解析部分——与 pptx 一致），上限统一走 `apply_text_caps`）；Modify `app/frontend/src/main.ts`（查看对话框 filter 加 `pptx`，导出走既有 TXT 分支）。
+**验证:** `cargo test -p lumelog-app viewers::` 8 pass（新增：幻灯片数值排序 1/2/10、段落切分与分隔行、空幻灯片（`<a:p/>`）单空行、TXT 导出同源、无 slides 条目拒绝；既有 docx 测试在共享解析器重构后不回归）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净；`npm test` 147 pass + `npm run build` 通过。
+**未验:** 真实 pptx（图片/表格/备注页）只出文本，观感需 `npm run tauri dev` 人工过。
 
 **依据：** `docs/specs/2026-10-30-pdf-search-design.md`（Plan 22 真渲染的配套增量）。Rust 侧零改动。
 
