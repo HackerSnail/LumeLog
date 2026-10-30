@@ -184,6 +184,7 @@ export type IpcErrorCode =
   | "source_format"
   | "plugin_not_found"
   | "plugin_bad_manifest"
+  | "viewer_unsupported"
   | "unknown";
 
 /**
@@ -213,6 +214,7 @@ const IPC_ERROR_ZH: Record<IpcErrorCode, string> = {
   source_format: "日志源格式无法识别%s",
   plugin_not_found: "解析插件不存在（可能已被删除）%s",
   plugin_bad_manifest: "解析插件缺少必要定义%s",
+  viewer_unsupported: "不支持的查看格式（支持 xlsx/xlsm/docx）%s",
   unknown: "调用失败%s",
 };
 
@@ -971,6 +973,70 @@ export function parserRun(args: {
 /** Ask an in-flight `parserRun` to stop. */
 export function parserCancel(requestId: number): Promise<void> {
   return call<void>("parser_cancel", { requestId });
+}
+
+// ---- Document viewers (doc-viewer increment 1: xlsx / docx) -----------------
+
+export interface ViewerInfo {
+  id: number;
+  /** `"xlsx" | "docx"`. */
+  kind: string;
+  path: string;
+  sheets: string[];
+  /** docx: paragraph count (xlsx: null). */
+  paragraphs: number | null;
+  /** docx: true when extraction hit the paragraph/text cap. */
+  truncated: boolean;
+}
+
+export interface ViewerRow {
+  line: number;
+  cells: string[];
+}
+
+export interface ViewerPage {
+  total: number;
+  /** Header letters ("A", "B", …) for xlsx; `["内容"]` for docx. */
+  columns: string[];
+  rows: ViewerRow[];
+}
+
+export interface ViewerExportStats {
+  written: number;
+}
+
+export function viewerOpen(path: string): Promise<ViewerInfo> {
+  return call<ViewerInfo>("viewer_open", { path });
+}
+
+export function viewerRows(args: {
+  id: number;
+  sheetIndex: number;
+  fromRow: number;
+  limit: number;
+}): Promise<ViewerPage> {
+  return call<ViewerPage>("viewer_rows", {
+    id: args.id,
+    sheetIndex: args.sheetIndex,
+    fromRow: args.fromRow,
+    limit: args.limit,
+  });
+}
+
+export function viewerClose(id: number): Promise<boolean> {
+  return call<boolean>("viewer_close", { id });
+}
+
+export function viewerExportCsv(args: {
+  id: number;
+  sheetIndex: number;
+  targetPath: string;
+}): Promise<ViewerExportStats> {
+  return call<ViewerExportStats>("viewer_export_csv", {
+    id: args.id,
+    sheetIndex: args.sheetIndex,
+    targetPath: args.targetPath,
+  });
 }
 
 // ---- User scripts (Roadmap-3: QuickJS) --------------------------------------

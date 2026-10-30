@@ -48,6 +48,10 @@ import {
   parserPluginsList,
   parserRun,
   parserCancel,
+  viewerOpen,
+  viewerRows,
+  viewerClose,
+  viewerExportCsv,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -195,6 +199,17 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
       expect(IPC_ERROR_CODES).toContain(code);
       expect(/[\u4e00-\u9fff]/.test(ipcErrorZh(code))).toBe(true);
     }
+  });
+
+  it("viewer_wrappers_are_functions", () => {
+    for (const fn of [viewerOpen, viewerRows, viewerClose, viewerExportCsv]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("viewer_error_codes_have_zh_text", () => {
+    expect(IPC_ERROR_CODES).toContain("viewer_unsupported");
+    expect(/[\u4e00-\u9fff]/.test(ipcErrorZh("viewer_unsupported"))).toBe(true);
   });
 
   it("blf_wrappers_are_functions", () => {

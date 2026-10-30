@@ -10,6 +10,10 @@
 **Files:** Create `app/src-tauri/src/viewers.rs`（`ViewerSessions`：id→会话上限 4；`viewer_open` 按扩展名分流——xlsx/xlsm 走 `calamine::Xlsx`（BufReader<File> 常驻），docx 用 zip + quick-xml 提取 `word/document.xml` 段落（跨 `w:r` 拼接 `w:t`、`<w:p/>` 空段计一行、单条目解压 ≤64MB、段落 ≤20 万/文本 ≤64MB 超限截断标记）；`rows()`：xlsx 物化 Range 后窗口跳取（limit ≤1000），窗口统一列宽（最远非空列、≤64 列），单元格字符串化（整数浮点去尾零、Bool→TRUE/FALSE、DateTime→`YYYY-MM-DD HH:MM:SS`、Error→`#<err>`），列字母表头；docx 单列「内容」；`export()`：xlsx 全表 CSV（UTF-8 BOM、无表头、RFC 引号转义、上限 1,048,576 行、tmp→rename）+ docx TXT）；Modify `app/src-tauri/src/commands.rs`（`viewer_open/viewer_rows/viewer_close/viewer_export_csv`；会话托管为 `Arc<Mutex<ViewerSessions>>`，导出 async + spawn_blocking 防大表卡 IPC 线程）；`lib.rs` 注册）；Modify `Cargo.toml`（`calamine 0.37`+chrono、`zip 9`(deflate)、`quick-xml 0.37`——0.42 移除了 `BytesText::unescape` 故回退；dev-dep `rust_xlsxwriter`）。
 **验证:** `cargo test -p lumelog-app viewers::` 5 pass（xlsx：sheet 列表/窗口行/整数与日期格式化/统一列宽补空/越界拒绝；docx：跨 run 拼接与空段；未知扩展名 `viewer_unsupported`；会话上限 4 + close 幂等释放；CSV 与表格同源 + BOM/引号、TXT 导出；列字母 A/Z/AA/BL）。fixture 用 `rust_xlsxwriter` 现写（日期单元格必须带日期 num-format，calamine 才会读成 DateTime 而非裸序列号）+ `zip` 现写 docx。`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
 
+### Task 2. 命令 + 前端桥
+**Files:** Modify `app/frontend/src/ipc.ts`（`ViewerInfo/ViewerRow/ViewerPage/ViewerExportStats` + `viewerOpen/viewerRows/viewerClose/viewerExportCsv`；错误码 `viewer_unsupported` 进联合与中文表）；Modify `app/frontend/src/ipc.test.ts`（+2）。
+**验证:** `npx tsc --noEmit` 净；`npx vitest run src/ipc.test.ts` 23 pass。
+
 ## 2026-10-30 — Plan 18 插件接口 增量2：QuickJS 数据解析插件（feat/plugin-parser）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-parser-design.md`；计划 `docs/plans/2026-10-30-plugin-parser.md`。接 Plan 17，覆盖 `docs/features.md` 待做第 1 条的「冷门日志与报文格式」；Wasm host 为增量3。
