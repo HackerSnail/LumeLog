@@ -14,6 +14,16 @@
 **Files:** Modify `app/frontend/src/ipc.ts`（`ViewerInfo/ViewerRow/ViewerPage/ViewerExportStats` + `viewerOpen/viewerRows/viewerClose/viewerExportCsv`；错误码 `viewer_unsupported` 进联合与中文表）；Modify `app/frontend/src/ipc.test.ts`（+2）。
 **验证:** `npx tsc --noEmit` 净；`npx vitest run src/ipc.test.ts` 23 pass。
 
+### Task 3. 前端 dock（`main.ts` + 样式）
+**Files:** Modify `app/frontend/src/main.ts`（工具栏「查看」按钮 + 文件对话框；`buildViewerDock()`（sheet 下拉 + 「加载后续 1000 行」 + 导出）；`openViewerFile()/toggleViewerDock()`（四个底部 dock 互斥，收起即 close 会话）；`loadViewerRows()`：按窗口拉取 + `viewerToken` 丢弃旧响应 + 状态行 `文件 · N/总 行 · 已截断`；`exportViewer()` 按 kind 出 CSV/TXT save 对话框；复用 `ParserPanel/RowStore`，行号列不接跳转）；Modify `app/frontend/src/styles.css`（`#viewer-dock` 并入 dock 高度契约选择器）。
+**Why:** xlsx/docx 的行数据 `ViewerRow{line,cells}` 与 `ParserRow` 同构，直接复用增量2 的虚拟表格，零新表格代码。
+**验证:** `npx tsc --noEmit` 净；`npm test` 141 pass（21 文件）+ `npm run build` 通过。
+**未验:** 真实 xlsx/docx 文件的查看与导出观感需 `npm run tauri dev` 人工过。
+
+### Task 4. 文档收尾
+**Files:** Modify `docs/features.md`（待做第 2 条注记：xlsx/docx 已交付，PDF/PPT 推迟及原因）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+
 ## 2026-10-30 — Plan 18 插件接口 增量2：QuickJS 数据解析插件（feat/plugin-parser）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-parser-design.md`；计划 `docs/plans/2026-10-30-plugin-parser.md`。接 Plan 17，覆盖 `docs/features.md` 待做第 1 条的「冷门日志与报文格式」；Wasm host 为增量3。
