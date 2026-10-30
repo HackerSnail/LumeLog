@@ -1019,7 +1019,7 @@ function ensureViewerPanel(): void {
 async function openViewerFile(): Promise<void> {
   const picked = await open({
     multiple: false,
-    filters: [{ name: "文档（xlsx/xlsm/docx）", extensions: ["xlsx", "xlsm", "docx"] }],
+    filters: [{ name: "文档（xlsx/xlsm/docx/pdf）", extensions: ["xlsx", "xlsm", "docx", "pdf"] }],
   });
   if (typeof picked !== "string") return;
   try {
@@ -1076,10 +1076,10 @@ async function loadViewerRows(reset: boolean): Promise<void> {
 async function exportViewer(): Promise<void> {
   const info = viewerInfo;
   if (!info) return;
-  const isDocx = info.kind === "docx";
+  const isCsv = info.kind === "xlsx"; // docx/pdf export as plain text
   const dest = await save({
-    defaultPath: basenameOf(info.path) + (isDocx ? ".txt" : ".csv"),
-    filters: [isDocx ? { name: "文本", extensions: ["txt"] } : { name: "CSV", extensions: ["csv"] }],
+    defaultPath: basenameOf(info.path) + (isCsv ? ".csv" : ".txt"),
+    filters: [isCsv ? { name: "CSV", extensions: ["csv"] } : { name: "文本", extensions: ["txt"] }],
   });
   if (typeof dest !== "string") return;
   try {

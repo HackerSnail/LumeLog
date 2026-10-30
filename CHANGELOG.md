@@ -2,7 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — docs：PDF 查看与 Wasm 插件宿主立项预研
+## 2026-10-30 — Plan 21 PDF 查看增量1：纯 Rust 文本提取（feat/pdf-text）
+
+**依据：** `docs/specs/2026-10-30-pdf-viewer-proposal.md` 建议的分步立项增量1（文本提取先行），延续 Plan 19 查看器体系。真渲染增量（pdf.js/pdfium）仍待需求反馈另立项。
+
+### Task. `viewers.rs` 接入 PDF 文本提取
+**Files:** Modify `app/src-tauri/src/viewers.rs`（`ViewerKind::Pdf`；`open_pdf()`：`pdf-extract 0.12` 提取全文 → 按行落文本行会话（与 docx 同一 `docx_lines` 路径，沿用段落/文本上限与截断标记），`catch_unwind` 兜畸形 PDF 的 panic 面 → `invalid_argument`；`rows()`/`export()` 分派改为按「文本行是否存在」而非 kind，pdf 与 docx 共用单列「内容」与 TXT 导出）；Modify `app/frontend/src/main.ts`（查看对话框 filter 加 `pdf`；导出按 `kind === "xlsx"` 分 CSV/TXT）。
+**Why:** 提取文本无版面，落进 docx 同款"单列文本 + 行号"视图零新增 UI；扫描件（无文本层）会得到空行会话，不为它做 OCR。
+**验证:** `cargo test -p lumelog-app viewers::` 6 pass（新增：手造最小单页 PDF——对象/xref/偏移量程序化拼装——提取两行文本、TXT 导出同源、畸形输入返回错误而非 panic）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净；`npm test` 142 pass + `npm run build` 通过。
+**未验:** 真实 PDF（CJK 字体/扫描件）提取质量需 `npm run tauri dev` 人工过。
 
 **Files:** Create `docs/specs/2026-10-30-pdf-viewer-proposal.md`、`docs/specs/2026-10-30-plugin-wasm-proposal.md`；Modify `docs/features.md`（两条待做挂立项文档链接）。
 **Why:** 剩余两项此前只有一句推迟理由，缺可比选的立项材料。PDF 给出三路线比选（pdfium 真渲染 / 纯 Rust 文本提取 / 前端 pdf.js），建议拆两步：文本提取先行（复用 Plan 19 查看器，半天级），真渲染默认 pdf.js（无原生分发成本、体积 1/3）；Wasm 宿主给出四路线比选，建议 wasmi 起步（体积约 wasmtime 的 1/10，wit 接口与运行时解耦，预留切换），附 wit 心智稿、沙箱边界与体积/门槛风险。两份均为预研，未批准实现；决策点（文本先行与否、路线选择、15MB 体积硬门槛）单列待拍板。

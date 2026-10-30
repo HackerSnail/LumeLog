@@ -27,6 +27,7 @@ lumelog-can = { path = "../../crates/lumelog-can" }
 calamine = { version = "0.37.0", features = ["chrono"] }
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
+pdf-extract = "0.12.1"
 
 [dev-dependencies]
 rust_xlsxwriter = "0.102.0"
