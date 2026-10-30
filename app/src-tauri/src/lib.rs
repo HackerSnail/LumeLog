@@ -12,6 +12,7 @@ mod plugins;
 mod recovery;
 mod script;
 mod state;
+mod viewers;
 mod watch;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -21,6 +22,9 @@ pub fn run() {
         .manage(state::AppDocs::default())
         .manage(mf4::Mf4Sessions::default())
         .manage(watch::AppWatch::default())
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(
+            viewers::ViewerSessions::default(),
+        )))
         .invoke_handler(tauri::generate_handler![
             commands::app_ping,
             commands::doc_open,
@@ -52,6 +56,10 @@ pub fn run() {
             plugins::parser_plugins_list,
             commands::parser_run,
             commands::parser_cancel,
+            commands::viewer_open,
+            commands::viewer_rows,
+            commands::viewer_close,
+            commands::viewer_export_csv,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,

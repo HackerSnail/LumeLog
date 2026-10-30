@@ -24,6 +24,10 @@ rquickjs = "0.14"
 falcon_mdf = { version = "0.7", default-features = false, features = ["mmap"] }
 lumelog-core = { path = "../../crates/lumelog-core" }
 lumelog-can = { path = "../../crates/lumelog-can" }
+calamine = { version = "0.37.0", features = ["chrono"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
 
 [dev-dependencies]
+rust_xlsxwriter = "0.102.0"
 tempfile = "3"

@@ -2,6 +2,14 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 19 文档查看器 增量1：xlsx 表格 + docx 文本（feat/doc-viewer）
+
+**依据：** spec `docs/specs/2026-10-30-doc-viewer-design.md`；计划 `docs/plans/2026-10-30-doc-viewer.md`。对应 `docs/features.md` 待做第 2 条。范围裁剪：PDF（需 pdfium 级渲染引擎，体积/分发代价大）与 PPT（版式复杂、文本提取价值低）推迟；插件接口增量3（Wasm host）同步推迟——需引入 wasmtime 级依赖与"轻量"定位冲突，且 JS 沙箱插件已覆盖高亮与逐行解析。
+
+### Task 1. Rust 查看器会话（`viewers.rs`）
+**Files:** Create `app/src-tauri/src/viewers.rs`（`ViewerSessions`：id→会话上限 4；`viewer_open` 按扩展名分流——xlsx/xlsm 走 `calamine::Xlsx`（BufReader<File> 常驻），docx 用 zip + quick-xml 提取 `word/document.xml` 段落（跨 `w:r` 拼接 `w:t`、`<w:p/>` 空段计一行、单条目解压 ≤64MB、段落 ≤20 万/文本 ≤64MB 超限截断标记）；`rows()`：xlsx 物化 Range 后窗口跳取（limit ≤1000），窗口统一列宽（最远非空列、≤64 列），单元格字符串化（整数浮点去尾零、Bool→TRUE/FALSE、DateTime→`YYYY-MM-DD HH:MM:SS`、Error→`#<err>`），列字母表头；docx 单列「内容」；`export()`：xlsx 全表 CSV（UTF-8 BOM、无表头、RFC 引号转义、上限 1,048,576 行、tmp→rename）+ docx TXT）；Modify `app/src-tauri/src/commands.rs`（`viewer_open/viewer_rows/viewer_close/viewer_export_csv`；会话托管为 `Arc<Mutex<ViewerSessions>>`，导出 async + spawn_blocking 防大表卡 IPC 线程）；`lib.rs` 注册）；Modify `Cargo.toml`（`calamine 0.37`+chrono、`zip 9`(deflate)、`quick-xml 0.37`——0.42 移除了 `BytesText::unescape` 故回退；dev-dep `rust_xlsxwriter`）。
+**验证:** `cargo test -p lumelog-app viewers::` 5 pass（xlsx：sheet 列表/窗口行/整数与日期格式化/统一列宽补空/越界拒绝；docx：跨 run 拼接与空段；未知扩展名 `viewer_unsupported`；会话上限 4 + close 幂等释放；CSV 与表格同源 + BOM/引号、TXT 导出；列字母 A/Z/AA/BL）。fixture 用 `rust_xlsxwriter` 现写（日期单元格必须带日期 num-format，calamine 才会读成 DateTime 而非裸序列号）+ `zip` 现写 docx。`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-30 — Plan 18 插件接口 增量2：QuickJS 数据解析插件（feat/plugin-parser）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-parser-design.md`；计划 `docs/plans/2026-10-30-plugin-parser.md`。接 Plan 17，覆盖 `docs/features.md` 待做第 1 条的「冷门日志与报文格式」；Wasm host 为增量3。

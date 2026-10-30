@@ -1891,6 +1891,59 @@ pub fn parser_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Resul
     }
 }
 
+// ---- document viewers (doc-viewer increment 1: xlsx / docx) ------------------
+
+type ViewerState<'a> = tauri::State<'a, Arc<Mutex<crate::viewers::ViewerSessions>>>;
+
+fn lock_viewers<'a>(
+    state: &'a ViewerState<'a>,
+) -> std::sync::MutexGuard<'a, crate::viewers::ViewerSessions> {
+    state.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+#[tauri::command]
+pub fn viewer_open(
+    state: ViewerState<'_>,
+    path: String,
+) -> Result<crate::viewers::ViewerInfoJson, IpcError> {
+    lock_viewers(&state).open(Path::new(&path))
+}
+
+#[tauri::command]
+pub fn viewer_rows(
+    state: ViewerState<'_>,
+    id: u64,
+    sheet_index: usize,
+    from_row: u64,
+    limit: u32,
+) -> Result<crate::viewers::ViewerPageJson, IpcError> {
+    lock_viewers(&state).rows(id, sheet_index, from_row, limit)
+}
+
+#[tauri::command]
+pub fn viewer_close(state: ViewerState<'_>, id: u64) -> Result<bool, IpcError> {
+    Ok(lock_viewers(&state).close(id))
+}
+
+/// CSV/TXT export. Sync logic in an async command (spawn_blocking) so a large
+/// sheet never stalls the IPC thread.
+#[tauri::command]
+pub async fn viewer_export_csv(
+    state: ViewerState<'_>,
+    id: u64,
+    sheet_index: usize,
+    target_path: String,
+) -> Result<crate::viewers::ViewerExportStats, IpcError> {
+    let sessions = Arc::clone(&state);
+    let target = PathBuf::from(&target_path);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut s = sessions.lock().unwrap_or_else(|p| p.into_inner());
+        s.export(id, sheet_index, &target)
+    })
+    .await
+    .map_err(|e| IpcError::new("io", format!("导出任务失败：{e}")))?
+}
+
 #[cfg(test)]
 mod script_cmd_tests {
     use super::*;
