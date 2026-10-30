@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { clampPage, PdfView, stepZoom } from "./pdfview";
+import { clampPage, hitRect, matchItem, PdfView, stepZoom } from "./pdfview";
 
 describe("clampPage / stepZoom", () => {
   it("clamps pages into [1, total]", () => {
@@ -19,6 +19,32 @@ describe("clampPage / stepZoom", () => {
     expect(stepZoom(4, "in")).toBe(4);
     expect(stepZoom(0.5, "out")).toBe(0.5);
     expect(stepZoom(3.2, "in")).toBe(4);
+  });
+});
+
+describe("PDF text search math (Plan 24)", () => {
+  it("matches case-insensitively, including overlaps", () => {
+    expect(matchItem("Hello hello HELLO", "hello")).toEqual([0, 6, 12]);
+    expect(matchItem("abcabc", "abc")).toEqual([0, 3]);
+    expect(matchItem("abc", "x")).toEqual([]);
+    expect(matchItem("abc", "")).toEqual([]);
+  });
+
+  it("computes proportional match rects in CSS pixels", () => {
+    // identity-ish viewport transform scaled ×2 (dpr 2 → CSS px = device/2)
+    const vt = [2, 0, 0, -2, 0, 100];
+    const item = { str: "abcdef", transform: [1, 0, 0, 1, 10, 50], width: 60 };
+    // fontHeight = 2 (flip×2); itemWidth device = 60*2 = 120 → charW = 20
+    const r = hitRect(item, vt, 2, 2, 3)!;
+    expect(r).not.toBeNull();
+    // left = (item.x 10*2 + char 2*20) / 2 = 30
+    expect(r.left).toBeCloseTo(30);
+    expect(r.width).toBeCloseTo(30);
+    expect(r.height).toBeCloseTo(1);
+    // top: tx[5] = 0 (y-flip cancels offset), top = (0 - 2) / 2 = -1
+    expect(r.top).toBeCloseTo(-1);
+    expect(hitRect({ ...item, str: "" }, vt, 2, 0, 1)).toBeNull();
+    expect(hitRect(item, [1, 2, 3], 1, 0, 1)).toBeNull(); // bad transform
   });
 });
 

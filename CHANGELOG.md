@@ -2,7 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — Plan 23 插件接口 增量3：wasmi Wasm 解析插件（feat/plugin-wasm）
+## 2026-10-30 — Plan 24 PDF 文本搜索（feat/pdf-search）
+
+**依据：** `docs/specs/2026-10-30-pdf-search-design.md`（Plan 22 真渲染的配套增量）。Rust 侧零改动。
+
+### Task. `pdfview.ts` 文本层搜索 + 命中高亮 + dock 搜索 UI
+**Files:** Modify `app/frontend/src/pdfview.ts`（纯函数 `matchItem`（item 内大小写不敏感命中起点，含重叠命中）与 `hitRect`（内联 pdf.js `Util.transform` 矩阵乘法，命中框 = item 宽度按字符比例横向切分，设备坐标 ÷ dpr 得 CSS 像素）；`PdfView` 加每页 `getTextContent()` 缓存、`searchAll(query, onProgress)`（逐页全文替换式搜索）、`gotoHit(index)`（切页渲染 + 滚动定位）、`clearSearch()`、`.pdf-page-wrap > .pdf-hits` 覆盖层（渲染后按当前 viewport 重画命中框，缩放/翻页跟随，当前命中强调色）；load 时清 per-doc 缓存与命中）；Modify `app/frontend/src/main.ts`（pdf 工具条加查找输入 + 命中数 + ◀▶ + ✕：Enter 全文搜索跳第一条、同查询只循环命中、Esc 清除，换文档重置搜索状态）；Modify `app/frontend/src/styles.css`（`.pdf-page-wrap` 相对定位 + `.pdf-hit`/`.pdf-hit-current` 命中框）；Modify `app/frontend/src/pdfview.test.ts`（+2：匹配含重叠命中/空查询、矩形比例切分与 dpr 换算——首版断言手算漏了 item x 偏移随缩放，已按矩阵乘法结果修正）。
+**Why:** 不用 `PDFFindController`——它绑死 `PDFViewer` 全套组件会替换现有 canvas 渲染路径；`getTextContent()` + 几何换算代码量 1/5。跨 item 匹配与字形度量近似是明确记录的限制（spec §3）。
+**验证:** `npx vitest run src/pdfview.test.ts` 5 pass；`npx tsc --noEmit` 净；`npm test` 147 pass（22 文件）+ `npm run build` 通过。
+**未验:** 真实 PDF 的搜索观感（CJK item 切分、命中框近似偏差）需 `npm run tauri dev` 人工过。
 
 **依据：** `docs/specs/2026-10-30-plugin-wasm-impl-design.md`（立项 `2026-10-30-plugin-wasm-proposal.md` 建议路线 B：wasmi 解释器）。插件接口三增量至此全部交付。
 
