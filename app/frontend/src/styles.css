@@ -1181,6 +1181,17 @@ html.has-custom-titlebar .win-btns {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
 }
+/* Parser plugin console output (script-console cap: 200 lines). */
+.parser-console {
+  flex: 0 0 auto;
+  max-height: 80px;
+  overflow: auto;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border-soft);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
 /* Crash-recovery banner (spec §4.4): non-blocking list of unsaved shadows. */
 .recovery-banner {
   position: fixed;

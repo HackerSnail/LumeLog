@@ -26,6 +26,16 @@
 **Why:** canpanel 的列定义/过滤是 CAN 专用的，mf4-table 无虚拟化，均不可直接复用；取 canpanel 骨架裁剪是最小改动路径。
 **验证:** `npx vitest run src/parserpanel.test.ts` 5 pass（列头动态渲染、批量 push 累积、行点击回传、状态行、destroy 后不再响应；rAF 合并用「等一个完整 rAF tick」的 flush 消除 jsdom 16ms 定时器抖动）+ `npx tsc --noEmit` 净。
 
+### Task 5. dock 接线（`main.ts`）
+**Files:** Modify `app/frontend/src/main.ts`（工具栏「解析」按钮；`buildParserDock()`（插件下拉 + 解析/停止 + 重载 + 清空 + 控制台区）；`toggleParserDock()`（与报文/测量 dock 三向互斥，收起即停跑）；`loadParserPlugins()`（按活动文档扩展名预选、错误汇总 toast + console.warn）；`applyParserColumns()` 切插件即重建 store/列；`onParserRunClick()`：parserToken 丢弃旧响应、onDone 出汇总文案；`appendParserConsole()` 200 行上限；handleClose 停跑）。
+**Why:** 解析结果是一次性内存态，dock 隐藏/文档关闭都直接停跑，不做按文档缓存。
+**验证:** `npx tsc --noEmit` 净；`npm test` 139 pass（21 文件）+ `npm run build` 通过。
+**未验:** dock 实际交互（放示例插件解析、点行跳转）需 `npm run tauri dev` 人工过。
+
+### Task 6. 文档收尾
+**Files:** Modify `docs/features.md`（待做第 1 条注记更新：增量2 已交付、剩余 Wasm host 与表格过滤/导出增强）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
+
 ## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。
