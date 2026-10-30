@@ -2,6 +2,27 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 15 语法高亮语言扩展（feat/syntax-languages）
+
+**依据：** spec `docs/specs/2026-10-30-syntax-languages-design.md`；计划 `docs/plans/2026-10-30-syntax-languages.md`。对应 `docs/features.md` 待做第 2 条。
+
+### Task 1+2. 注册表 + 语言包（`language.ts`）
+**Files:** Modify `app/frontend/package.json`/`package-lock.json`（新增 `@codemirror/lang-javascript|python|html|css|xml|markdown|sql|rust|java` 与 `@codemirror/legacy-modes`）、`app/frontend/src/language.ts`；Create `app/frontend/src/language.test.ts`（7）。
+新增 `AVAILABLE_MODES`（21 项，id 沿用 auto/plain/log/ini/json/c）、`MODE_LABELS`、`EXT_MODES`（扩展名→id）、`modeIdForExt(ext)`（同步纯函数，未知 → null）、`resolveLanguage(mode)`（`import()` + `Map` 缓存 + `inFlight` 合并并发）；`log`/`ini` 仍走本地 `StreamLanguage` + `streamHighlight`，lezer 语言与 5 个 legacy 流模式都靠 `editor.ts` 已挂载的 `defaultHighlightStyle`（fallback）着色，故未新增 `HighlightStyle`。
+**Why:** 原实现把模式 id 当扩展名用（`applyMode` 传 `mode` 给 `modeForExtension`），加语言就得让两个字符串集合保持一致；静态引入 9 个语法包会把首屏主 chunk 从 623KB 推到 1MB 量级，与轻量定位冲突。
+**验证:** `npx vitest run src/language.test.ts` 7 pass（扩展名映射 39 组、`AVAILABLE_MODES` 除 auto/plain 外全部解析出 `LanguageSupport` 防注册表漂移、`plain/auto/null` → null、二次调用同一实例、`javascript` 与 `typescript` 用 `interface Foo { a: number }` 的 error 节点区分方言）。
+
+### Task 3. `editor.ts` + `main.ts` 异步接线
+**Files:** Modify `app/frontend/src/editor.ts`（`buildState` 改收已解析的 `LanguageSupport | null`；`openEditable` 先 `await resolveLanguage(modeIdForExt(opts.ext))`；`setMode(mode: ModeChoice | null)` 内部异步，`++modeToken` 守卫旧回包，`destroy()` 置 `destroyed` 后不再 dispatch）、`app/frontend/src/main.ts`（`applyMode`：`auto` → `modeIdForExt(extOf(path))`，`plain` → null，其余传 id）；Create `app/frontend/src/editor.test.ts`（3，`vi.mock("./ipc")`）。
+**Why:** 动态加载让模式切换变异步，连切语法时先发的慢包必须输给后发的包；view 已销毁后 dispatch 会抛错。
+**验证:** `editor.test.ts` 3 pass（按扩展名挂载 python；python→json 连切最终为 json、再切回 python；destroy 后回包的语言不生效）。
+
+### Task 4. 状态栏显示名 + 收尾
+**Files:** Modify `app/frontend/src/statusbar.ts`（`mkSelect(cls, labels, values?)` 支持显示名与取值分离，下拉用 `MODE_LABELS`，`onMode` 回传 id）、`app/frontend/src/statusbar.test.ts`（+1）、`docs/features.md`（语法条目移入已交付）。
+**Why:** 20 种语言再靠 `toUpperCase()` 生成显示名会出现 `JAVASCRIPT` 这类文本；取值必须仍是模式 id。
+**验证:** `tsc --noEmit` 净；`npm test` 127 pass（20 文件，基线 116/18）；`npm run build` 通过，主 chunk `dist/assets/index-D8No6Jyb.js` 506.9KB（基线 623.3KB，json/cpp 一并拆出），语言落在独立 chunk（legacy 模式为具名 `yaml/toml/shell/diff/powershell-*.js`）。Rust 侧本轮零改动（`git status` 只有 `app/frontend` 与 `docs`），`cargo test --workspace` / `clippy` 无回归面。
+**未验:** 各语言实际着色效果需 `npm run tauri dev` 人工过一遍（jsdom 无排版，只验了解析器与挂载）。
+
 ## 2026-10-26 — docs：定位改为 Notepad++ 替代编辑器
 
 **Files:** Modify `docs/claude.md`。

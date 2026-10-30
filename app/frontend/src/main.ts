@@ -83,7 +83,7 @@ import { type CanFilter } from "./canfilter";
 import { TabStrip } from "./tabs";
 import { Statusbar } from "./statusbar";
 import { extOf } from "./encoding-menu";
-import type { ModeChoice } from "./language";
+import { modeIdForExt, type ModeChoice } from "./language";
 import { initTheme } from "./theme";
 import {
   makeResizable,
@@ -1888,8 +1888,8 @@ function applyMode(docId: number, mode: ModeChoice): void {
   const ds = docStates.get(docId);
   const handle = editors.get(docId); // read-only docs have no syntax mode
   if (!ds || !handle) return;
-  const ext = mode === "auto" ? extOf(ds.path) : mode === "plain" ? "" : mode;
-  handle.setMode(ext); // reconfigure language only — keeps undo + scroll (I2)
+  const resolved = mode === "auto" ? modeIdForExt(extOf(ds.path)) : mode;
+  handle.setMode(resolved === "plain" ? null : resolved); // reconfigure language only
 }
 
 async function handleClose(docId: number): Promise<boolean> {

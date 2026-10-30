@@ -4,7 +4,7 @@
 //! reports the choice — it never mutates the editor itself.
 
 import { ENCODINGS, EOL_OPTIONS } from "./encoding-menu";
-import { AVAILABLE_MODES, type ModeChoice } from "./language";
+import { AVAILABLE_MODES, MODE_LABELS, type ModeChoice } from "./language";
 
 export interface StatusbarCallbacks {
   onEncoding?: (label: string) => void;
@@ -37,12 +37,15 @@ export class Statusbar {
     this.eolSel = mkSelect("eol", [...EOL_CHOICES]);
     this.eolSel.addEventListener("change", () => cb.onEol?.(this.eolSel.value));
 
+    // Display names are user-facing text; the option values stay mode ids so
+    // `onMode` keeps handing back the id (spec §8 registry).
     this.modeSel = mkSelect(
       "mode",
-      AVAILABLE_MODES.map((m) => m.toUpperCase()),
+      AVAILABLE_MODES.map((m) => MODE_LABELS[m]),
+      AVAILABLE_MODES,
     );
     this.modeSel.addEventListener("change", () =>
-      cb.onMode?.(AVAILABLE_MODES[this.modeSel.selectedIndex]),
+      cb.onMode?.(this.modeSel.value as ModeChoice),
     );
 
     this.dirtyEl = mkSpan("dirty-flag", "");
@@ -169,15 +172,19 @@ export class Statusbar {
   }
 }
 
-function mkSelect(cls: string, options: string[]): HTMLSelectElement {
+function mkSelect(
+  cls: string,
+  options: readonly string[],
+  values?: readonly string[],
+): HTMLSelectElement {
   const sel = document.createElement("select");
   sel.className = cls;
-  for (const o of options) {
+  options.forEach((o, i) => {
     const opt = document.createElement("option");
-    opt.value = o;
+    opt.value = values ? values[i] : o;
     opt.textContent = o;
     sel.append(opt);
-  }
+  });
   return sel;
 }
 
