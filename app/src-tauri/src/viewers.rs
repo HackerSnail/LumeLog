@@ -32,6 +32,9 @@ pub(crate) enum ViewerKind {
     /// Text-extraction view (doc-viewer increment 1 of the PDF proposal):
     /// no layout, lines land in the same single-column path as docx.
     Pdf,
+    /// pptx text extraction (Plan 25): slides as text lines with separators.
+    /// Layout rendering is explicitly out of scope.
+    Pptx,
 }
 
 impl ViewerKind {
@@ -40,6 +43,7 @@ impl ViewerKind {
             ViewerKind::Xlsx => "xlsx",
             ViewerKind::Docx => "docx",
             ViewerKind::Pdf => "pdf",
+            ViewerKind::Pptx => "pptx",
         }
     }
 }
@@ -124,10 +128,11 @@ impl ViewerSessions {
             "xlsx" | "xlsm" => self.open_xlsx(path)?,
             "docx" => self.open_docx(path)?,
             "pdf" => self.open_pdf(path)?,
+            "pptx" => self.open_pptx(path)?,
             _ => {
                 return Err(IpcError::new(
                     "viewer_unsupported",
-                    format!("不支持的查看格式：{ext}（支持 xlsx/xlsm/docx）"),
+                    format!("不支持的查看格式：{ext}（支持 xlsx/xlsm/docx/pdf/pptx）"),
                 ))
             }
         };
@@ -164,6 +169,21 @@ impl ViewerSessions {
             kind: ViewerKind::Docx,
             workbook: None,
             sheets: vec!["正文".into()],
+            docx_lines: Some(lines.0),
+            docx_truncated: lines.1,
+            pdf_path: None,
+        })
+    }
+
+    /// PDF: rendering happens in the frontend (pdf.js), so opening only records
+    /// the path — text extraction is deferred to `rows`/`export` (a PDF with a
+    /// broken text layer must still render).
+    fn open_pptx(&mut self, path: &Path) -> Result<ViewerSession, IpcError> {
+        let lines = extract_pptx_slides(path)?;
+        Ok(ViewerSession {
+            kind: ViewerKind::Pptx,
+            workbook: None,
+            sheets: vec!["幻灯片".into()],
             docx_lines: Some(lines.0),
             docx_truncated: lines.1,
             pdf_path: None,
@@ -472,6 +492,123 @@ fn cell_to_string(d: &Data) -> String {
     }
 }
 
+/// Extract pptx slides as text lines (Plan 25). Slides come from
+/// `ppt/slides/slide<N>.xml` sorted by N (lexicographic would put slide10
+/// before slide2); each slide is prefixed with a separator line, `<a:p>`
+/// paragraphs become lines, `<a:t>` runs inside a paragraph are concatenated.
+fn extract_pptx_slides(path: &Path) -> Result<(Vec<String>, bool), IpcError> {
+    let file = File::open(path).map_err(|e| IpcError::new("io", format!("打开 pptx 失败：{e}")))?;
+    let mut archive =
+        zip::ZipArchive::new(BufReader::new(file)).map_err(|e| IpcError::new("io", format!("打开 pptx 失败：{e}")))?;
+    let mut slide_numbers: Vec<u32> = (0..archive.len())
+        .filter_map(|i| {
+            let name = archive.by_index(i).ok()?.name().ok()?.to_string();
+            let rest = name.strip_prefix("ppt/slides/slide")?;
+            let n = rest.strip_suffix(".xml")?;
+            n.parse::<u32>().ok()
+        })
+        .collect();
+    slide_numbers.sort_unstable();
+    if slide_numbers.is_empty() {
+        return Err(IpcError::new(
+            "invalid_argument",
+            "pptx 缺少 ppt/slides/slide*.xml 条目".to_string(),
+        ));
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    let mut truncated = false;
+    for n in slide_numbers {
+        if lines.len() + 1 >= MAX_PARAGRAPHS || total + 16 > MAX_PARA_TEXT_BYTES {
+            truncated = true;
+            break;
+        }
+        lines.push(format!("── 幻灯片 {n} ──"));
+        total += 16;
+        let name = format!("ppt/slides/slide{n}.xml");
+        let mut entry = archive
+            .by_name(&name)
+            .map_err(|e| IpcError::new("io", format!("读取 {name} 失败：{e}")))?;
+        if entry.size() > MAX_XML_ENTRY_BYTES {
+            return Err(IpcError::new(
+                "invalid_argument",
+                format!("{name} 超过 {MAX_XML_ENTRY_BYTES} 字节上限"),
+            ));
+        }
+        let mut xml = String::new();
+        entry
+            .read_to_string(&mut xml)
+            .map_err(|e| IpcError::new("io", format!("读取 {name} 失败：{e}")))?;
+        for para in xml_paragraph_texts(&xml, "a:p", "a:t") {
+            if lines.len() >= MAX_PARAGRAPHS || total + para.len() > MAX_PARA_TEXT_BYTES {
+                truncated = true;
+                break;
+            }
+            total += para.len();
+            lines.push(para);
+        }
+        if truncated {
+            break;
+        }
+    }
+    Ok((lines, truncated))
+}
+
+/// Split an XML document into paragraph strings: text inside `<p_tag>` runs,
+/// collecting `<t_tag>` content per paragraph. Shared shape between docx
+/// (`w:p`/`w:t`) and pptx (`a:p`/`a:t`).
+fn xml_paragraph_texts(xml: &str, p_tag: &str, t_tag: &str) -> Vec<String> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut paras: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_t = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let name = name.as_ref();
+                if name == p_tag.as_bytes() {
+                    cur.clear();
+                } else if name == t_tag.as_bytes() {
+                    in_t = true;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let qname = e.name();
+                let name = qname.as_ref();
+                if name == t_tag.as_bytes() {
+                    in_t = false;
+                } else if name == p_tag.as_bytes() {
+                    paras.push(std::mem::take(&mut cur));
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if e.name().as_ref() == p_tag.as_bytes() {
+                    paras.push(String::new());
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if in_t {
+                    match t.unescape() {
+                        Ok(s) => cur.push_str(&s),
+                        Err(_) => cur.push_str(&String::from_utf8_lossy(t.as_ref())),
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => break, // a truncated XML still yields what we have
+        }
+    }
+    if !cur.is_empty() {
+        // A document ending without closing the last paragraph is malformed,
+        // but the text still belongs to the user.
+        paras.push(cur);
+    }
+    paras
+}
+
 /// Extract `word/document.xml` paragraphs. Text inside one paragraph may be
 /// split across several `w:t` runs — concatenated verbatim; an empty `<w:p/>`
 /// still counts as one (empty) line.
@@ -492,75 +629,23 @@ fn extract_docx_paragraphs(path: &Path) -> Result<(Vec<String>, bool), IpcError>
     entry
         .read_to_string(&mut xml)
         .map_err(|e| IpcError::new("io", format!("读取 document.xml 失败：{e}")))?;
+    let paras = xml_paragraph_texts(&xml, "w:p", "w:t");
+    Ok(apply_text_caps(paras))
+}
 
-    use quick_xml::events::Event;
-    let mut reader = quick_xml::Reader::from_str(&xml);
-    let mut paras: Vec<String> = Vec::new();
-    let mut total_bytes = 0usize;
-    let mut truncated = false;
-    let mut cur = String::new();
-    let mut in_t = false;
-    let push = |paras: &mut Vec<String>, cur: &mut String, total: &mut usize, truncated: &mut bool| {
-        if paras.len() >= MAX_PARAGRAPHS || *total + cur.len() > MAX_PARA_TEXT_BYTES {
-            *truncated = true;
-            cur.clear();
-            return;
+/// Apply the shared paragraph/byte caps to an extracted text-line list; a
+/// `true` flag means items were dropped (truncation marker for the UI).
+fn apply_text_caps(paras: Vec<String>) -> (Vec<String>, bool) {
+    let mut lines = Vec::new();
+    let mut total = 0usize;
+    for p in paras {
+        if lines.len() >= MAX_PARAGRAPHS || total + p.len() > MAX_PARA_TEXT_BYTES {
+            return (lines, true);
         }
-        *total += cur.len();
-        paras.push(std::mem::take(cur));
-    };
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"w:p" => cur.clear(),
-                b"w:t" => in_t = true,
-                _ => {}
-            },
-            Ok(Event::End(e)) => {
-                let qname = e.name();
-                let name = qname.as_ref();
-                if name == b"w:t" {
-                    in_t = false;
-                } else if name == b"w:p" {
-                    push(&mut paras, &mut cur, &mut total_bytes, &mut truncated);
-                    if truncated {
-                        break;
-                    }
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                // `<w:p/>` self-closes: an empty paragraph still is a line.
-                if e.name().as_ref() == b"w:p" {
-                    push(&mut paras, &mut cur, &mut total_bytes, &mut truncated);
-                    if truncated {
-                        break;
-                    }
-                }
-            }
-            Ok(Event::Text(t)) => {
-                if in_t {
-                    match t.unescape() {
-                        Ok(s) => cur.push_str(&s),
-                        Err(_) => cur.push_str(&String::from_utf8_lossy(t.as_ref())),
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(e) => {
-                return Err(IpcError::new(
-                    "invalid_argument",
-                    format!("document.xml 解析失败：{e}"),
-                ))
-            }
-        }
+        total += p.len();
+        lines.push(p);
     }
-    if !cur.is_empty() && !truncated {
-        // A document.xml ending without closing the last paragraph is malformed,
-        // but the text still belongs to the user.
-        push(&mut paras, &mut cur, &mut total_bytes, &mut truncated);
-    }
-    Ok((paras, truncated))
+    (lines, false)
 }
 
 #[cfg(test)]
@@ -682,6 +767,70 @@ mod tests {
         // bad sheet index / unknown session
         assert!(sessions.rows(info.id, 9, 0, 10).is_err());
         assert!(sessions.rows(999, 0, 0, 10).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pptx_slides_in_numeric_order() {
+        let dir = temp_dir("pptx");
+        let p = dir.join("deck.pptx");
+        let file = File::create(&p).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        let slide = |body: &str| {
+            format!(
+                r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:txBody>{body}</p:txBody></p:sld>"#
+            )
+        };
+        zw.start_file("ppt/slides/slide1.xml", opts).unwrap();
+        zw.write_all(slide("<a:p><a:r><a:t>标题页</a:t></a:r></a:p><a:p><a:r><a:t>副标题</a:t></a:r></a:p>").as_bytes()).unwrap();
+        zw.start_file("ppt/slides/slide10.xml", opts).unwrap();
+        zw.write_all(slide("<a:p><a:r><a:t>末页</a:t></a:r></a:p>").as_bytes()).unwrap();
+        zw.start_file("ppt/slides/slide2.xml", opts).unwrap();
+        zw.write_all(slide("<a:p/>").as_bytes()).unwrap();
+        zw.finish().unwrap();
+
+        let mut sessions = ViewerSessions::default();
+        let info = sessions.open(&p).unwrap();
+        assert_eq!(info.kind, "pptx");
+        assert!(!info.truncated);
+
+        let page = sessions.rows(info.id, 0, 0, 1000).unwrap();
+        let lines: Vec<&str> = page.rows.iter().map(|r| r.cells[0].as_str()).collect();
+        // numeric order: 1, 2, 10 — NOT lexicographic (1, 10, 2)
+        assert_eq!(
+            lines,
+            vec![
+                "── 幻灯片 1 ──",
+                "标题页",
+                "副标题",
+                "── 幻灯片 2 ──",
+                "",
+                "── 幻灯片 10 ──",
+                "末页",
+            ]
+        );
+
+        // TXT export rides the text-lines path.
+        let t = dir.join("out.txt");
+        let stats = sessions.export(info.id, 0, &t).unwrap();
+        assert_eq!(stats.written, lines.len() as u64);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pptx_without_slides_is_rejected() {
+        let dir = temp_dir("pptxbad");
+        let p = dir.join("empty.pptx");
+        let file = File::create(&p).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+        zw.start_file("[Content_Types].xml", opts).unwrap();
+        zw.write_all(b"<Types/>").unwrap();
+        zw.finish().unwrap();
+        let mut sessions = ViewerSessions::default();
+        let err = sessions.open(&p).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
         std::fs::remove_dir_all(&dir).ok();
     }
 
