@@ -8,6 +8,7 @@ mod commands;
 mod dto;
 mod keymap;
 mod mf4;
+mod plugins;
 mod recovery;
 mod script;
 mod state;
@@ -47,6 +48,7 @@ pub fn run() {
             commands::script_delete,
             commands::script_run,
             commands::script_cancel,
+            plugins::syntax_plugins_list,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,

@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
+
+**依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。
+
+### Task 1. Rust 插件仓库（`plugins.rs` + `syntax_plugins_list`）
+**Files:** Create `app/src-tauri/src/plugins.rs`（manifest 结构 `SyntaxPluginJson/SyntaxRuleJson`（serde camelCase + `deny_unknown_fields` 防字段拼错静默失效）、`validate()`（id/name/扩展名/关键词/lineComment 字符集与上限、tag 限 7 个枚举、规则 ≤32、文件 ≤256KB、目录 ≤64 个）、`load_syntax_plugins()`（文件名序、坏 JSON 单文件报错不阻塞、id 重复后到者跳过）、`plugins_dir()`、命令 `syntax_plugins_list`）；Modify `app/src-tauri/src/lib.rs`（mod + 注册）。
+**Why:** 插件不执行任何代码，校验收在 Rust 侧（重逻辑原则）；正则编译校验放前端（JS `RegExp` 与 Rust `regex` 方言不同，见 Task 2）。
+**验证:** `cargo test -p lumelog-app plugins::` 8 pass（合法 manifest、非法 tag、未知字段、坏 JSON 不阻塞其它、id 重复后文件名排序后到者跳过、extensions/keywords 上限、非 .json 忽略、目录缺失返回空）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-30 — Plan 16 编码扩展：EUC-JP / EUC-KR / KOI8-R / KOI8-U（feat/encoding-extension）
 
 **依据：** spec `docs/specs/2026-10-30-encoding-extension-design.md`；计划 `docs/plans/2026-10-30-encoding-extension.md`。对应 `docs/features.md` 待做第 3 条（原文把 Big5、Shift-JIS 列为缺口是笔误，两者 v1 已交付）。
