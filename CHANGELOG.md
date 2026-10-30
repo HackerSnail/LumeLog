@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 18 插件接口 增量2：QuickJS 数据解析插件（feat/plugin-parser）
+
+**依据：** spec `docs/specs/2026-10-30-plugin-parser-design.md`；计划 `docs/plans/2026-10-30-plugin-parser.md`。接 Plan 17，覆盖 `docs/features.md` 待做第 1 条的「冷门日志与报文格式」；Wasm host 为增量3。
+
+### Task 1. 解析器元数据加载（`plugins.rs` + `parser_plugins_list`）
+**Files:** Modify `app/src-tauri/src/plugins.rs`（共享校验助手 `check_id/check_name/check_extension` 抽出供两类插件复用；`ParserColumnJson/ParserPluginInfo/ParserPluginsReply`；`load_parser_metadata()`：rquickjs 沙箱执行 `*.js` 一次、读顶层 `plugin` 对象（`var` 走 global、`const/let` 走 script.rs 同款回退 eval）、校验 id/name/extensions/columns（key 1–32 `[A-Za-z0-9_]` 不重复、label 1–64、列 1–32）且 `parseLine` 必须为函数；`list_parser_plugins()`：文件名序、单文件失败不阻塞、id first wins、单文件 5s 超时 + 全表 15s 预算；命令 `parser_plugins_list`）；Modify `app/src-tauri/src/script.rs`（`MEMORY_LIMIT/STACK_LIMIT/CONSOLE_SHIM/catch_message` 改 `pub(crate)` 供复用）；`lib.rs` 注册。
+**Why:** 元数据（id/列定义）必须执行才能拿到，但只执行一次且不调用 `parseLine`；列定义在前端建表格需要 Rust 侧先验形状。15s 预算防「一个死循环插件拖死整个列表」。
+**验证:** `cargo test -p lumelog-app plugins::` 13 pass（新增：合法元数据、坏形状 4 例各自报错带文件名、顶层 `const plugin` 可读到、坏 JS 不阻塞其它、id 重复 first wins、`.json` 不混入解析器列表）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
+
 ## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。
