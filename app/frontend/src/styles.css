@@ -1195,6 +1195,25 @@ html.has-custom-titlebar .win-btns {
   background: #fff;
   box-shadow: 0 1px 6px var(--shadow);
 }
+/* Text-search overlay (Plan 24): absolutely positioned hit boxes aligned with
+ * the canvas inside the page wrapper. */
+.pdf-page-wrap {
+  position: relative;
+}
+.pdf-hits {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pdf-hit {
+  position: absolute;
+  background: color-mix(in srgb, #f2cc60 45%, transparent);
+  border-radius: 1px;
+}
+.pdf-hit-current {
+  background: color-mix(in srgb, #f2820a 55%, transparent);
+  outline: 1px solid #c46a00;
+}
 /* Parser plugin console output (script-console cap: 200 lines). */
 .parser-console {
   flex: 0 0 auto;

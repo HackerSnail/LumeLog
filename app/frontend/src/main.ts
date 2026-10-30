@@ -982,6 +982,10 @@ let viewerPdfPageInput: HTMLInputElement | null = null;
 let viewerPdfPageLabel: HTMLElement | null = null;
 let viewerPdfZoomSel: HTMLSelectElement | null = null;
 let viewerExportBtn: HTMLButtonElement | null = null;
+let viewerPdfSearchInput: HTMLInputElement | null = null;
+let viewerPdfSearchLabel: HTMLElement | null = null;
+let viewerPdfSearchIndex = 0;
+let viewerPdfLastQuery: string | null = null;
 
 const VIEWER_WINDOW = 1000;
 const PDF_ZOOMS = ["0.5", "0.75", "1", "1.25", "1.5", "2", "3", "4"];
@@ -1055,6 +1059,23 @@ function buildViewerDock(): HTMLElement {
     viewerPdfZoomSel!.value = String(viewerPdfZoom);
     void renderViewerPdf();
   });
+  // 文本搜索（Plan 24）：Enter 全文档搜索并跳到第一条，上下条循环，Esc 清除。
+  viewerPdfSearchInput = document.createElement("input");
+  viewerPdfSearchInput.type = "text";
+  viewerPdfSearchInput.className = "can-ftxt";
+  viewerPdfSearchInput.placeholder = "在 PDF 中查找";
+  viewerPdfSearchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      void onPdfSearch(e.shiftKey ? "prev" : "next");
+    } else if (e.key === "Escape") {
+      clearPdfSearch();
+    }
+  });
+  viewerPdfSearchLabel = document.createElement("span");
+  viewerPdfSearchLabel.className = "can-status";
+  const searchPrev = mkBtn("◀", "上一处命中", () => void onPdfSearch("prev"));
+  const searchNext = mkBtn("▶", "下一处命中", () => void onPdfSearch("next"));
+  const searchClear = mkBtn("✕", "清除搜索高亮", () => clearPdfSearch());
   viewerPdfBar.append(
     viewerPdfPrev!,
     viewerPdfPageInput!,
@@ -1065,6 +1086,12 @@ function buildViewerDock(): HTMLElement {
     viewerPdfZoomSel!,
     zoomIn,
     fitBtn,
+    document.createTextNode(" 查找 "),
+    viewerPdfSearchInput!,
+    searchPrev,
+    searchNext,
+    searchClear,
+    viewerPdfSearchLabel!,
   );
 
   const pdfHost = document.createElement("div");
@@ -1118,11 +1145,13 @@ async function openViewerFile(): Promise<void> {
     if (!viewerDockVisible) toggleViewerDock();
     setViewerMode(info.kind === "pdf" ? "pdf" : "table");
     if (info.kind === "pdf") {
-      // 渲染在前端：后端只出字节。
+      // 渲染在前端：后端只出字节。换文档即重置搜索状态。
+      clearPdfSearch();
       const bytes = await viewerPdfBytes(info.id);
       viewerPdfTotal = (await viewerPdf?.load(bytes)) ?? 0;
       viewerPdfPage = 1;
       viewerPdfBaseWidth = null;
+      if (viewerPdfSearchInput) viewerPdfSearchInput.value = "";
       await renderViewerPdf();
       return;
     }
@@ -1170,6 +1199,39 @@ async function renderViewerPdf(): Promise<void> {
   if (viewerPdfPageLabel) viewerPdfPageLabel.textContent = `/ ${viewerPdfTotal} 页`;
   const width = await viewerPdf.render(page, viewerPdfZoom);
   if (width !== null) viewerPdfBaseWidth = width / viewerPdfZoom;
+}
+
+/** Full-document search (Enter) / hit cycling (◀▶). A changed query
+ *  re-searches; the same query just cycles hits. */
+async function onPdfSearch(dir: "next" | "prev"): Promise<void> {
+  if (!viewerPdf || viewerPdfTotal === 0) return;
+  const query = (viewerPdfSearchInput?.value ?? "").trim();
+  if (!query) {
+    clearPdfSearch();
+    return;
+  }
+  if (query !== viewerPdfLastQuery) {
+    if (viewerPdfSearchLabel) viewerPdfSearchLabel.textContent = "搜索中…";
+    const count = await viewerPdf.searchAll(query);
+    viewerPdfLastQuery = query;
+    viewerPdfSearchIndex = 0;
+    if (viewerPdfSearchLabel) {
+      viewerPdfSearchLabel.textContent = count === 0 ? "无命中" : `命中 ${count} 处`;
+    }
+    if (count === 0) return;
+  }
+  viewerPdfSearchIndex =
+    dir === "next"
+      ? (viewerPdfSearchIndex + 1) % viewerPdf.hitCount
+      : (viewerPdfSearchIndex - 1 + viewerPdf.hitCount) % viewerPdf.hitCount;
+  await viewerPdf.gotoHit(viewerPdfSearchIndex);
+}
+
+function clearPdfSearch(): void {
+  viewerPdf?.clearSearch();
+  viewerPdfLastQuery = null;
+  viewerPdfSearchIndex = 0;
+  if (viewerPdfSearchLabel) viewerPdfSearchLabel.textContent = "";
 }
 
 /** Pull one window of rows; `reset` restarts from row 1 (sheet switch/open). */
