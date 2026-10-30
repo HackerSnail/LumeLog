@@ -45,6 +45,9 @@ import {
   mf4ExportCancel,
   mf4Series,
   syntaxPluginsList,
+  parserPluginsList,
+  parserRun,
+  parserCancel,
 } from "./ipc";
 import { ENCODING_LABELS } from "./encoding-menu";
 
@@ -179,6 +182,19 @@ describe("M3 filter ipc bridge (spec §6.4)", () => {
 
   it("syntax_plugin_wrapper_is_a_function", () => {
     expect(typeof syntaxPluginsList).toBe("function");
+  });
+
+  it("parser_plugin_wrappers_are_functions", () => {
+    for (const fn of [parserPluginsList, parserRun, parserCancel]) {
+      expect(typeof fn).toBe("function");
+    }
+  });
+
+  it("parser_plugin_error_codes_have_zh_text", () => {
+    for (const code of ["plugin_not_found", "plugin_bad_manifest"]) {
+      expect(IPC_ERROR_CODES).toContain(code);
+      expect(/[\u4e00-\u9fff]/.test(ipcErrorZh(code))).toBe(true);
+    }
   });
 
   it("blf_wrappers_are_functions", () => {

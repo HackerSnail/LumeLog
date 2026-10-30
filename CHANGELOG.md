@@ -16,6 +16,16 @@
 **Why:** 前端只传插件 id 不传路径（防注入）；取消注册复用全局 cancel 表；值转换放 JS 避免 Rust 重写 JS 数字格式化。
 **验证:** `cargo test -p lumelog-app plugins::` 17 pass（端到端：行→cells 顺序/number→"1"/对象列置空+一次性 warning、null 跳过计数、cancel 恰停 1 行、JS 抛错带行号、console.log 透传、按 id 定位/未知 id `plugin_not_found`）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净。
 
+### Task 3. 前端桥（`ipc.ts` + 错误码）
+**Files:** Modify `app/frontend/src/ipc.ts`（`ParserColumn/ParserPluginInfo/ParserPluginsReply/ParserRow/ParserStats` + `parserPluginsList/parserRun/parserCancel`（双通道 + `onConsole` 照 canParse）；错误码 `plugin_not_found`/`plugin_bad_manifest` 进 `IpcErrorCode` 与中文表）；Modify `app/frontend/src/ipc.test.ts`（+2）。
+**验证:** `npx tsc --noEmit` 净；`npx vitest run src/ipc.test.ts` 21 pass。
+
+### Task 4. `ParserPanel`（新 `parserpanel.ts`）
+**Files:** Create `app/frontend/src/parserpanel.ts`、`parserpanel.test.ts`（5）；Modify `app/frontend/src/styles.css`（`#parser-dock` 并入 `#can-dock` 的高度契约选择器）。
+`RowStore`（纯数据累加器，同 FrameStore）+ `ParserPanel`：列模型由插件 `columns` 动态生成（首列固定「行号」）、自写虚拟滚动镜像 canpanel（`ROW_HEIGHT` + spacer + 可视窗 + rAF 合并重绘）、行点击回传 1-based 源行、`setStatus` 状态行；无过滤/导出/列显隐（spec §4）。CSS 复用 `can-*` 类，两表观感一致。
+**Why:** canpanel 的列定义/过滤是 CAN 专用的，mf4-table 无虚拟化，均不可直接复用；取 canpanel 骨架裁剪是最小改动路径。
+**验证:** `npx vitest run src/parserpanel.test.ts` 5 pass（列头动态渲染、批量 push 累积、行点击回传、状态行、destroy 后不再响应；rAF 合并用「等一个完整 rAF tick」的 flush 消除 jsdom 16ms 定时器抖动）+ `npx tsc --noEmit` 净。
+
 ## 2026-10-30 — Plan 17 插件接口 增量1：声明式语法高亮插件（feat/plugin-syntax）
 
 **依据：** spec `docs/specs/2026-10-30-plugin-syntax-design.md`；计划 `docs/plans/2026-10-30-plugin-syntax.md`。对应 `docs/features.md` 待做第 1 条（插件接口分三增量：声明式高亮 → QuickJS 数据解析 → Wasm host，本 plan 只做增量1）。

@@ -182,6 +182,8 @@ export type IpcErrorCode =
   | "bad_regex"
   | "regex_compile"
   | "source_format"
+  | "plugin_not_found"
+  | "plugin_bad_manifest"
   | "unknown";
 
 /**
@@ -209,6 +211,8 @@ const IPC_ERROR_ZH: Record<IpcErrorCode, string> = {
   bad_regex: "解析正则无效（需含命名组 id/data）%s",
   regex_compile: "正则编译失败%s",
   source_format: "日志源格式无法识别%s",
+  plugin_not_found: "解析插件不存在（可能已被删除）%s",
+  plugin_bad_manifest: "解析插件缺少必要定义%s",
   unknown: "调用失败%s",
 };
 
@@ -897,6 +901,76 @@ export interface SyntaxPluginsReply {
 
 export function syntaxPluginsList(): Promise<SyntaxPluginsReply> {
   return call<SyntaxPluginsReply>("syntax_plugins_list", {});
+}
+
+// ---- Parser plugins (plugin interface, increment 2: QuickJS parseLine) ------
+
+export interface ParserColumn {
+  key: string;
+  label: string;
+}
+
+export interface ParserPluginInfo {
+  id: string;
+  name: string;
+  extensions: string[];
+  columns: ParserColumn[];
+}
+
+export interface ParserPluginsReply {
+  parsers: ParserPluginInfo[];
+  /** `<file>: <reason>` for every plugin the shell rejected. */
+  errors: string[];
+}
+
+/** One parsed row: 1-based source line + cell strings in column order. */
+export interface ParserRow {
+  line: number;
+  cells: string[];
+}
+
+export interface ParserStats {
+  rows: number;
+  lines: number;
+  skipped: number;
+  cancelled: boolean;
+  error: string | null;
+}
+
+export function parserPluginsList(): Promise<ParserPluginsReply> {
+  return call<ParserPluginsReply>("parser_plugins_list", {});
+}
+
+/**
+ * Stream-run a parser plugin over `docId`. Rows arrive in batches on
+ * `onBatch`, the tally once on `onDone`; console output of the plugin flows
+ * on `onConsole`. Resolves with the job id for `parserCancel`.
+ */
+export function parserRun(args: {
+  docId: number;
+  pluginId: string;
+  onBatch: (rows: ParserRow[]) => void;
+  onConsole: (m: { level: string; text: string }) => void;
+  onDone: (s: ParserStats) => void;
+}): Promise<number> {
+  const batchCh = new Channel<ParserRow[]>();
+  batchCh.onmessage = args.onBatch;
+  const consoleCh = new Channel<{ level: string; text: string }>();
+  consoleCh.onmessage = args.onConsole;
+  const doneCh = new Channel<ParserStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("parser_run", {
+    docId: args.docId,
+    pluginId: args.pluginId,
+    onBatch: batchCh,
+    onConsole: consoleCh,
+    onDone: doneCh,
+  });
+}
+
+/** Ask an in-flight `parserRun` to stop. */
+export function parserCancel(requestId: number): Promise<void> {
+  return call<void>("parser_cancel", { requestId });
 }
 
 // ---- User scripts (Roadmap-3: QuickJS) --------------------------------------
