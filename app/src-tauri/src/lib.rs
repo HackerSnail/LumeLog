@@ -14,6 +14,7 @@ mod recovery;
 mod script;
 mod state;
 mod viewers;
+mod wasmi_host;
 mod watch;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

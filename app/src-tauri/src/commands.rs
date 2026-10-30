@@ -1871,7 +1871,18 @@ pub fn parser_run(
         // A panic inside the runner must still release the cancel registration
         // and answer the front end, or the dock stays locked forever.
         let stats = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::plugins::run_parser_plugin(doc_arc, &plugin_path, &mut batch, &mut console, cancel_fn)
+            let is_wasm = plugin_path.extension().and_then(|e| e.to_str()) == Some("wasm");
+            if is_wasm {
+                crate::wasmi_host::run_wasm_parser(doc_arc, &plugin_path, &mut batch, cancel_fn)
+            } else {
+                crate::plugins::run_parser_plugin(
+                    doc_arc,
+                    &plugin_path,
+                    &mut batch,
+                    &mut console,
+                    cancel_fn,
+                )
+            }
         }))
         .unwrap_or_else(|_| crate::plugins::ParserStats {
             error: Some("解析运行器内部异常".into()),

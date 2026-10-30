@@ -38,7 +38,8 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
 
 ## 待做
 
-- [ ] 插件接口，支持用户扩展解析器：冷门编程语言的高亮/解析、冷门日志与报文格式，都应能以插件形式补入，不改主程序
+- [x] 插件接口，支持用户扩展解析器：冷门编程语言的高亮/解析、冷门日志与报文格式，都应能以插件形式补入，不改主程序
+      ↳ 三增量全部交付：增量1（Plan 17，见上）声明式高亮；增量2（Plan 18）QuickJS 逐行解析；增量3（Plan 23 `feat/plugin-wasm`，spec `docs/specs/2026-10-30-plugin-wasm-impl-design.md`）wasmi Wasm 解析插件——`plugins/*.wasm`（wasm32-unknown-unknown）导出 `memory/alloc/meta/parse/finish` 朴素 ABI，i64 打包 ptr/len 传 UTF-8 JSON（元数据与行记录同增量2 形状），256KB 完整行块喂入、fuel 每调用 5×10⁸ + 16MB 内存上限 + 300s/取消，512 行/批进同一虚拟表格；Rust/Go 等工具链均可产出，模板见 spec §3。体积账：wasmi 使应用 exe +2.07MB（立项预估 2–3MB 内）。
       ↳ 增量3（Wasm 宿主）立项预研见 `docs/specs/2026-10-30-plugin-wasm-proposal.md`：建议 wasmi 起步（体积约 1/10 于 wasmtime，接口与运行时解耦）、wit 接口心智稿与沙箱边界已列，批准后另出实现 spec/plan。
       ↳ 增量1 已交付（Plan 17 `feat/plugin-syntax`，spec `docs/specs/2026-10-30-plugin-syntax-design.md`）：声明式语法高亮插件——`$APP_CONFIG/LumeLog/plugins/*.json` 一个文件一个语法（`id/name/extensions/lineComment/keywords/rules`，规则 `regex + tag`，tag 限 className/keyword/number/string/comment/propertyName/operator 七个），Rust `plugins.rs` 校验加载（坏文件逐条报错不阻塞、id 按文件名序去重、`deny_unknown_fields`），前端编译为 StreamLanguage（正则 JS 方言校验在前端，坏规则跳过并回报）；状态栏「语法」下拉出现插件模式（id `plugin:<id>`），AUTO 按扩展名匹配（内置优先）；命令面板「重载语法插件」。
       ↳ 增量2 已交付（Plan 18 `feat/plugin-parser`，spec `docs/specs/2026-10-30-plugin-parser-design.md`）：QuickJS 逐行解析插件——`plugins/*.js` 定义 `var plugin = { id, name, extensions, columns, parseLine(line, ctx) }`，返回对象（列 key→值）或 null 跳过；rquickjs 沙箱（同脚本引擎 64MiB/1MiB 栈/300s/可取消，元数据加载 5s）；工具栏「解析」开 dock（与报文/测量互斥），按文档扩展名预选插件，512 行/批流式进虚拟表格（`parserpanel.ts`，行号列 + 插件列），点行跳源行，插件 console 输出进 dock 控制台（200 行上限）；单元格字符串化截断 4096 字符。无过滤/导出（后续搬 CanPanel 能力）；Wasm host 为增量3，待做。
