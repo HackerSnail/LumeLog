@@ -1,21 +1,21 @@
-//! Syntax highlighting modes (spec §8): a StreamLanguage "log" style plus
-//! JSON / INI / C. Default is PlainText (no extension). Extension inference
-//! picks a starting mode; the status bar can override it per document.
+//! Syntax highlighting modes (spec §8). Every language lives in one registry:
+//! `mode id -> { extensions, loader }`. `modeIdForExt` answers "which mode does
+//! this file use" without loading anything (it backs the AUTO choice); the
+//! language packages themselves are pulled in on demand by `resolveLanguage`,
+//! so a file that never opens a Python file never pays for the Python grammar.
 //!
-//! Highlight colors are inline (`color`/`fontWeight`), not CSS classes, so the
-//! log/INI styles work without a stylesheet — CodeMirror's `HighlightStyle`
-//! emits its own managed CSS. JSON/C get colours from `defaultHighlightStyle`
-//! (mounted alongside the language in `editor.ts`), which maps the tags their
-//! lezer parsers emit.
+//! Highlight colours: `log`/`ini` carry their own inline `streamHighlight`;
+//! everything else only emits tags and is coloured by `defaultHighlightStyle`
+//! (mounted with `fallback: true` in `editor.ts`), which is why adding a
+//! language needs no new `HighlightStyle`.
 
 import {
   HighlightStyle,
   StreamLanguage,
   syntaxHighlighting,
+  LanguageSupport,
+  type StreamParser,
 } from "@codemirror/language";
-import { json } from "@codemirror/lang-json";
-import { cpp } from "@codemirror/lang-cpp";
-import { LanguageSupport } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 
 /** Log-style highlighting: timestamps, levels, numbers, hex, strings. */
@@ -92,32 +92,216 @@ const streamHighlight = HighlightStyle.define([
   { tag: t.operator, color: "#666" },
 ]);
 
+/** The set of languages the status-bar switcher offers. */
+export const AVAILABLE_MODES = [
+  "auto",
+  "plain",
+  "log",
+  "ini",
+  "json",
+  "c",
+  "javascript",
+  "typescript",
+  "python",
+  "html",
+  "css",
+  "xml",
+  "markdown",
+  "sql",
+  "rust",
+  "java",
+  "yaml",
+  "toml",
+  "shell",
+  "diff",
+  "powershell",
+] as const;
+export type ModeChoice = (typeof AVAILABLE_MODES)[number];
+
+/** Dropdown text — mode ids stay stable, these are only what the user reads. */
+export const MODE_LABELS: Record<ModeChoice, string> = {
+  auto: "Auto",
+  plain: "Plain Text",
+  log: "Log",
+  ini: "INI",
+  json: "JSON",
+  c: "C/C++",
+  javascript: "JavaScript",
+  typescript: "TypeScript",
+  python: "Python",
+  html: "HTML",
+  css: "CSS",
+  xml: "XML",
+  markdown: "Markdown",
+  sql: "SQL",
+  rust: "Rust",
+  java: "Java",
+  yaml: "YAML",
+  toml: "TOML",
+  shell: "Shell",
+  diff: "Diff",
+  powershell: "PowerShell",
+};
+
+/** Extension (no dot, lowercased) → mode id. Absent = PlainText. */
+const EXT_MODES: Record<string, ModeChoice> = {
+  log: "log",
+  ini: "ini",
+  cfg: "ini",
+  conf: "ini",
+  json: "json",
+  c: "c",
+  h: "c",
+  cpp: "c",
+  cc: "c",
+  cxx: "c",
+  hpp: "c",
+  hh: "c",
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "javascript",
+  ts: "typescript",
+  tsx: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  py: "python",
+  pyw: "python",
+  pyi: "python",
+  html: "html",
+  htm: "html",
+  css: "css",
+  xml: "xml",
+  xsd: "xml",
+  xsl: "xml",
+  svg: "xml",
+  plist: "xml",
+  resx: "xml",
+  md: "markdown",
+  markdown: "markdown",
+  sql: "sql",
+  rs: "rust",
+  java: "java",
+  yaml: "yaml",
+  yml: "yaml",
+  toml: "toml",
+  sh: "shell",
+  bash: "shell",
+  zsh: "shell",
+  diff: "diff",
+  patch: "diff",
+  ps1: "powershell",
+  psm1: "powershell",
+  psd1: "powershell",
+};
+
 /**
- * Resolve a syntax mode for an extension. `""`/unknown → null = PlainText.
- * `log`/`ini` return their stream language + the inline highlight; JSON/C use
- * their lezer parsers (colour supplied by `defaultHighlightStyle` in editor.ts).
+ * Synchronous extension → mode lookup (drives AUTO). Returns null for anything
+ * unknown, which the caller turns into PlainText — never throws.
  */
-export function modeForExtension(ext: string): LanguageSupport | null {
-  const e = ext.toLowerCase();
-  switch (e) {
-    case "json":
-      return json();
-    case "c":
-    case "h":
-    case "cpp":
-    case "cc":
-      return cpp();
-    case "ini":
-    case "cfg":
-    case "conf":
-      return new LanguageSupport(iniLanguage, [syntaxHighlighting(streamHighlight)]);
+export function modeIdForExt(ext: string): ModeChoice | null {
+  const e = (ext ?? "").trim().toLowerCase();
+  return EXT_MODES[e] ?? null;
+}
+
+const loaded = new Map<ModeChoice, LanguageSupport | null>();
+const inFlight = new Map<ModeChoice, Promise<LanguageSupport | null>>();
+
+/**
+ * Load (once) the language for a mode. `auto`/`plain`/null → null = PlainText.
+ * Concurrent callers share a single import so a fast mode switch does not
+ * fetch the same grammar twice.
+ */
+export async function resolveLanguage(mode: ModeChoice | null): Promise<LanguageSupport | null> {
+  if (!mode || mode === "auto" || mode === "plain") return null;
+  const done = loaded.get(mode);
+  if (done !== undefined) return done;
+  let p = inFlight.get(mode);
+  if (!p) {
+    p = loadLanguage(mode).then((lang) => {
+      loaded.set(mode, lang);
+      inFlight.delete(mode);
+      return lang;
+    });
+    inFlight.set(mode, p);
+  }
+  return p;
+}
+
+async function loadLanguage(mode: ModeChoice): Promise<LanguageSupport | null> {
+  switch (mode) {
     case "log":
       return new LanguageSupport(logLanguage, [syntaxHighlighting(streamHighlight)]);
+    case "ini":
+      return new LanguageSupport(iniLanguage, [syntaxHighlighting(streamHighlight)]);
+    case "json": {
+      const { json } = await import("@codemirror/lang-json");
+      return json();
+    }
+    case "c": {
+      const { cpp } = await import("@codemirror/lang-cpp");
+      return cpp();
+    }
+    case "javascript": {
+      const { javascript } = await import("@codemirror/lang-javascript");
+      return javascript();
+    }
+    case "typescript": {
+      const { javascript } = await import("@codemirror/lang-javascript");
+      return javascript({ typescript: true, jsx: true });
+    }
+    case "python": {
+      const { python } = await import("@codemirror/lang-python");
+      return python();
+    }
+    case "html": {
+      const { html } = await import("@codemirror/lang-html");
+      return html();
+    }
+    case "css": {
+      const { css } = await import("@codemirror/lang-css");
+      return css();
+    }
+    case "xml": {
+      const { xml } = await import("@codemirror/lang-xml");
+      return xml();
+    }
+    case "markdown": {
+      const { markdown } = await import("@codemirror/lang-markdown");
+      return markdown();
+    }
+    case "sql": {
+      const { sql } = await import("@codemirror/lang-sql");
+      return sql();
+    }
+    case "rust": {
+      const { rust } = await import("@codemirror/lang-rust");
+      return rust();
+    }
+    case "java": {
+      const { java } = await import("@codemirror/lang-java");
+      return java();
+    }
+    case "yaml":
+      return streamMode(import("@codemirror/legacy-modes/mode/yaml"), "yaml");
+    case "toml":
+      return streamMode(import("@codemirror/legacy-modes/mode/toml"), "toml");
+    case "shell":
+      return streamMode(import("@codemirror/legacy-modes/mode/shell"), "shell");
+    case "diff":
+      return streamMode(import("@codemirror/legacy-modes/mode/diff"), "diff");
+    case "powershell":
+      return streamMode(import("@codemirror/legacy-modes/mode/powershell"), "powerShell");
     default:
-      return null; // PlainText
+      return null;
   }
 }
 
-/** The set of languages the status-bar switcher offers. */
-export const AVAILABLE_MODES = ["auto", "plain", "log", "json", "ini", "c"] as const;
-export type ModeChoice = (typeof AVAILABLE_MODES)[number];
+/** Wrap a CodeMirror 5 style stream parser (`@codemirror/legacy-modes`). */
+async function streamMode(
+  mod: Promise<Record<string, unknown>>,
+  exportName: string,
+): Promise<LanguageSupport> {
+  const spec = (await mod)[exportName] as StreamParser<unknown>;
+  return new LanguageSupport(StreamLanguage.define(spec));
+}

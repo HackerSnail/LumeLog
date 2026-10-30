@@ -23,9 +23,10 @@ import {
   indentOnInput,
   syntaxHighlighting,
   defaultHighlightStyle,
+  type LanguageSupport,
 } from "@codemirror/language";
 import { loadAllText, type DocInfo } from "./ipc";
-import { modeForExtension } from "./language";
+import { modeIdForExt, resolveLanguage, type ModeChoice } from "./language";
 
 export interface EditorHandle {
   readonly docId: number;
@@ -38,7 +39,7 @@ export interface EditorHandle {
   /** Replace the whole buffer (encoding re-decode re-render); marks dirty. */
   replaceText(text: string): void;
   /** Reconfigure only the language extension — keeps undo history + scroll. */
-  setMode(ext: string): void;
+  setMode(mode: ModeChoice | null): void;
   setEol(eol: string): void;
   eol(): string;
   focus(): void;
@@ -76,6 +77,11 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   // Language lives in a Compartment so a mode switch reconfigures it in place —
   // `setState` would drop undo history, scroll, and wrongly mark the doc dirty.
   const langConf = new Compartment();
+  // Language packages load on demand, so a mode switch resolves asynchronously;
+  // the token makes a slow early request lose to a later one instead of
+  // overwriting it.
+  let modeToken = 0;
+  let destroyed = false;
 
   const onDocChanged = () => {
     const first = !dirty;
@@ -84,8 +90,9 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     if (first) opts.onDirty?.();
   };
 
+  const lang = await resolveLanguage(modeIdForExt(opts.ext));
   const view = new EditorView({
-    state: buildState(text, opts.ext, langConf, onDocChanged),
+    state: buildState(text, lang, langConf, onDocChanged),
     parent: opts.parent,
   });
 
@@ -106,8 +113,12 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       opts.onEdit?.();
       opts.onDirty?.();
     },
-    setMode: (ext: string) => {
-      view.dispatch({ effects: langConf.reconfigure(modeForExtension(ext) ?? []) });
+    setMode: (mode: ModeChoice | null) => {
+      const token = ++modeToken;
+      void resolveLanguage(mode).then((next) => {
+        if (destroyed || token !== modeToken) return;
+        view.dispatch({ effects: langConf.reconfigure(next ?? []) });
+      });
     },
     setEol: (next: string) => {
       eol = next;
@@ -128,17 +139,19 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       });
       view.focus();
     },
-    destroy: () => view.destroy(),
+    destroy: () => {
+      destroyed = true; // a language still in flight must not touch a dead view
+      view.destroy();
+    },
   };
 }
 
 function buildState(
   text: string,
-  ext: string,
+  lang: LanguageSupport | null,
   langConf: Compartment,
   onDocChanged: () => void,
 ): EditorState {
-  const lang = modeForExtension(ext);
   return EditorState.create({
     doc: text,
     extensions: [

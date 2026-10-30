@@ -36,6 +36,26 @@ describe("Statusbar.setWatch (spec §4.4)", () => {
   });
 });
 
+describe("Statusbar syntax dropdown (spec §8)", () => {
+  it("shows display names but reports mode ids", () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    const seen: string[] = [];
+    new Statusbar(root, { onMode: (m) => seen.push(m) });
+    const sel = root.querySelector(".mode") as HTMLSelectElement;
+    const labels = Array.from(sel.options).map((o) => o.textContent);
+
+    expect(labels.slice(0, 6)).toEqual(["Auto", "Plain Text", "Log", "INI", "JSON", "C/C++"]);
+    expect(labels).toContain("TypeScript");
+    expect(sel.options[6].value).toBe("javascript");
+    expect(sel.options[7].value).toBe("typescript");
+
+    sel.value = "javascript";
+    sel.dispatchEvent(new Event("change"));
+    expect(seen).toEqual(["javascript"]);
+  });
+});
+
 describe("Statusbar tail follow (Roadmap)", () => {
   it("shows the toggle only for read-only docs and reflects the state", () => {
     const { root, bar } = mountBar();

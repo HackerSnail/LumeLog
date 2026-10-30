@@ -29,12 +29,13 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
 - [x] Roadmap：MF4（ASAM MDF4）测量数据查看器（增量1 表格 + 增量2 自绘波形）
       ↳ Plan 13 `feat/roadmap-mf4-viewer`：工具栏“测量”/面板“测量数据…”打开 `.mf4`（`falcon_mdf 0.7`，只开 `mmap`；workspace MSRV 1.87→1.89）；独立 dock：元数据行 + 通道搜索/多选（≤32）+ 分页记录表（100/500/1000，时间跳页、列序仅本页，缺失 `—`，不可读列 `⚠`）+ 时间窗 + 流式 CSV 导出（与表格同一单元格映射，可取消、保前缀）；会话上限 4、`mf4_records` 按时间轴分块、其余通道按页取块。
       ↳ Plan 14 `feat/roadmap-mf4-chart`：dock 内「表格 / 波形」tab；`mf4_series` 后端 **min/max 包络**（≤8 序列、≤4000 桶、同一 channel group + 时间主通道、单遍 `aligned_signal_chunks` 流式）；自绘双层 canvas（DPR/ResizeObserver/rAF、滚轮以光标为锚点缩放、拖拽平移、双击复位、hover 十字线 + 原值 tooltip、归一化绘制）；窗口独立，「应用到表格」显式同步；无时间轴禁用波形。
+- [x] 语法高亮覆盖常见编程与配置语言（19 种）
+      ↳ Plan 15 `feat/syntax-languages` 已交付：`language.ts` 改为注册表（模式 id → 扩展名集合 / 显示名 / 加载器），在原有 Log/INI/JSON/C-C++ 上加 JS/TS、Python、HTML、CSS、XML、Markdown、SQL、Rust、Java（lezer 包）与 YAML/TOML/Shell/Diff/PowerShell（`@codemirror/legacy-modes` 流模式）；`modeIdForExt` 同步推断（AUTO 与未知扩展名都走它），`resolveLanguage` 按需 `import()` 并缓存，语言包不进首屏主 chunk（623.3→506.9KB）；模式 id 与扩展名解耦（`applyMode` 传 id，不再把模式名当扩展名），`setMode` 异步重配带 token 防连切覆盖，destroy 后回包不 dispatch；状态栏下拉显示「C/C++」「TypeScript」等显示名、回传仍是模式 id。大文件只读路径无 CodeMirror，仍不高亮。
 - [x] 脚本引擎（QuickJS 逐行变换）
       ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。
 
 ## 待做
 
 - [ ] 插件接口，支持用户扩展解析器：冷门编程语言的高亮/解析、冷门日志与报文格式，都应能以插件形式补入，不改主程序
-- [ ] 语法高亮扩展到各类编程/配置语言（目前仅 cpp/json 等少数）
 - [ ] 编码兼容扩展到更多语种编码（Big5、Shift-JIS、EUC-KR 等）
 - [ ] 常见文档格式查看与导出（PDF、PPT、docx/xlsx 等 Office 格式）
