@@ -2,6 +2,21 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-30 — Plan 20 拖放打开 + 最近文件（feat/drop-recent）
+
+**依据：** spec `docs/specs/2026-10-30-drop-recent-design.md`；计划 `docs/plans/2026-10-30-drop-recent.md`。偿还 test-checklist §4 记录的 M1 欠账（拖放打开、最近 20 文件菜单未接线）。
+
+### Task 1. Rust 最近文件存储（`recent.rs` + `doc_open` 挂钩）
+**Files:** Create `app/src-tauri/src/recent.rs`（`recent.json` 存 `["path",…]`，`record_recent` 去重置顶 + 截断 20 + tmp→rename 原子写；`load_recent` 缺失/损坏 JSON → 空表；`clear_recent`；命令 `recent_list`（读时过滤已不存在路径）/`recent_clear`）；Modify `app/src-tauri/src/commands.rs`（`doc_open` 成功后记录——对话框/拖放/palette 全部打开入口自动覆盖）；`lib.rs` 注册。
+**Why:** 记录取后端挂钩而非前端逐入口上报，覆盖面完整且不依赖 UI 层记得调用；文件是 advisory 状态，任何读写失败都不影响打开主流程。
+**验证:** `cargo test -p lumelog-app recent::` 4 pass（缺失/损坏 → 空、去重置顶 + 第 21 条挤最旧、clear 后可再记录且无 tmp 残留、落盘形态为纯字符串数组）；`cargo test --workspace` 全绿 + `clippy --workspace --all-targets -- -D warnings` 净。
+
+### Task 2. 前端（拖放 + palette 最近条目）
+**Files:** Modify `app/frontend/src/ipc.ts`（`recentList/recentClear`）、`ipc.test.ts`（+1 typeof）、`app/frontend/src/main.ts`（`initRecent/refreshRecent/clearRecentList`：启动读一次、`openPath` 成功后刷新；`initDragDrop()`：动态 `import("@tauri-apps/api/webview")` 的 `onDragDropEvent`，`enter/over` 显示全屏遮罩、`drop` 顺序 `openPath`（沿用 busy 单飞，首个失败停批）、非 Tauri 环境降级；`buildCommands()` 顶部注入 `recent-<i>` 条目（标题=文件名、hint=完整路径，最多 10 条）+「清除最近文件记录」——id 前缀 `recent-` 在 keymap 动作空间之外）；Modify `app/frontend/src/styles.css`（`.drop-overlay`：fixed 全屏、`pointer-events:none` 不抢拖拽）。
+**Why:** Tauri v2 webview 拿不到 File 路径，必须走 webview 级 drag-drop 事件；属性窄化不进嵌套 async 闭包，drop 的 paths 先捕获再进闭包（tsc 实际报错后修正）。
+**验证:** `npx tsc --noEmit` 净；`npm test` 142 pass（21 文件）+ `npm run build` 通过。
+**未验:** 真实拖放与 palette 跳转需 `npm run tauri dev` 人工过（headless 无拖拽）。
+
 ## 2026-10-30 — Plan 19 文档查看器 增量1：xlsx 表格 + docx 文本（feat/doc-viewer）
 
 **依据：** spec `docs/specs/2026-10-30-doc-viewer-design.md`；计划 `docs/plans/2026-10-30-doc-viewer.md`。对应 `docs/features.md` 待做第 2 条。范围裁剪：PDF（需 pdfium 级渲染引擎，体积/分发代价大）与 PPT（版式复杂、文本提取价值低）推迟；插件接口增量3（Wasm host）同步推迟——需引入 wasmtime 级依赖与"轻量"定位冲突，且 JS 沙箱插件已覆盖高亮与逐行解析。

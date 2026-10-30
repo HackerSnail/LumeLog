@@ -84,6 +84,10 @@ pub fn doc_open(
     let doc_id = state.insert(doc);
     // Watch the document's directory so external modifications reach the UI.
     app.state::<AppWatch>().watch_path(Path::new(&path));
+    // Record the open for the recent-files list (advisory; ignore failures).
+    if let Ok(store) = crate::recent::recent_path(&app) {
+        let _ = crate::recent::record_recent(&store, &path);
+    }
 
     let info = DocInfo {
         doc_id,

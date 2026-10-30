@@ -79,6 +79,8 @@ import {
   viewerExportCsv,
   type ParserPluginInfo,
   type ViewerInfo,
+  recentList,
+  recentClear,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
 import { pickTimelineInput, type TimelineSelection } from "./query";
@@ -350,7 +352,7 @@ function layout(): void {
   sidebarHandleEl.style.display = sidebarCollapsed ? "none" : "";
   inspectorHandleEl.style.display = inspectorCollapsed ? "none" : "";
 
-  root.append(bar, workspace, statusEl, toast);
+  root.append(bar, workspace, statusEl, toast, dropOverlay());
   refreshPanels();
 }
 
@@ -1548,6 +1550,7 @@ async function openPath(path: string): Promise<boolean> {
     if (info.mode === "readonly") mountList(info, path);
     else await mountDoc(info, path);
     void refreshWatchStatus(); // a new directory may have failed to watch
+    void refreshRecent(); // the shell recorded the open; palette list follows
     return true;
   } catch (err) {
     reportError(err);
@@ -1779,6 +1782,79 @@ async function initSyntaxPlugins(): Promise<void> {
     }
   })();
   return pluginsInFlight;
+}
+
+// ---- recent files + drag-drop open (M1 deferred debt) ------------------------
+
+let recentPaths: string[] = [];
+
+function dropOverlay(): HTMLElement {
+  const overlay = document.createElement("div");
+  overlay.id = "drop-overlay";
+  overlay.textContent = "松开以打开文件";
+  overlay.style.display = "none";
+  return overlay;
+}
+
+/** Load the recent list once at startup; `refreshRecent` re-reads after opens. */
+async function initRecent(): Promise<void> {
+  try {
+    recentPaths = await recentList();
+  } catch {
+    recentPaths = []; // advisory state — never block startup
+  }
+}
+
+async function refreshRecent(): Promise<void> {
+  try {
+    recentPaths = await recentList();
+  } catch {
+    /* keep the previous list */
+  }
+}
+
+async function clearRecentList(): Promise<void> {
+  try {
+    await recentClear();
+    recentPaths = [];
+    toastMsg("已清除最近文件记录");
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/** Full-window hint while files are dragged over the webview. The overlay
+ *  element itself is created in `layout()` (`dropOverlay()`). */
+function initDragDrop(): void {
+  void (async () => {
+    try {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      await getCurrentWebview().onDragDropEvent((ev) => {
+        const overlay = document.getElementById("drop-overlay");
+        if (!overlay) return;
+        // Property narrowing does not survive into the nested async closure —
+        // capture the dropped paths up front.
+        const dropped = ev.payload.type === "drop" ? ev.payload.paths : null;
+        if (ev.payload.type === "enter" || ev.payload.type === "over") {
+          overlay.style.display = "flex";
+        } else if (dropped !== null) {
+          overlay.style.display = "none";
+          // Sequential: openPath carries the busy guard; the first failure
+          // (unreadable file, cancelled confirm) stops the batch.
+          void (async () => {
+            for (const p of dropped) {
+              const ok = await openPath(p);
+              if (!ok) break;
+            }
+          })();
+        } else {
+          overlay.style.display = "none"; // leave
+        }
+      });
+    } catch {
+      // No Tauri webview (plain vite dev): dragging is not available.
+    }
+  })();
 }
 
 // ---- external modification watcher (spec §4.4/A10, M3 B2) -------------------
@@ -3036,8 +3112,20 @@ function buildCommands(): Command[] {
     hint: keymapState.bindings[d.id],
     run: d.run,
   }));
+  // Recent files at the top: filename as the searchable title, full path as
+  // the hint. Ids use a `recent-` prefix — outside the keymap action space.
+  const recents: Command[] = recentPaths
+    .slice(0, 10)
+    .map((p, i) => ({
+      id: `recent-${i}`,
+      title: `最近：${basenameOf(p)}`,
+      hint: p,
+      run: () => void openPath(p),
+    }));
   return [
+    ...recents,
     ...bound,
+    { id: "recent-clear", title: "清除最近文件记录", run: () => void clearRecentList() },
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "script", title: "脚本…", run: () => openScriptManager() },
     { id: "reload-plugins", title: "重载语法插件", run: () => void initSyntaxPlugins() },
@@ -3196,3 +3284,5 @@ void initRecovery();
 void initWatch();
 void initSyntaxPlugins();
 void initKeymap();
+void initRecent();
+initDragDrop();

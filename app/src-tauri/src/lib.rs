@@ -9,6 +9,7 @@ mod dto;
 mod keymap;
 mod mf4;
 mod plugins;
+mod recent;
 mod recovery;
 mod script;
 mod state;
@@ -60,6 +61,8 @@ pub fn run() {
             commands::viewer_rows,
             commands::viewer_close,
             commands::viewer_export_csv,
+            recent::recent_list,
+            recent::recent_clear,
             commands::doc_save,
             commands::doc_list,
             commands::search_run,
