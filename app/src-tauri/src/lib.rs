@@ -61,6 +61,7 @@ pub fn run() {
             commands::viewer_rows,
             commands::viewer_close,
             commands::viewer_export_csv,
+            commands::viewer_pdf_bytes,
             recent::recent_list,
             recent::recent_clear,
             commands::doc_save,

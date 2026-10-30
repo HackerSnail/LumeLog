@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use calamine::{Data, Reader, Xlsx};
 use serde::Serialize;
@@ -44,13 +44,17 @@ impl ViewerKind {
     }
 }
 
-struct ViewerSession {
+pub(crate) struct ViewerSession {
     kind: ViewerKind,
     workbook: Option<Xlsx<BufReader<File>>>,
     sheets: Vec<String>,
-    /// docx paragraphs (extracted once at open; xlsx keeps None).
+    /// Plain-text lines for docx/pdf (docx: extracted at open; pdf: extracted
+    /// on demand for `rows`/`export` so a PDF with a broken text layer still
+    /// renders; xlsx keeps None).
     docx_lines: Option<Vec<String>>,
     docx_truncated: bool,
+    /// pdf only: source path for the byte command and on-demand extraction.
+    pub(crate) pdf_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +154,7 @@ impl ViewerSessions {
             sheets,
             docx_lines: None,
             docx_truncated: false,
+            pdf_path: None,
         })
     }
 
@@ -161,13 +166,35 @@ impl ViewerSessions {
             sheets: vec!["正文".into()],
             docx_lines: Some(lines.0),
             docx_truncated: lines.1,
+            pdf_path: None,
         })
     }
 
-    /// PDF text extraction (proposal increment 1): no layout, same single-
-    /// column path as docx. `pdf-extract` is known to panic on some malformed
-    /// files — the call is unwound into an error, never into the IPC thread.
+    /// PDF: rendering happens in the frontend (pdf.js), so opening only records
+    /// the path — text extraction is deferred to `rows`/`export` (a PDF with a
+    /// broken text layer must still render).
     fn open_pdf(&mut self, path: &Path) -> Result<ViewerSession, IpcError> {
+        Ok(ViewerSession {
+            kind: ViewerKind::Pdf,
+            workbook: None,
+            sheets: vec!["正文".into()],
+            docx_lines: None,
+            docx_truncated: false,
+            pdf_path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Fill `docx_lines` for a pdf session on demand. `pdf-extract` is known
+    /// to panic on some malformed files — unwound into an error, never into
+    /// the IPC thread.
+    fn ensure_pdf_lines(session: &mut ViewerSession) -> Result<(), IpcError> {
+        if session.docx_lines.is_some() {
+            return Ok(());
+        }
+        let path = session
+            .pdf_path
+            .clone()
+            .ok_or_else(|| IpcError::new("invalid_argument", "非 PDF 会话".to_string()))?;
         let shown = path.display().to_string();
         let extracted = match std::panic::catch_unwind(|| pdf_extract::extract_text(&shown)) {
             Ok(Ok(text)) => text,
@@ -196,20 +223,21 @@ impl ViewerSessions {
             lines.push(line.to_string());
         }
         if lines.is_empty() && !truncated {
-            // A scanned/empty PDF: still a valid session with zero rows.
+            // A scanned/empty PDF: still a valid text view with one blank row.
             lines.push(String::new());
         }
-        Ok(ViewerSession {
-            kind: ViewerKind::Pdf,
-            workbook: None,
-            sheets: vec!["正文".into()],
-            docx_lines: Some(lines),
-            docx_truncated: truncated,
-        })
+        session.docx_lines = Some(lines);
+        session.docx_truncated = truncated;
+        Ok(())
     }
 
     pub(crate) fn close(&mut self, id: u64) -> bool {
         self.sessions.remove(&id).is_some()
+    }
+
+    /// Read-only handle (byte command); callers must not mutate.
+    pub(crate) fn get(&self, id: u64) -> Option<&ViewerSession> {
+        self.sessions.get(&id)
     }
 
     pub(crate) fn rows(
@@ -230,7 +258,10 @@ impl ViewerSessions {
             ));
         }
         // Text-line kinds (docx / pdf) share the single-column path; the
-        // workbook branch is the only other shape.
+        // workbook branch is the only other shape. pdf extracts on demand.
+        if session.kind == ViewerKind::Pdf {
+            Self::ensure_pdf_lines(session)?;
+        }
         if let Some(lines) = &session.docx_lines {
             let total = lines.len() as u64;
             let start = from_row.min(total) as usize;
@@ -321,7 +352,10 @@ impl ViewerSessions {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
-        let result = if session.docx_lines.is_some() {
+        let result = if session.kind == ViewerKind::Pdf {
+            Self::ensure_pdf_lines(session)?;
+            export_lines_txt(session, &tmp)
+        } else if session.docx_lines.is_some() {
             export_lines_txt(session, &tmp)
         } else {
             export_xlsx_csv(session, sheet_index, &tmp)
@@ -680,6 +714,9 @@ mod tests {
         let info = sessions.open(&p).unwrap();
         assert_eq!(info.kind, "pdf");
         assert!(!info.truncated);
+        // Rendering is frontend work: open must NOT have extracted text yet —
+        // a PDF with a broken text layer still renders.
+        assert!(sessions.get(info.id).unwrap().pdf_path.is_some());
 
         let page = sessions.rows(info.id, 0, 0, 1000).unwrap();
         let joined = page
@@ -699,16 +736,15 @@ mod tests {
         assert!(text.contains("Hello PDF") && text.contains("Second line"), "{text:?}");
         assert!(stats.written >= 1);
 
-        // Malformed input: an error surfaced to the user, never a panic.
+        // Malformed input: OPEN succeeds (rendering will show whatever pdf.js
+        // can), but rows/export surface an extraction error — never a panic.
         let bad = dir.join("bad.pdf");
         std::fs::write(&bad, b"this is not a pdf at all").unwrap();
-        let err = sessions.open(&bad).unwrap_err();
-        assert!(
-            err.code == "invalid_argument" || err.code == "io",
-            "unexpected code {} ({})",
-            err.code,
-            err.detail.as_deref().unwrap_or("")
-        );
+        let bad_info = sessions.open(&bad).unwrap();
+        let err = sessions.rows(bad_info.id, 0, 0, 10).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
+        let err = sessions.export(bad_info.id, 0, &dir.join("x.txt")).unwrap_err();
+        assert_eq!(err.code, "invalid_argument");
         std::fs::remove_dir_all(&dir).ok();
     }
 
