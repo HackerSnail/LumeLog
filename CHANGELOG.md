@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 42 JSON/XML/SQL 格式化（feat/formatters）
+
+**依据：** `docs/specs/2026-10-31-formatters-design.md`（同类盘点第一梯队之三）。纯前端，Rust 零改动。
+
+### Task. `formatters.ts` 纯函数 + palette 四条命令
+**Files:** Create `app/frontend/src/formatters.ts`、`formatters.test.ts`（8，jsdom——XML 需 DOMParser）；Modify `app/frontend/src/main.ts`（`applyFormatter(kind)`：选区（空 = 整篇）取文 → 纯函数变换 → 单次 dispatch 替换，校验失败 toast 不改文本；palette 加「JSON：格式化/压缩、XML：格式化、SQL：排版」四条）。
+**Why:** JSON 直接 parse/stringify（错误消息自带位置；大整数 >2^53 roundtrip 失真为已知限制）；XML 用 DOMParser 而非手写解析器——转义/CDATA/PI 全部白得，代价是 doctype 内部子集不保真；SQL 只做词法级排版（字符串/注释内不动、关键字大写、主子句与逗号列表换行、括号深度缩进），不做方言级解析。
+**验证:** `npx vitest run src/formatters.test.ts` 8 pass（JSON 格式化/压缩/坏输入；XML 属性重转义/注释/自闭合/内联文本 trim/坏输入拒绝；SQL 关键字大写但字符串注释原样、子句换行、括号深度缩进、JOIN 三词前缀、双引号转义）——首版三处错误：代码段只按空白切词把 "a," 粘成一词（标点独立成词后修复）、括号分支 depth++ 与 push 顺序、内联文本漏 trim；`npx tsc --noEmit` 净；`npm test` 220 pass（29 文件，基线 212）+ `npm run build` 通过。
+**未验:** 对真实日志 JSON 选区操作的手感需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 41 宏绑定快捷键（feat/macro-keys）
 
 **依据：** `docs/specs/2026-10-31-macro-keys-design.md`（同类盘点第一梯队之二）。纯前端，Rust 零改动。
