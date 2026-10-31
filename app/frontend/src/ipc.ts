@@ -1295,3 +1295,10 @@ export function gitCommit(
 ): Promise<string> {
   return call<string>("git_commit", { path, message, name, email });
 }
+
+// ---- launch args / single instance (Plan 43) -----------------------------------
+
+/** Files passed on the initial command line (double-click / association). */
+export function launchArgs(): Promise<string[]> {
+  return call<string[]>("launch_args");
+}

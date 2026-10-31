@@ -8,6 +8,7 @@ mod commands;
 mod dto;
 mod gitinfo;
 mod keymap;
+mod launch;
 mod mf4;
 mod plugins;
 mod recent;
@@ -20,7 +21,20 @@ mod watch;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    launch::collect();
     tauri::Builder::default()
+        // Single-instance MUST be the first plugin (its callback fires before
+        // any window exists): forward the second launch's file args and focus.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::{Emitter, Manager};
+            let paths = launch::from_argv(&argv.to_vec());
+            if !paths.is_empty() {
+                let _ = app.emit("second-instance-open", paths);
+            }
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(state::AppDocs::default())
         .manage(mf4::Mf4Sessions::default())
@@ -94,6 +108,7 @@ pub fn run() {
             commands::git_probe,
             commands::git_init,
             commands::git_commit,
+            launch::launch_args,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");

@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 43 文件关联 + 单实例（feat/file-assoc）
+
+**依据：** `docs/specs/2026-10-31-file-assoc-design.md`（同类盘点第一梯队之四）。
+
+### Task. `launch.rs` + single-instance 插件 + bundle 关联配置
+**Files:** Create `app/src-tauri/src/launch.rs`（`from_argv` 过滤程序名与 `-` 开头参数；`collect()` 进程启动存 OnceLock；`launch_args` 命令）；Modify `app/src-tauri/Cargo.toml`（`tauri-plugin-single-instance = "2"`）、`lib.rs`（插件须第一个注册：回调 `emit("second-instance-open", paths)` + 主窗口 `set_focus`——首版漏 `use tauri::Manager` 编译错已修；argv 组装 clippy 改 `to_vec()`；`launch::collect()` 先于 Builder）；Modify `app/src-tauri/tauri.conf.json`（`bundle.fileAssociations` 注册 `.log`，Editor 角色——首版中文 description 令 WiX light.exe 报 LGHT0311 代码页 1252 错误，description 改 ASCII）；Modify `app/frontend/src/ipc.ts`（`launchArgs()`）、`main.ts`（启动 `openLaunchArgs()` 逐个非 quiet 打开命令行文件；监听 `second-instance-open` 逐个打开）。
+**Why:** 双击文件与二次启动都归 argv 一条通路：首实例走 `launch_args`，二次实例走插件事件，前端只有一个 `openPath` 消费口；.blf/.asc 打开语义是 CAN 面板而非文本，不进关联。
+**验证:** `cargo test -p lumelog-app launch::` 1 pass（argv 过滤）；`cargo test --workspace` 全绿 + clippy 净；`npx tsc --noEmit` 净 + `npm test` 220 pass；**`tauri build` 双 bundle 产出**（NSIS 5.68 MiB + MSI 8.99 MiB，fileAssociations 配置合法且 WiX/NSIS 注册不报错）。
+**未验:** 双击 .log 打开、二次启动唤起窗口并加载新文件需 Windows 实机装 NSIS 包人工过。
+
 ## 2026-10-31 — Plan 42 JSON/XML/SQL 格式化（feat/formatters）
 
 **依据：** `docs/specs/2026-10-31-formatters-design.md`（同类盘点第一梯队之三）。纯前端，Rust 零改动。
