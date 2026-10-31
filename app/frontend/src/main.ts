@@ -135,6 +135,7 @@ import {
   minifyJson,
   type FormatResult,
 } from "./formatters";
+import { replacePreview, type Mode } from "./replacetools";
 import { macroForAccel, parseMacroBindings, serializeMacroBindings, type MacroBindings } from "./macrokeys";
 import { normalizeSession, parseSession, serializeSession } from "./session";
 import {
@@ -2623,6 +2624,121 @@ function dirOf(path: string): string {
   return i > 0 ? path.slice(0, i) : path;
 }
 
+/** Replace-with-preview modal (Plan 46): edit-mode only; the replace is one
+ *  dispatch over the previewed range, so undo restores it in a single step. */
+function openReplacePreview(): void {
+  const h = activeEditor();
+  if (!h) {
+    toastMsg("只读视图不支持替换");
+    return;
+  }
+  if (document.getElementById("rp-modal")) return;
+  const sel = h.view.state.selection.main;
+  const whole = sel.empty;
+  const rangeFrom = whole ? 0 : sel.from;
+  const rangeTo = whole ? h.view.state.doc.length : sel.to;
+
+  const overlay = document.createElement("div");
+  overlay.id = "rp-modal";
+  overlay.className = "palette-overlay";
+  const box = document.createElement("div");
+  box.className = "palette-box commit-box";
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.textContent = `查找并替换（${whole ? "整篇" : "选区"}）`;
+  const find = document.createElement("input");
+  find.type = "text";
+  find.className = "commit-field";
+  find.placeholder = "查找内容";
+  const repl = document.createElement("input");
+  repl.type = "text";
+  repl.className = "commit-field";
+  repl.placeholder = "替换为（正则模式可用 $1 组引用）";
+  const row = document.createElement("div");
+  row.className = "fif-row-inputs";
+  const mode = document.createElement("select");
+  mode.className = "commit-field";
+  for (const [v, t] of [
+    ["literal", "字面量"],
+    ["regex", "正则"],
+  ] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    mode.append(o);
+  }
+  const caseLabel = document.createElement("label");
+  caseLabel.className = "fif-case";
+  const caseChk = document.createElement("input");
+  caseChk.type = "checkbox";
+  caseLabel.append(caseChk, document.createTextNode("区分大小写"));
+  row.append(mode, caseLabel);
+  const status = document.createElement("div");
+  status.className = "fif-status";
+  const results = document.createElement("div");
+  results.className = "fif-results";
+
+  const slice = (): string => h.view.state.sliceDoc(rangeFrom, rangeTo);
+  const doPreview = (): { matches: number; result: string } | null => {
+    results.textContent = "";
+    const r = replacePreview(slice(), find.value, repl.value, mode.value as Mode, caseChk.checked);
+    if (!r.ok) {
+      status.textContent = r.error;
+      return null;
+    }
+    status.textContent = `${r.matches.length} 处匹配`;
+    let shown = 0;
+    for (const m of r.matches) {
+      shown++;
+      if (shown > 1000) {
+        const note = document.createElement("div");
+        note.className = "fif-status";
+        note.textContent = "仅显示前 1000 处，计数仍为全量";
+        results.append(note);
+        break;
+      }
+      const rowEl = document.createElement("div");
+      rowEl.className = "fif-hit";
+      rowEl.textContent = `L${m.line}: ${m.preview}`;
+      rowEl.title = rowEl.textContent;
+      results.append(rowEl);
+    }
+    return { matches: r.matches.length, result: r.result };
+  };
+
+  const applyBtn = document.createElement("button");
+  applyBtn.className = "insp-git-init";
+  applyBtn.textContent = "全部替换";
+  applyBtn.addEventListener("click", () => {
+    const r = doPreview();
+    if (!r || r.matches === 0) {
+      if (r) toastMsg("没有匹配");
+      return;
+    }
+    h.view.dispatch({ changes: { from: rangeFrom, to: rangeTo, insert: r.result } });
+    toastMsg(`已替换 ${r.matches} 处（一步可撤销）`);
+    overlay.remove();
+  });
+  const previewBtn = document.createElement("button");
+  previewBtn.className = "insp-git-init";
+  previewBtn.textContent = "预览";
+  previewBtn.addEventListener("click", () => void doPreview());
+  const cancel = document.createElement("button");
+  cancel.className = "insp-git-init";
+  cancel.textContent = "关闭";
+  cancel.addEventListener("click", () => overlay.remove());
+  const actions = document.createElement("div");
+  actions.className = "commit-actions";
+  actions.append(previewBtn, applyBtn, cancel);
+  box.append(title, find, repl, row, status, results, actions);
+  overlay.append(box);
+  document.getElementById("app")?.append(overlay);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  find.focus();
+}
+
 /** Snapshot the open tabs (order + active path) to localStorage. */
 function saveSession(): void {
   const session = normalizeSession({
@@ -4122,6 +4238,7 @@ function buildCommands(): Command[] {
     { id: "fmt-json-min", title: "JSON：压缩", run: () => applyFormatter("json-min") },
     { id: "fmt-xml", title: "XML：格式化", run: () => applyFormatter("xml") },
     { id: "fmt-sql", title: "SQL：排版", run: () => applyFormatter("sql") },
+    { id: "replace-preview", title: "查找并替换（预览）…", run: () => openReplacePreview() },
     { id: "bookmark-toggle", title: "书签：切换当前行", run: () => activeEditor()?.toggleBookmark() },
     { id: "bookmark-next", title: "书签：下一条", run: () => activeEditor()?.nextBookmark() },
     { id: "bookmark-prev", title: "书签：上一条", run: () => activeEditor()?.prevBookmark() },

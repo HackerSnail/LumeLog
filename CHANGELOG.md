@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 46 替换预览（feat/replace-preview）
+
+**依据：** `docs/specs/2026-10-31-replace-preview-design.md`（同类盘点第二梯队之四）。纯前端，Rust 零改动。
+
+### Task. `replacetools.ts` 纯函数 + 预览/替换面板
+**Files:** Create `app/frontend/src/replacetools.ts`、`replacetools.test.ts`（11）；Modify `app/frontend/src/main.ts`（palette「查找并替换（预览）…」→ `openReplacePreview`：查找/替换串（字面/正则 + 大小写）、范围取当前选区或整篇（打开时定格）、预览列表（行号 + 200 字符行摘要，渲染上限 1000、计数全量）、「全部替换」单次 dispatch 替换整个范围（一步撤销）后 toast 计数并关面板）。
+**Why:** 行号计数不能用"匹配内数换行"——跨行间隔里的换行会漏（首版 `[1,1]` 应为 `[1,2]`），改为按扫描游标推进；literal 模式替换用函数形式（`() => repl`）让 `$` 失义，regex 模式保留 `$1` 语义；零长匹配 `lastIndex++` 跳过防死循环。
+**验证:** `npx vitest run src/replacetools.test.ts` 11 pass（literal 元字符转义、大小写两态、行号/摘要、零长守卫、literal `$` 不具义、regex `$1` 组引用、长行截断、坏 pattern 传播、escapeRegex 全集）；`npx tsc --noEmit` 净（首版返回对象漏 `ok` 字段已修）；`npm test` 231 pass（30 文件，基线 220）+ `npm run build` 通过。
+**未验:** 预览→替换→撤销一步还原的实机链路需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 45 CSV/分隔日志列表视图（feat/csv-view）
 
 **依据：** `docs/specs/2026-10-31-csv-view-design.md`（同类盘点第二梯队之二，复用解析 dock 基建）。core 新模块 + 命令 + dock 扩展。
