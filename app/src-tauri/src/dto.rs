@@ -50,6 +50,8 @@ pub struct ChunkPayload {
 pub struct IndexProgress {
     pub doc_id: u64,
     pub indexed_bytes: u64,
+    /// Lines visible in the (partial) index at tick time.
+    pub indexed_lines: u64,
     pub done: bool,
 }
 

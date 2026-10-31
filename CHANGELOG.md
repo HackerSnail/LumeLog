@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 37 后台流式索引：threaded doc_open + 8 MiB tick（feat/bg-index）
+
+**依据：** `docs/specs/2026-10-31-background-index-design.md`（M1 遗留欠账，test-checklist §4）。core/shell/前端三层改动。
+
+### Task. `open_deferred` + `index_step` + 后台线程 + 占位推进
+**Files:** Modify `crates/lumelog-core/src/doc/line_index.rs`（`extend_u16`：偶对齐增量扫描 + 1 字节跨块 carry，奇数块边界不丢码元；`set_file_size`、`empty()`）；Modify `crates/lumelog-core/src/doc/file.rs`（`open` 重构为 `open_deferred` + step 循环，CLI/reload 语义不变；`index_step(chunk)` 按块推进 `indexed_bytes/index_done`，UTF-16 走 extend_u16；`try_append` 半截索引直接 NoChange；新 `IndexStep` 与 `indexed_bytes()/index_done()`）；Modify `app/src-tauri/src/commands.rs`、`dto.rs`（`doc_open` readonly 分支 `open_deferred` 后 spawn `doc-index-N` 线程逐 8MiB 块索引，每步短暂持锁 + Channel 发 tick（含 `indexed_lines` 新字段），关闭后的文档把余量索完（zombie 有界、tick 被前端忽略）；edit 模式原地循环索完（≤0.12s）语义同 v1；`total_lines: null` + `line_count_estimate = size/32`；reload tick 补字段）；Modify `app/frontend/src/ipc.ts`（`IndexProgress.indexedLines`）；Modify `app/frontend/src/main.ts`（`onIndexProgress` 重写：非 done tick 推进 `indexed` 占位分界并 120ms 节流刷新活动列表，done tick 校正 `ds.totalLines` + 状态栏 + 检查器；mountList 对延迟打开 indexed 初值 0）。
+**Why:** 打开 1GB 只读日志原本要等全程建索引（P3 654ms）才首屏；占位行/refresh/Channel 前端在 Task 11 就位，只差 shell 线程化。UTF-16 增量扫描必须处理块边界劈开码元——1 字节 carry 让奇数块与全量 build_aligned 逐字节一致（测试钉死）。后台线程不设取消标记：关闭后的文档把剩余索完（有界），tick 被前端忽略，省一套生命周期 plumbing。
+**验证:** `cargo test -p lumelog-core -- deferred extend_u16` 6 pass（extend_u16 奇数块流式 == build_aligned 全量、carry 跨块、deferred+step 与同步 open 行数/chunk_at 抽样一致、部分索引越界行 LineOutOfRange、半截索引 try_append NoChange、UTF-16 奇尾字节、空文件即 done）；`cargo test --workspace` 全绿 + `clippy -D warnings` 净；`npx tsc --noEmit` 净；`npm test` 196 pass + `npm run build` 通过。
+**未验:** 1GB 日志打开即首屏、占位行随滚动推进的手感需 `npm run tauri dev` 人工过；部分索引下 filter_run 只覆盖已索引行（用户通常在索引完成后操作，未加阻断）。
+
 ## 2026-10-31 — Plan 36 发布物验证：Windows 打包 + P6 体积实测（chore/bundle-verify）
 
 **依据：** `docs/test-checklist.md` §3 剩余可本地验证项。零代码改动（只修 CI 工作流一处调用）。

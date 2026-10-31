@@ -2024,12 +2024,29 @@ async function openPath(path: string): Promise<boolean> {
   }
 }
 
-/** Index progress tick. Sync indexing (v1) emits one `done`; Task 11 streams it. */
+/** Index progress tick (Plan 37): non-done ticks move the 待索引 boundary and
+ *  refresh the active list (throttled); the done tick corrects the real total. */
+let lastIndexRefresh = 0;
 function onIndexProgress(p: IndexProgress): void {
-  if (!p.done) return;
   const ds = docStates.get(p.docId);
-  if (ds) indexed.set(p.docId, ds.totalLines);
-  lists.get(p.docId)?.refresh();
+  if (!ds) return;
+  indexed.set(p.docId, p.indexedLines);
+  const list = lists.get(p.docId);
+  if (!list) return;
+  if (p.done) {
+    ds.totalLines = p.indexedLines;
+    if (p.docId === tabs.active()?.info.docId) {
+      status.setReadonly(p.indexedLines);
+      updateInspector(p.docId);
+    }
+    list.refresh();
+    return;
+  }
+  const now = Date.now();
+  if (p.docId === tabs.active()?.info.docId && now - lastIndexRefresh >= 120) {
+    lastIndexRefresh = now;
+    list.refresh();
+  }
 }
 
 /** Write the dirty doc's shadow after the 2s idle debounce (best-effort). */
@@ -2633,7 +2650,9 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
 /** Mount the read-only virtual list (spec §4.3). No full load — windows on demand. */
 function mountList(info: DocInfo, path: string): void {
   const total = info.totalLines ?? info.lineCountEstimate;
-  indexed.set(info.docId, total);
+  // Deferred open (Plan 37): totalLines is null until the done tick — start
+  // with nothing indexed so rows render as 待索引 while offsets stream in.
+  indexed.set(info.docId, info.totalLines ?? 0);
   docStates.set(info.docId, {
     path,
     encoding: info.encoding,

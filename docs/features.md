@@ -7,7 +7,8 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
 - [x] 基础文本编辑、语法高亮、正则搜索替换
 - [x] 多编码自动识别与切换
 - [x] 流式加载大文件（按需取块虚拟列表，不一次性全载入内存；>200MB 只读）
-      ↳ M1 已交付：`DocFile::chunk_at` 分块解码 + 64MB LRU + 前端只读虚拟列表按需取窗；后台流式索引（边索引边刷新）为后续增强
+      ↳ M1 已交付：`DocFile::chunk_at` 分块解码 + 64MB LRU + 前端只读虚拟列表按需取窗。
+      ↳ Plan 37 `feat/bg-index` 后台流式索引：readonly 打开即首屏（估算行数 + 待索引占位），`open_deferred` + 后台线程逐 8MiB 块 `index_step`（每步短暂持锁，取块请求可穿插），tick 推进占位分界（前端 120ms 节流刷新），done 校正真实行数；UTF-16 经 `extend_u16` 偶对齐增量扫描（1 字节跨块 carry）；半截索引下 try_append 免疫、越界行拒绝。
 - [x] DBC 文件导入，CAN 报文翻译、信号查看
       ↳ M2 引擎已交付（Plan 2 `feat/m2-can-engine`，纯 Rust `lumelog-can`）：DBC 子集解析 + Intel/Motorola 信号位序解码（cantools golden 对拍）+ candump/ASC/正则三源 + 解码 CLI（10 万帧验收）。Plan 3 `feat/m2-can-panel` 已交付 IPC 命令层与 CanPanel 报文表格 UI：`can_parse` 后台流式解码（`spawn_blocking` + 惰性分块，边解边填、可中途 `can_cancel`）+ `dbc_import` 宽容导入 + `can_decode_snippet` 选中识别；前端 TanStack table-core 虚拟表格 + ID/消息/信号条件/时间窗视图过滤 + 行号双向跳转（列表闪烁 / 编辑器定位）
 - [x] 日志行过滤、高亮标记、时序筛选

@@ -31,6 +31,8 @@ export interface ChunkPayload {
 export interface IndexProgress {
   docId: number;
   indexedBytes: number;
+  /** Lines visible in the (partial) index at tick time (Plan 37). */
+  indexedLines: number;
   done: boolean;
 }
 
