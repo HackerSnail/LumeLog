@@ -895,6 +895,41 @@ html.has-custom-titlebar .win-btns {
   border-color: var(--accent);
   color: var(--accent);
 }
+.commit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(480px, 90vw);
+}
+.commit-msg {
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  padding: 6px 8px;
+  outline: none;
+}
+.commit-msg:focus,
+.commit-field:focus {
+  border-color: var(--accent);
+}
+.commit-field {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  padding: 5px 8px;
+  outline: none;
+}
+.commit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
 
 /* Tab host: the strip is a fixed row, the active view fills the rest.
  * `min-height:0` is what lets the flex child actually shrink and scroll. */

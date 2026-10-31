@@ -42,6 +42,7 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
       ↳ Plan 32 `feat/macro-selection-words` 宏补遗：真实方向键/选区扩展进宏（修 Plan 29 起方向键事件名用错导致键盘移动从未被录到的 bug，CM 光标命令 userEvent 是 `select`）；shift 单步选区录为 `{move, select:true}`，重放删选区实现"选中再输入"替换；Ctrl+←→、Ctrl+Backspace/Delete 跳词动作经键位拦截录制（与默认命令同键位同行为），多光标明确不做（录制期跳过多选区事务）。
       ↳ Plan 33 `feat/inspector-tags` 检查器分区 + 文档标签（对齐 NoteLume）：「文档属性」「标签」两小节，属性补大小与修改时间（存 `DocState`，外部重载刷新；tail 增长不回刷）；标签按路径存 `localStorage["lumelog.doc-tags.v1"]`（每文档 ≤20 个、单个 32 字符、坏数据逐文档丢弃），chips + 回车添加、× 删除即落盘，纯函数在 `doctags.ts`。
       ↳ Plan 34 `feat/inspector-git` 检查器 Git 小节：仓库探测（rev-parse/symbolic-ref/status/log 走系统 git CLI，零新依赖）显示仓库根/分支/文件状态（porcelain XY 中文映射）/最近提交；无仓库给「初始化仓库」按钮（ask 确认后 `git init`）；只读不做 add/commit，探测无超时（on-demand 触发，不进热路径）。
+      ↳ Plan 35 `feat/git-commit` Git 内置化 + 暂存并提交：探测层从 git CLI 换成编译期内置的 `git2`（libgit2，不再依赖 PATH；release exe +约1.6MB）；新增「暂存并提交…」——对话框（信息必填 + 作者预填仓库配置，缺身份报 `git_identity` 引导），index add 当前文件后提交整个暂存区（与命令行语义一致），空仓库首提交兼容；不跑仓库钩子、不支持 GPG 签名。
 - [x] 脚本引擎（QuickJS 逐行变换）
 - [x] 脚本引擎（QuickJS 逐行变换）
       ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。
