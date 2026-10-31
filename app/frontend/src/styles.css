@@ -930,6 +930,55 @@ html.has-custom-titlebar .win-btns {
   justify-content: flex-end;
   gap: 8px;
 }
+.fif-box {
+  width: min(720px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fif-row-inputs {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.fif-row-inputs > input[type="text"] {
+  flex: 1 1 auto;
+}
+.fif-row-inputs > select {
+  flex: 0 0 auto;
+  width: 8ch;
+}
+.fif-case {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.fif-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+.fif-results {
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+.fif-hit {
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.fif-hit:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
 
 /* Tab host: the strip is a fixed row, the active view fills the rest.
  * `min-height:0` is what lets the flex child actually shrink and scroll. */

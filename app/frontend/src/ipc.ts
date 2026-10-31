@@ -1302,3 +1302,50 @@ export function gitCommit(
 export function launchArgs(): Promise<string[]> {
   return call<string[]>("launch_args");
 }
+
+// ---- find in files (Plan 44) ---------------------------------------------------
+
+export interface FifHit {
+  path: string;
+  line: number;
+  text: string;
+}
+
+export interface FifStats {
+  files: number;
+  skipped: number;
+  hits: number;
+  truncated: boolean;
+}
+
+export interface FifBatch {
+  hits: FifHit[];
+  stats?: FifStats;
+}
+
+/** Scan a directory tree (literal/regex); streams batches, final stats on done. */
+export function fifRun(args: {
+  root: string;
+  pattern: string;
+  mode: "literal" | "regex";
+  caseSensitive: boolean;
+  onBatch: (b: FifBatch) => void;
+  onDone: (s: FifStats) => void;
+}): Promise<number> {
+  const batchCh = new Channel<FifBatch>();
+  batchCh.onmessage = args.onBatch;
+  const doneCh = new Channel<FifStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("fif_run", {
+    root: args.root,
+    pattern: args.pattern,
+    mode: args.mode,
+    caseSensitive: args.caseSensitive,
+    onBatch: batchCh,
+    onDone: doneCh,
+  });
+}
+
+export function fifCancel(requestId: number): Promise<void> {
+  return call<void>("fif_cancel", { requestId });
+}

@@ -2495,6 +2495,81 @@ mod can_parse_tests {
     }
 }
 
+// ---- find in files (Plan 44) -------------------------------------------------
+
+/// Scan a directory tree for a pattern (literal/regex, case option). Streams
+/// `FifBatch`es on `on_batch`, final stats on `on_done`; cancel via
+/// `fif_cancel(request_id)` (shared registry). Returns the request id.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn fif_run(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    root: String,
+    pattern: String,
+    mode: String,
+    case_sensitive: bool,
+    on_batch: Channel<FifBatch>,
+    on_done: Channel<FifStatsJson>,
+) -> Result<u64, IpcError> {
+    let root_path = Path::new(&root);
+    if !root_path.is_dir() {
+        return Err(IpcError::new(
+            "invalid_argument",
+            format!("不是目录：{root}"),
+        ));
+    }
+    let matcher = lumelog_core::fif::FifMatcher::build(&pattern, &mode, case_sensitive)
+        .map_err(|e| IpcError::new("invalid_argument", e))?;
+    let (req_id, cancel) = state.begin_search();
+    let root_buf = root_path.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = || cancel.load(Ordering::Relaxed);
+        let mut batch_sink = |hits: Vec<lumelog_core::fif::FifHit>| {
+            let _ = on_batch.send(FifBatch {
+                hits: hits
+                    .into_iter()
+                    .map(|h| FifHitJson {
+                        path: h.path,
+                        line: h.line,
+                        text: h.text,
+                    })
+                    .collect(),
+                stats: None,
+            });
+        };
+        let stats = lumelog_core::fif::scan_dir(
+            &root_buf,
+            &matcher,
+            10_000,
+            64 * 1024 * 1024,
+            &mut batch_sink,
+            &cancelled,
+        );
+        let _ = on_done.send(FifStatsJson {
+            files: stats.files,
+            skipped: stats.skipped,
+            hits: stats.hits,
+            truncated: stats.truncated,
+        });
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
+/// Ask an in-flight `fif_run` to stop (shares the generic cancel registry).
+#[tauri::command]
+pub fn fif_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(), IpcError> {
+    if state.cancel(request_id) {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "unknown_request",
+            format!("no in-flight job {request_id}"),
+        ))
+    }
+}
+
 // ---- inspector git section (Plan 34/35) -------------------------------------
 
 /// Probe the git repo around `path` (read-only, built-in libgit2).
