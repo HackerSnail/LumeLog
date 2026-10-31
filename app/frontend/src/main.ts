@@ -122,6 +122,13 @@ import {
 } from "./shell";
 import { filterCommands, type Command } from "./palette";
 import { parseBookmarkStore, serializeBookmarkStore, type BookmarkStore } from "./bookmarks-store";
+import {
+  formatJson,
+  formatSql,
+  formatXml,
+  minifyJson,
+  type FormatResult,
+} from "./formatters";
 import { macroForAccel, parseMacroBindings, serializeMacroBindings, type MacroBindings } from "./macrokeys";
 import { normalizeSession, parseSession, serializeSession } from "./session";
 import {
@@ -2031,6 +2038,32 @@ async function openPath(path: string, opts?: { quiet?: boolean }): Promise<boole
   }
 }
 
+/** Apply one formatter over the selection (or whole doc), single dispatch
+ *  (Plan 42). Validation failures toast and leave the text untouched. */
+function applyFormatter(kind: "json" | "json-min" | "xml" | "sql"): void {
+  const h = activeEditor();
+  if (!h) return;
+  const sel = h.view.state.selection.main;
+  const from = sel.empty ? 0 : sel.from;
+  const to = sel.empty ? h.view.state.doc.length : sel.to;
+  const src = h.view.state.sliceDoc(from, to);
+  if (src.trim() === "") {
+    toastMsg("选区为空");
+    return;
+  }
+  let r: FormatResult;
+  if (kind === "json") r = formatJson(src);
+  else if (kind === "json-min") r = minifyJson(src);
+  else if (kind === "xml") r = formatXml(src);
+  else r = { ok: true, text: formatSql(src) };
+  if (!r.ok) {
+    toastMsg(r.error);
+    return;
+  }
+  h.view.dispatch({ changes: { from, to, insert: r.text } });
+  toastMsg(kind === "sql" ? "已排版" : "已格式化");
+}
+
 /** Index progress tick (Plan 37): non-done ticks move the 待索引 boundary and
  *  refresh the active list (throttled); the done tick corrects the real total. */
 let lastIndexRefresh = 0;
@@ -3791,6 +3824,15 @@ function buildCommands(): Command[] {
     { id: "trim", title: "Trim 行首尾空格", run: () => activeEditor()?.lineOp("trim") },
     { id: "drop-empty", title: "删除空行", run: () => activeEditor()?.lineOp("drop-empty") },
     { id: "join-lines", title: "合并为一行", run: () => activeEditor()?.lineOp("join") },
+    // Plan 42: selection (or whole doc) formatters; failures toast, no rewrite.
+    {
+      id: "fmt-json",
+      title: "JSON：格式化",
+      run: () => applyFormatter("json"),
+    },
+    { id: "fmt-json-min", title: "JSON：压缩", run: () => applyFormatter("json-min") },
+    { id: "fmt-xml", title: "XML：格式化", run: () => applyFormatter("xml") },
+    { id: "fmt-sql", title: "SQL：排版", run: () => applyFormatter("sql") },
     { id: "bookmark-toggle", title: "书签：切换当前行", run: () => activeEditor()?.toggleBookmark() },
     { id: "bookmark-next", title: "书签：下一条", run: () => activeEditor()?.nextBookmark() },
     { id: "bookmark-prev", title: "书签：上一条", run: () => activeEditor()?.prevBookmark() },
