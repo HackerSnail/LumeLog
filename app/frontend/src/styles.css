@@ -1220,6 +1220,20 @@ html.has-custom-titlebar .win-btns {
   background: color-mix(in srgb, #f2820a 55%, transparent);
   outline: 1px solid #c46a00;
 }
+/* Bookmarks (Plan 28): dedicated gutter + line background. */
+.cm-bookmark-gutter {
+  width: 14px;
+}
+.cm-bookmark-marker {
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1;
+  display: block;
+  margin-top: 2px;
+}
+.cm-bookmarked-line {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
 /* Text layer (Plan 26): minimal pdf.js text-layer CSS — transparent text the
  * browser can select; pdfjs 6 does not inject styles by itself. */
 .textLayer {

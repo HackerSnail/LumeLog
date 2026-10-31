@@ -2,7 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — Plan 27 编辑器对齐 Notepad++：行操作/换行切换/字号缩放（feat/editor-parity）
+## 2026-10-30 — Plan 28 书签栏（feat/bookmarks）
+
+**依据：** `docs/specs/2026-10-30-bookmarks-design.md`（Plan 27 spec §5 开工第一项；§5 盘点：列选择模式已随 `rectangularSelection()` 交付，宏录制/文档地图/函数列表继续缓议）。Rust 侧零改动。
+
+### Task. `editorops.ts` 纯函数 + `editor.ts` StateField/gutter + palette
+**Files:** Modify `app/frontend/src/editorops.ts`、`editorops.test.ts`（+2）；Modify `app/frontend/src/editor.ts`（`bookmarksPos` StateField：**排序字符偏移锚点**，`tr.changes.mapPos` 随编辑跟随；`bookmarkDeco` 行背景装饰（compute 派生）；独立 `cm-bookmark-gutter`（`lineMarker` 按锚点命中行返回 ● marker）；模块级 CM 命令 `toggleBookmarkCmd/nextBookmarkCmd/prevBookmarkCmd/clearBookmarksCmd` 与 keymap F2/Shift-F2/Ctrl-F2（与 app 级 keymap 无冲突）；handle 加 `toggleBookmark/nextBookmark/prevBookmark/clearBookmarks` 与只读 `bookmarkPositions(view)` 测试钩子）；Modify `app/frontend/src/main.ts`（命令面板加 4 条书签命令）；Modify `app/frontend/src/styles.css`（gutter 宽度/marker/书签行背景）。
+**Why:** 锚点存字符偏移并用 changes 映射，增删行后书签自动跟行移动——存行号则每次编辑都要重算；纯函数拆出是为了环绕逻辑可脱离 CodeMirror 测试。
+**验证:** `npx vitest run src/editor.test.ts src/editorops.test.ts` 20 pass（toggle 有序增删、next/prev 环绕、空表 null；经真实 EditorView 的 toggle→锚点断言→环绕跳转→清除）；`npx tsc --noEmit` 净（坑：`GutterMarker` 属 `@codemirror/view` 而非 search 包）；`npm test` 165 pass（23 文件，基线 162）+ `npm run build` 通过。
+**限制（spec §3）：** 书签为会话内状态，随文档关闭丢失；跨会话持久化需挂会话/恢复文件，后续按需。
 
 **依据：** `docs/specs/2026-10-30-editor-parity-design.md`。盘点结论：查找/替换（`@codemirror/search` 面板）、转到行（Ctrl+G）、行复制/移动/删除（defaultKeymap）已在，缺口为行批处理、换行切换（原常开）、字号缩放、选区匹配高亮。Rust 侧零改动。
 

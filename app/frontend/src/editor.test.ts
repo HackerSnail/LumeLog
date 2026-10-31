@@ -7,7 +7,7 @@ vi.mock("./ipc", () => ({
   loadAllText: async () => ({ text: "b\na", invalidCount: 0 }),
 }));
 
-const { openEditable } = await import("./editor");
+const { openEditable, bookmarkPositions } = await import("./editor");
 const { resolveLanguage } = await import("./language");
 
 beforeAll(() => {
@@ -60,6 +60,28 @@ describe("EditorHandle parity commands (Plan 27)", () => {
     expect(handle.isWrap()).toBe(true);
     handle.setWrap(false);
     expect(handle.isWrap()).toBe(false);
+    handle.destroy();
+  });
+
+  it("bookmarks the cursor line and walks with wraparound", async () => {
+    const handle = await mount("txt"); // doc "b\na"
+    handle.toggleBookmark();
+    expect(bookmarkPositions(handle.view)).toEqual([0]);
+
+    // only bookmark: next/prev both wrap back onto itself
+    expect(handle.nextBookmark()).toBe(true);
+    expect(handle.view.state.selection.main.head).toBe(0);
+
+    // cursor to line 2 → bookmark it; prev walks back to line 1
+    handle.view.dispatch({ selection: { anchor: 2 } });
+    handle.toggleBookmark();
+    expect(bookmarkPositions(handle.view)).toEqual([0, 2]);
+    expect(handle.prevBookmark()).toBe(true);
+    expect(handle.view.state.selection.main.head).toBe(0);
+
+    handle.clearBookmarks();
+    expect(bookmarkPositions(handle.view)).toEqual([]);
+    expect(handle.nextBookmark()).toBe(false);
     handle.destroy();
   });
 });

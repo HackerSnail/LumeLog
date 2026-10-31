@@ -55,3 +55,32 @@ export function clampFontSize(px: number): number {
   if (!Number.isFinite(px)) return FONT_BASE;
   return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(px)));
 }
+
+// ---- bookmarks (Plan 28) ------------------------------------------------------
+// Anchors are sorted character offsets into the document, kept in a StateField
+// so they follow edits via change mapping. All functions are pure.
+
+/** Toggle the bookmark on the line containing `pos` (cursor line anchor). */
+export function bookmarkToggle(bms: readonly number[], pos: number): number[] {
+  const i = bms.indexOf(pos);
+  if (i >= 0) return bms.filter((_, k) => k !== i);
+  return [...bms, pos].sort((a, b) => a - b);
+}
+
+/**
+ * Nearest bookmark strictly after `pos`, wrapping to the first one.
+ * `null` when there are no bookmarks at all.
+ */
+export function bookmarkNext(bms: readonly number[], pos: number): number | null {
+  if (bms.length === 0) return null;
+  return bms.find((b) => b > pos) ?? bms[0]!;
+}
+
+/** Nearest bookmark strictly before `pos`, wrapping to the last one. */
+export function bookmarkPrev(bms: readonly number[], pos: number): number | null {
+  if (bms.length === 0) return null;
+  for (let i = bms.length - 1; i >= 0; i--) {
+    if (bms[i]! < pos) return bms[i]!;
+  }
+  return bms[bms.length - 1]!;
+}
