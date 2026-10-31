@@ -5,18 +5,27 @@
 //! handle (the shell owns line-ending write-back), seeded from the core's
 //! detected style so a CRLF file is not silently rewritten to LF (spec §4.4).
 
-import { EditorState, Compartment } from "@codemirror/state";
+import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
 import {
+  Decoration,
   EditorView,
+  gutter,
   keymap,
   lineNumbers,
   highlightActiveLine,
   drawSelection,
   rectangularSelection,
   crosshairCursor,
+  GutterMarker,
+  type DecorationSet,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { searchKeymap, search, openSearchPanel, highlightSelectionMatches } from "@codemirror/search";
+import {
+  searchKeymap,
+  search,
+  openSearchPanel,
+  highlightSelectionMatches,
+} from "@codemirror/search";
 import {
   bracketMatching,
   foldGutter,
@@ -27,11 +36,89 @@ import {
 } from "@codemirror/language";
 import { loadAllText, type DocInfo } from "./ipc";
 import { autoModeId, resolveLanguage, type ModeId } from "./language";
-import { applyLineOp, clampFontSize, FONT_BASE, type LineOp } from "./editorops";
+import {
+  applyLineOp,
+  bookmarkNext,
+  bookmarkPrev,
+  bookmarkToggle,
+  clampFontSize,
+  FONT_BASE,
+  type LineOp,
+} from "./editorops";
 
 /** Editor font-size theme fragment (Plan 27 zoom); rebuilt on every step. */
 function fontTheme(px: number) {
   return EditorView.theme({ "&": { fontSize: `${px}px` } });
+}
+
+// ---- bookmarks (Plan 28) ----------------------------------------------------
+
+/** Sorted char-offset anchors; follows edits via change mapping. */
+const setBookmarks = StateEffect.define<readonly number[]>();
+const bookmarksPos = StateField.define<readonly number[]>({
+  create: () => [],
+  update(value, tr) {
+    let v = value.map((p) => tr.changes.mapPos(p));
+    for (const e of tr.effects) if (e.is(setBookmarks)) v = [...e.value];
+    return v;
+  },
+});
+const bookmarkDeco = EditorView.decorations.compute([bookmarksPos], (state) => {
+  const bms = state.field(bookmarksPos, false) ?? [];
+  const deco: DecorationSet = Decoration.set(
+    bms.map((pos) => Decoration.line({ class: "cm-bookmarked-line" }).range(pos)),
+    true,
+  );
+  return deco;
+});
+class BookmarkMarker extends GutterMarker {
+  toDOM() {
+    const span = document.createElement("span");
+    span.className = "cm-bookmark-marker";
+    span.textContent = "●";
+    return span;
+  }
+}
+const bookmarkMarker = new BookmarkMarker();
+const bookmarkGutter = gutter({
+  class: "cm-bookmark-gutter",
+  lineMarker: (view, line, _other) =>
+    (view.state.field(bookmarksPos, false) ?? []).includes(line.from) ? bookmarkMarker : null,
+});
+
+function toggleBookmarkCmd(view: EditorView): boolean {
+  const pos = view.state.doc.lineAt(view.state.selection.main.head).from;
+  view.dispatch({ effects: setBookmarks.of(bookmarkToggle(view.state.field(bookmarksPos), pos)) });
+  return true;
+}
+
+function jumpBookmark(view: EditorView, pos: number): boolean {
+  view.dispatch({
+    selection: { anchor: pos },
+    effects: EditorView.scrollIntoView(pos, { y: "center" }),
+  });
+  view.focus();
+  return true;
+}
+
+function nextBookmarkCmd(view: EditorView): boolean {
+  const b = bookmarkNext(view.state.field(bookmarksPos), view.state.selection.main.head);
+  return b === null ? false : jumpBookmark(view, b);
+}
+
+function prevBookmarkCmd(view: EditorView): boolean {
+  const b = bookmarkPrev(view.state.field(bookmarksPos), view.state.selection.main.head);
+  return b === null ? false : jumpBookmark(view, b);
+}
+
+function clearBookmarksCmd(view: EditorView): boolean {
+  view.dispatch({ effects: setBookmarks.of([]) });
+  return true;
+}
+
+/** Read-only bookmark anchors (sorted char offsets) — test/inspection hook. */
+export function bookmarkPositions(view: EditorView): readonly number[] {
+  return view.state.field(bookmarksPos, false) ?? [];
 }
 
 export interface EditorHandle {
@@ -62,6 +149,12 @@ export interface EditorHandle {
   zoomFont(delta: number): void;
   /** Back to the base font size. */
   fontReset(): void;
+  /** Bookmark the cursor line (Plan 28); no-op if already bookmarked. */
+  toggleBookmark(): void;
+  /** Jump to the next/previous bookmark (wraparound); false when none. */
+  nextBookmark(): boolean;
+  prevBookmark(): boolean;
+  clearBookmarks(): void;
   destroy(): void;
 }
 
@@ -199,6 +292,10 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       zoom.size = FONT_BASE;
       view.dispatch({ effects: fontConf.reconfigure(fontTheme(zoom.size)) });
     },
+    toggleBookmark: () => void toggleBookmarkCmd(view),
+    nextBookmark: () => nextBookmarkCmd(view),
+    prevBookmark: () => prevBookmarkCmd(view),
+    clearBookmarks: () => void clearBookmarksCmd(view),
     destroy: () => {
       destroyed = true; // a language still in flight must not touch a dead view
       view.destroy();
@@ -230,7 +327,18 @@ function buildState(
       crosshairCursor(),
       wrapConf.of(wrap ? EditorView.lineWrapping : []),
       highlightSelectionMatches(),
-      keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
+      bookmarksPos,
+      bookmarkDeco,
+      bookmarkGutter,
+      keymap.of([
+        { key: "F2", run: nextBookmarkCmd },
+        { key: "Shift-F2", run: prevBookmarkCmd },
+        { key: "Ctrl-F2", run: toggleBookmarkCmd },
+        ...defaultKeymap,
+        ...historyKeymap,
+        ...searchKeymap,
+        indentWithTab,
+      ]),
       search(),
       // Ctrl+wheel font zoom (Plan 27): intercept before the browser page-zoom.
       EditorView.domEventHandlers({
