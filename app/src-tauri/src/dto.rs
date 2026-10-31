@@ -64,6 +64,17 @@ pub struct FifHitJson {
     pub text: String,
 }
 
+/// CSV streaming batch (Plan 45): rows share the parser row shape; `columns`
+/// rides the first batch when 首行为表头 is on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CsvBatchJson {
+    #[serde(default)]
+    pub rows: Vec<crate::plugins::ParserRowJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+}
+
 /// Streaming batch: hits during the scan, `stats` set on the final event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

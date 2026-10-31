@@ -2570,6 +2570,103 @@ pub fn fif_cancel(state: tauri::State<'_, AppDocs>, request_id: u64) -> Result<(
     }
 }
 
+// ---- builtin delimited-table view (Plan 45) ----------------------------------
+
+const CSV_MAX_COLS: usize = 64;
+const CSV_MAX_ROWS: u64 = 500_000;
+
+/// Stream the document through the delimited splitter (Plan 45). Rows reuse
+/// `ParserRowJson` so the parser dock renders/jumps unchanged; the first batch
+/// carries column labels when `header` is on.
+#[tauri::command]
+pub fn csv_run(
+    state: tauri::State<'_, AppDocs>,
+    app: AppHandle,
+    doc_id: u64,
+    delimiter: String,
+    header: bool,
+    on_batch: Channel<CsvBatchJson>,
+    on_done: Channel<crate::plugins::ParserStats>,
+) -> Result<u64, IpcError> {
+    let mut dc = delimiter.chars();
+    let delim = match (dc.next(), dc.next()) {
+        (Some(c), None) if c != '"' && c != '\n' && c != '\r' => c,
+        _ => {
+            return Err(IpcError::new(
+                "invalid_argument",
+                "分隔符须为单个字符（不能是引号或换行）",
+            ))
+        }
+    };
+    let (req_id, cancel) = state.begin_search();
+    let fail = |e: IpcError| {
+        state.end_search(req_id);
+        e
+    };
+    let doc_arc = match state.get(doc_id) {
+        Some(a) => a,
+        None => return Err(fail(IpcError::new("unknown_doc", format!("no document {doc_id}")))),
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = || cancel.load(Ordering::Relaxed);
+        let mut rows_out: u64 = 0;
+        let mut lines: u64 = 0;
+        let mut skipped: u64 = 0;
+        let mut columns: Option<Vec<String>> = None;
+        let mut batch: Vec<crate::plugins::ParserRowJson> = Vec::new();
+        let mut first = true;
+        for (_no, text) in DocLines::new(doc_arc) {
+            lines += 1;
+            if cancelled() || rows_out >= CSV_MAX_ROWS {
+                break;
+            }
+            let mut fields = lumelog_core::csv::split_line(&text, delim);
+            if fields.len() == 1 && fields[0].trim().is_empty() {
+                skipped += 1;
+                continue;
+            }
+            if fields.len() > CSV_MAX_COLS {
+                // Fold the overflow into the last column instead of dropping it.
+                let keep = CSV_MAX_COLS - 1;
+                let rest: Vec<String> = fields.drain(keep..).collect();
+                fields.push(rest.join(&delim.to_string()));
+            }
+            if header && first {
+                columns = Some(fields);
+                first = false;
+            } else {
+                first = false;
+                rows_out += 1;
+                batch.push(crate::plugins::ParserRowJson {
+                    line: _no,
+                    cells: fields,
+                });
+                if batch.len() >= 512 {
+                    let _ = on_batch.send(CsvBatchJson {
+                        rows: std::mem::take(&mut batch),
+                        columns: columns.take(),
+                    });
+                }
+            }
+        }
+        if !batch.is_empty() || columns.is_some() {
+            let _ = on_batch.send(CsvBatchJson {
+                rows: batch,
+                columns,
+            });
+        }
+        let _ = on_done.send(crate::plugins::ParserStats {
+            rows: rows_out,
+            lines,
+            skipped,
+            cancelled: cancelled(),
+            error: None,
+        });
+        app.state::<AppDocs>().end_search(req_id);
+    });
+    Ok(req_id)
+}
+
 // ---- inspector git section (Plan 34/35) -------------------------------------
 
 /// Probe the git repo around `path` (read-only, built-in libgit2).

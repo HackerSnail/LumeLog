@@ -89,6 +89,7 @@ import {
   launchArgs,
   fifRun,
   fifCancel,
+  csvRun,
   type FifHit,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
@@ -1037,6 +1038,9 @@ let parserSel: HTMLSelectElement | null = null;
 let parserRunBtn: HTMLButtonElement | null = null;
 let parserConsoleEl: HTMLElement | null = null;
 let parserStore: RowStore | null = null;
+let parserCsvBar: HTMLElement | null = null;
+let parserCsvDelim: HTMLSelectElement | null = null;
+let parserCsvHeader: HTMLInputElement | null = null;
 let parserList: ParserPluginInfo[] = [];
 let parserReqId: number | null = null;
 let parserToken = 0;
@@ -1062,12 +1066,41 @@ function buildParserDock(): HTMLElement {
   });
   bar.append(document.createTextNode("插件 "), parserSel, parserRunBtn, reloadBtn, clearBtn);
 
+  // Builtin delimited-table controls (Plan 45): visible when the builtin
+  // pseudo-plugin is selected.
+  const csvBar = document.createElement("div");
+  csvBar.className = "can-dockbar";
+  csvBar.style.display = "none";
+  const csvDelim = document.createElement("select");
+  csvDelim.className = "can-src";
+  for (const [v, t] of [
+    [",", "逗号 ,"],
+    ["\t", "Tab"],
+    [";", "分号 ;"],
+    ["|", "竖线 |"],
+  ] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    csvDelim.append(o);
+  }
+  const csvHeaderLabel = document.createElement("label");
+  csvHeaderLabel.className = "fif-case";
+  const csvHeader = document.createElement("input");
+  csvHeader.type = "checkbox";
+  csvHeader.checked = true;
+  csvHeaderLabel.append(csvHeader, document.createTextNode("首行为表头"));
+  csvBar.append(document.createTextNode("分隔符 "), csvDelim, csvHeaderLabel);
+
   const consoleBox = document.createElement("div");
   consoleBox.className = "parser-console";
   consoleBox.style.display = "none";
   parserConsoleEl = consoleBox;
 
-  dock.append(bar, (parserHostEl = mkHost()), consoleBox);
+  dock.append(bar, csvBar, (parserHostEl = mkHost()), consoleBox);
+  parserCsvBar = csvBar;
+  parserCsvDelim = csvDelim;
+  parserCsvHeader = csvHeader;
   parserDockEl = dock;
   return dock;
 }
@@ -1111,6 +1144,10 @@ async function loadParserPlugins(report: boolean): Promise<void> {
     const sel = parserSel;
     if (!sel) return;
     sel.textContent = "";
+    const builtin = document.createElement("option");
+    builtin.value = "builtin-csv";
+    builtin.textContent = "内置：分隔符表格（CSV/TSV）";
+    sel.append(builtin);
     for (const p of reply.parsers) {
       const o = document.createElement("option");
       o.value = p.id;
@@ -1125,8 +1162,9 @@ async function loadParserPlugins(report: boolean): Promise<void> {
       p.extensions.some((e) => e.toLowerCase() === ext),
     );
     if (match) sel.value = match.id;
+    else if (reply.parsers.length === 0) sel.value = "builtin-csv";
     applyParserColumns();
-    if (reply.parsers.length === 0) parserPanel?.setStatus("plugins 目录没有可用的解析插件");
+    if (reply.parsers.length === 0) parserPanel?.setStatus("plugins 目录没有可用插件，可用内置分隔符表格");
   } catch (err) {
     reportError(err);
   }
@@ -1136,6 +1174,16 @@ async function loadParserPlugins(report: boolean): Promise<void> {
  *  dropped (different shape). */
 function applyParserColumns(): void {
   const id = parserSel?.value;
+  if (id === "builtin-csv") {
+    if (parserCsvBar) parserCsvBar.style.display = "";
+    parserStore = new RowStore();
+    parserPanel?.attachStore(parserStore);
+    parserPanel?.setColumns([]);
+    parserPanel?.render();
+    parserPanel?.setStatus("内置分隔符表格：选好分隔符后点「解析」");
+    return;
+  }
+  if (parserCsvBar) parserCsvBar.style.display = "none";
   const plugin = parserList.find((p) => p.id === id);
   if (!plugin) {
     parserPanel?.setColumns([]);
@@ -1161,6 +1209,10 @@ async function onParserRunClick(): Promise<void> {
   const pluginId = parserSel?.value;
   if (!pluginId) {
     toastMsg("没有可用的解析插件");
+    return;
+  }
+  if (pluginId === "builtin-csv") {
+    void onCsvRunClick(a);
     return;
   }
   const plugin = parserList.find((p) => p.id === pluginId);
@@ -1204,6 +1256,62 @@ async function onParserRunClick(): Promise<void> {
 
 function stopParserRun(): void {
   if (parserReqId !== null) void parserCancel(parserReqId).catch(() => {});
+}
+
+/** Builtin delimited-table run (Plan 45): streams through csv_run into the
+ *  same store/panel; column labels come from the header batch or grow with
+ *  the widest row seen. */
+async function onCsvRunClick(a: { info: { docId: number } }): Promise<void> {
+  parserStore = new RowStore();
+  parserPanel?.attachStore(parserStore);
+  parserPanel?.setColumns([]);
+  parserPanel?.setStatus("解析中…");
+  setParserBusy(true);
+  const token = ++parserToken;
+  let cols = 0;
+  try {
+    parserReqId = await csvRun({
+      docId: a.info.docId,
+      delimiter: parserCsvDelim?.value ?? ",",
+      header: parserCsvHeader?.checked ?? true,
+      onBatch: (b) => {
+        if (token !== parserToken) return; // dock closed / mode switched
+        const width = Math.max(
+          cols,
+          b.columns?.length ?? 0,
+          ...b.rows.map((r) => r.cells.length),
+        );
+        if (width > cols) {
+          cols = width;
+          parserPanel?.setColumns(
+            Array.from({ length: width }, (_, i) => ({
+              key: `c${i}`,
+              label: b.columns?.[i] || `列${i + 1}`,
+            })),
+          );
+        }
+        parserStore?.push(b.rows);
+        parserPanel?.render();
+      },
+      onDone: (s) => {
+        if (token !== parserToken) return;
+        parserReqId = null;
+        setParserBusy(false);
+        parserPanel?.setStatus(
+          s.error
+            ? `解析失败：${s.error}`
+            : s.cancelled
+              ? "已取消"
+              : `已解析 ${s.rows} 行 · 跳过 ${s.skipped} 行 · 共扫描 ${s.lines} 行` +
+                (s.rows >= 500_000 ? "（达 50 万行上限）" : ""),
+        );
+      },
+    });
+  } catch (err) {
+    parserReqId = null;
+    setParserBusy(false);
+    reportError(err);
+  }
 }
 
 function setParserBusy(busy: boolean): void {
@@ -3979,6 +4087,15 @@ function buildCommands(): Command[] {
     ...recents,
     ...bound,
     { id: "recent-clear", title: "清除最近文件记录", run: () => void clearRecentList() },
+    {
+      id: "csv-view",
+      title: "分隔符表格（CSV/TSV）…",
+      run: () => {
+        if (!parserDockVisible) toggleParserDock();
+        if (parserSel) parserSel.value = "builtin-csv";
+        applyParserColumns();
+      },
+    },
     { id: "fif", title: "在文件中查找…", run: () => openFindInFiles() },
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "script", title: "脚本…", run: () => openScriptManager() },
