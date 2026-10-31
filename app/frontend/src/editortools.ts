@@ -67,6 +67,18 @@ export function classifyMove(
   return null;
 }
 
+/** Playback guard: one command may replay a macro at most this many times. */
+export const MACRO_PLAY_MAX = 10_000;
+
+/** "12" → 12 (clamped to MACRO_PLAY_MAX); anything else → null. */
+export function parseRepeatCount(raw: string): number | null {
+  const s = raw.trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number.parseInt(s, 10);
+  if (n < 1) return null;
+  return Math.min(n, MACRO_PLAY_MAX);
+}
+
 // ---- macro persistence (Plan 30) ----------------------------------------------
 
 export interface NamedMacro {

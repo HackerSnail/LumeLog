@@ -61,6 +61,7 @@ import {
   lineAtY,
   overviewBuckets,
   MACRO_MAX_OPS,
+  MACRO_PLAY_MAX,
   OVERVIEW_MAX_LINES,
   type MacroOp,
   type MoveBy,
@@ -189,6 +190,11 @@ export interface EditorHandle {
    * one, or `ops` (a saved macro) when given (Plan 30).
    */
   playMacro(times?: number, ops?: MacroOp[]): void;
+  /**
+   * Replay the last recorded macro until neither doc length nor the cursor
+   * moves any more; returns the number of plays (Plan 31). Hard-capped.
+   */
+  playMacroToEnd(): number;
   /** Toggle the overview strip; returns the new state. */
   setMinimap(on: boolean): boolean;
   isMinimap(): boolean;
@@ -451,27 +457,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     isRecording: () => macro !== null,
     macroOps: () => recorded.slice(),
     playMacro: (times = 1, ops?: MacroOp[]) => {
-      const list = ops ?? recorded;
-      if (list.length === 0) return;
-      for (let t = 0; t < times; t++) {
-        for (const op of list) {
-          const cur = view.state.selection.main.head;
-          if (op.kind === "insert") {
-            view.dispatch({
-              changes: { from: cur, insert: op.text },
-              selection: { anchor: cur + op.text.length },
-            });
-          } else if (op.kind === "delete") {
-            const from = op.dir === "backward" ? Math.max(0, cur - op.count) : cur;
-            const to = op.dir === "backward" ? cur : Math.min(view.state.doc.length, cur + op.count);
-            if (from !== to) view.dispatch({ changes: { from, to } });
-          } else if (op.kind === "move") {
-            applyMove(view, op.by);
-          } else {
-            applyLineOpToView(view, op.op);
-          }
-        }
-      }
+      replayOps(view, ops ?? recorded, times);
     },
     setMinimap: (on: boolean) => {
       minimapOn = on;
@@ -480,6 +466,27 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       return minimapOn;
     },
     isMinimap: () => minimapOn,
+    playMacroToEnd: () => {
+      if (recorded.length === 0) return 0;
+      let runs = 0;
+      for (; runs < MACRO_PLAY_MAX; runs++) {
+        const before = {
+          len: view.state.doc.length,
+          head: view.state.selection.main.head,
+        };
+        // reuse the same playback path (ops default to `recorded`)
+        replayOps(view, recorded, 1);
+        const after = {
+          len: view.state.doc.length,
+          head: view.state.selection.main.head,
+        };
+        if (after.len === before.len && after.head === before.head) {
+          runs++; // that last play did happen, it just made no progress
+          break;
+        }
+      }
+      return runs;
+    },
     listSymbols: () =>
       extractSymbols(
         Array.from({ length: view.state.doc.lines }, (_, i) => {
@@ -495,6 +502,30 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       view.destroy();
     },
   };
+}
+
+/** Replay a macro op list `times` times from the current cursor (Plan 30/31). */
+function replayOps(view: EditorView, ops: readonly MacroOp[], times: number): void {
+  if (ops.length === 0) return;
+  for (let t = 0; t < times; t++) {
+    for (const op of ops) {
+      const cur = view.state.selection.main.head;
+      if (op.kind === "insert") {
+        view.dispatch({
+          changes: { from: cur, insert: op.text },
+          selection: { anchor: cur + op.text.length },
+        });
+      } else if (op.kind === "delete") {
+        const from = op.dir === "backward" ? Math.max(0, cur - op.count) : cur;
+        const to = op.dir === "backward" ? cur : Math.min(view.state.doc.length, cur + op.count);
+        if (from !== to) view.dispatch({ changes: { from, to } });
+      } else if (op.kind === "move") {
+        applyMove(view, op.by);
+      } else {
+        applyLineOpToView(view, op.op);
+      }
+    }
+  }
 }
 
 /** One named line operation over the selection's line range (Plan 27 semantics). */

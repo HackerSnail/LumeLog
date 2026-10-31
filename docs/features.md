@@ -38,6 +38,7 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
       ↳ Plan 28 `feat/bookmarks` 书签栏：Ctrl+F2 切换、F2/Shift-F2 环绕跳转、清除全部（命令面板同款 4 条），gutter 圆点 + 书签行背景，锚点随编辑自动跟行；会话内状态（跨会话持久化按需后续）。列选择模式已随 `rectangularSelection()` 内建（Alt+拖拽）。
       ↳ Plan 29 `feat/editor-tools` 三件套：宏录制（命令面板开始/停止/播放，相对光标重放）、概览条（右缘 canvas 文档地图，非空行密度 + 视口窗框，点击/拖拽跳行，>50 万行只画视口框）、函数列表（按语法的正则符号表，泛化列表面板过滤 + 跳行；js/ts/python/rust/java/c/markdown/sql，其余语法暂无规则）。
       ↳ Plan 30 `feat/macro-advanced` 宏高级形态：操作模型从字节级扩为四类动作——插入、带方向删除（Backspace 重放向光标前删，修 Plan 29 把 Backspace 放成向后删的问题）、光标移动（←→↑↓/行首/行尾，跳词、翻页、跨行折行不录）、命名行操作（Plan 27 九种进入宏，重放取当前选区或整篇）；已保存宏存 `localStorage["lumelog.macros.v1"]`（上限 50 个、名 100 字、每宏 1 万操作，坏宏丢弃不拖垮库），命令面板新增「宏：保存为…/运行已保存宏/删除已保存宏」，保存复用列表面板输入名称、同名覆盖。
+      ↳ Plan 31 `feat/macro-run-variants` 宏播放变体：「宏：重复播放 N 次…」（列表面板输入次数，1–10000 钳制）与「宏：运行到文件尾」（连续播放至文档长度与光标都不再变化，上限 1 万次防失控；排序/大小写这类无进展宏播一次即停）。
 - [x] 脚本引擎（QuickJS 逐行变换）
 - [x] 脚本引擎（QuickJS 逐行变换）
       ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。

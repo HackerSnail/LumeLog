@@ -147,6 +147,26 @@ describe("EditorHandle tools (Plan 29)", () => {
     handle.destroy();
   });
 
+  it("runs a macro to the end of the file (Plan 31)", async () => {
+    const handle = await mount("txt"); // doc "b\na", 2 lines
+    // record a single "down" move
+    handle.view.dispatch({ selection: { anchor: 0 } });
+    handle.startRecording();
+    handle.view.dispatch({ selection: { anchor: 3 }, userEvent: "input.move" });
+    handle.stopRecording();
+
+    handle.view.dispatch({ selection: { anchor: 0 } });
+    // play 1: head 0 → 3 (line 2); play 2: no progress → stop
+    expect(handle.playMacroToEnd()).toBe(2);
+    expect(handle.view.state.selection.main.head).toBe(3);
+
+    // no recorded macro → 0
+    const empty = await mount("txt");
+    expect(empty.playMacroToEnd()).toBe(0);
+    empty.destroy();
+    handle.destroy();
+  });
+
   it("lists symbols for the current mode", async () => {
     const handle = await mount("py");
     await flush();
