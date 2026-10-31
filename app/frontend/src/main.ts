@@ -82,6 +82,8 @@ import {
   recentList,
   recentClear,
   viewerPdfBytes,
+  gitInit,
+  gitProbe,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
 import { PdfView, clampPage, stepZoom } from "./pdfview";
@@ -523,6 +525,94 @@ function updateInspector(docId: number | null): void {
 
   body.append(inspSection("标签"));
   body.append(buildTagBlock(ds.path));
+
+  body.append(inspSection("Git"));
+  const gitBox = document.createElement("div");
+  gitBox.id = "insp-git";
+  gitBox.dataset.path = ds.path;
+  gitBox.className = "insp-empty";
+  gitBox.textContent = "检测中…";
+  body.append(gitBox);
+  void fillGitSection(ds.path);
+}
+
+/** Async half of the inspector Git section (Plan 34): probe then fill.
+ *  `updateInspector` is sync, so the subprocess result lands afterwards;
+ *  the dataset guard drops results for a doc that is no longer shown. */
+async function fillGitSection(path: string): Promise<void> {
+  const token = ++gitProbeToken;
+  let info;
+  try {
+    info = await gitProbe(path);
+  } catch (err) {
+    info = null;
+    reportError(err);
+  }
+  const box = document.getElementById("insp-git");
+  if (!box || box.dataset.path !== path || token !== gitProbeToken) return;
+  box.textContent = "";
+  if (!info) return;
+  if (info.unavailable) {
+    box.textContent = info.unavailable;
+    return;
+  }
+  if (!info.repo) {
+    const msg = document.createElement("div");
+    msg.className = "insp-empty";
+    msg.textContent = "未检测到 Git 仓库";
+    const btn = document.createElement("button");
+    btn.className = "insp-git-init";
+    btn.textContent = "初始化仓库";
+    btn.addEventListener("click", () => void initRepoFor(path));
+    box.append(msg, btn);
+    return;
+  }
+  const rows: [string, string][] = [
+    ["仓库根", info.root ?? "—"],
+    ["分支", info.branch ?? "—"],
+    ["文件状态", info.file_status ?? "未改动"],
+  ];
+  if (info.last_commit) {
+    rows.push([
+      "最近提交",
+      `${info.last_commit.hash} ${info.last_commit.subject}（${formatSavedAt(info.last_commit.time * 1000)}）`,
+    ]);
+  } else {
+    rows.push(["最近提交", "（尚无提交）"]);
+  }
+  for (const [key, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "insp-row";
+    const k = document.createElement("span");
+    k.className = "insp-key";
+    k.textContent = key;
+    const v = document.createElement("span");
+    v.className = "insp-val";
+    v.textContent = value;
+    v.title = value;
+    row.append(k, v);
+    box.append(row);
+  }
+}
+
+let gitProbeToken = 0;
+
+async function initRepoFor(path: string): Promise<void> {
+  const dir = path.replace(/[\\/][^\\/]*$/, "") || path;
+  const go = await ask(`将在 ${dir} 执行 git init，是否继续？`, {
+    title: "初始化仓库",
+    kind: "info",
+    okLabel: "初始化",
+  });
+  if (!go) return;
+  try {
+    const msg = await gitInit(path);
+    toastMsg(`已初始化仓库：${msg.split(":").pop()?.trim() || dir}`);
+    gitProbeToken++; // invalidate any in-flight probe, then refresh
+    await fillGitSection(path);
+  } catch (err) {
+    reportError(err);
+  }
 }
 
 function inspSection(title: string): HTMLElement {

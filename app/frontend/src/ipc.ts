@@ -1254,3 +1254,31 @@ export interface TailAppend {
 export function docTailAppend(docId: number): Promise<TailAppend> {
   return call<TailAppend>("doc_tail_append", { docId });
 }
+
+// ---- inspector git section (Plan 34) ------------------------------------------
+
+export interface GitLastCommit {
+  hash: string;
+  subject: string;
+  /** Unix seconds. */
+  time: number;
+}
+
+export interface GitInfo {
+  repo: boolean;
+  root?: string;
+  branch?: string;
+  file_status?: string;
+  last_commit?: GitLastCommit;
+  unavailable?: string;
+}
+
+/** Probe the git repo around `path` (read-only, system git CLI). */
+export function gitProbe(path: string): Promise<GitInfo> {
+  return call<GitInfo>("git_probe", { path });
+}
+
+/** `git init` in the directory containing `path` (UI confirms first). */
+export function gitInit(path: string): Promise<string> {
+  return call<string>("git_init", { path });
+}

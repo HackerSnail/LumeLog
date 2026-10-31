@@ -881,6 +881,20 @@ html.has-custom-titlebar .win-btns {
 .insp-tag-input:focus {
   border-bottom-color: var(--accent);
 }
+.insp-git-init {
+  margin-top: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.insp-git-init:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 /* Tab host: the strip is a fixed row, the active view fills the rest.
  * `min-height:0` is what lets the flex child actually shrink and scroll. */
