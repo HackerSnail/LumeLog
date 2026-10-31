@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clampWidth, loadFlag, MIN_SIDEBAR, MAX_SIDEBAR } from "./shell";
+import { clampWidth, loadFlag, isIMEEvent, MIN_SIDEBAR, MAX_SIDEBAR } from "./shell";
 
 describe("clampWidth (pane resizer bounds)", () => {
   it("passes an in-range width through", () => {
@@ -26,5 +26,19 @@ describe("loadFlag (no storage → caller's default)", () => {
     // Node test env has no `localStorage`; the try/catch must fall back.
     expect(loadFlag("lumelog.ui.sidebar", false)).toBe(false);
     expect(loadFlag("lumelog.ui.inspector", true)).toBe(true);
+  });
+});
+
+describe("isIMEEvent (Plan 39)", () => {
+  it("flags isComposing and keyCode 229 separately", () => {
+    expect(isIMEEvent({ isComposing: true, keyCode: 13 })).toBe(true);
+    // Safari fires the committing Enter after compositionend: isComposing is
+    // already false, keyCode 229 is the only signal.
+    expect(isIMEEvent({ isComposing: false, keyCode: 229 })).toBe(true);
+  });
+
+  it("passes plain keys through", () => {
+    expect(isIMEEvent({ isComposing: false, keyCode: 13 })).toBe(false);
+    expect(isIMEEvent({ keyCode: 70 })).toBe(false); // plain F, no isComposing
   });
 });

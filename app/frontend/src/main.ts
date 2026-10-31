@@ -114,6 +114,7 @@ import {
   makeResizable,
   loadFlag,
   storeFlag,
+  isIMEEvent,
   MIN_SIDEBAR,
   MAX_SIDEBAR,
   MIN_INSPECTOR,
@@ -732,7 +733,7 @@ function buildTagBlock(path: string): HTMLElement {
   input.className = "insp-tag-input";
   input.placeholder = "加标签，回车确认";
   input.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" || e.isComposing) return;
+    if (e.key !== "Enter" || isIMEEvent(e)) return;
     e.preventDefault();
     const r = addTag(tagStore, path, input.value);
     if (r.tag) {
@@ -1316,6 +1317,7 @@ function buildViewerDock(): HTMLElement {
   viewerPdfSearchInput.className = "can-ftxt";
   viewerPdfSearchInput.placeholder = "在 PDF 中查找";
   viewerPdfSearchInput.addEventListener("keydown", (e) => {
+    if (isIMEEvent(e)) return;
     if (e.key === "Enter") {
       void onPdfSearch(e.shiftKey ? "prev" : "next");
     } else if (e.key === "Escape") {
@@ -3142,7 +3144,7 @@ function addCondRow(conds: HTMLElement, onEnter: () => void): void {
   inp.type = "text";
   inp.placeholder = "文本 / 正则";
   inp.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.isComposing) onEnter();
+    if (e.key === "Enter" && !isIMEEvent(e)) onEnter();
   });
   const del = document.createElement("button");
   del.type = "button";
@@ -3510,7 +3512,7 @@ function openJumpPrompt(): void {
   };
   go.addEventListener("click", submit);
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.isComposing) submit();
+    if (e.key === "Enter" && !isIMEEvent(e)) submit();
     else if (e.key === "Escape") close();
   });
   panel.append(input, go);
@@ -3972,7 +3974,7 @@ function openCommandList(
       e.preventDefault();
       if (view.length) sel = (sel - 1 + view.length) % view.length;
       paintSel();
-    } else if (e.key === "Enter" && !e.isComposing) {
+    } else if (e.key === "Enter" && !isIMEEvent(e)) {
       e.preventDefault();
       if (view.length) {
         run(sel);

@@ -2,6 +2,7 @@
 //! the recording state machine; persistence is delegated to the caller through
 //! `onSet`/`onResetAll` so this module never talks to IPC directly.
 import { conflictOf, eventToAccel, validate, type ActionId } from "./keymap";
+import { isIMEEvent } from "./shell";
 
 export interface KeymapModalOpts {
   actions: { id: ActionId; title: string }[];
@@ -105,6 +106,9 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
   };
 
   const onCapture = (e: KeyboardEvent): void => {
+    // IME composition keys (keyCode 229) must never close the modal or get
+    // recorded as a shortcut (Plan 39).
+    if (isIMEEvent(e)) return;
     if (!recording) {
       if (e.key === "Escape") {
         e.preventDefault();

@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 39 IME 误提交守卫（跨平台适配，fix/ime-guard）
+
+**依据：** test-checklist §4 最后一项 deferred（WKWebView/Safari 需叠 `keyCode!==229`）。纯前端，Rust 零改动。
+
+### Task. `isIMEEvent` helper + 全部 Enter 提交点/快捷键录制器接管
+**Files:** Modify `app/frontend/src/shell.ts`（`isIMEEvent`：`isComposing === true || keyCode === 229`——Safari/WKWebView 在 `compositionend` 之后才发提交用 Enter，`isComposing` 已是 false，229 是唯一可靠信号；结构化参数保持 headless 可测）；Modify `app/frontend/src/main.ts`（5 处 Enter 路径换守卫：标签输入、PDF 搜索、跳转行、转到行 Ctrl+G、palette 回车）；Modify `app/frontend/src/keymap-ui.ts`（快捷键录制 capture 阶段整段跳过 IME 事件——中文输入法开着录制会把 229/Process 录成快捷键或误关弹窗）；Modify `app/frontend/src/shell.test.ts`（+1 describe：两信号分别命中、普通键放行）。
+**Why:** 逐点自查时发现守卫不一致：5 处 Enter 只有 `isComposing`（Safari 上不够），PDF 搜索完全没守卫，快捷键录制器最险（capture 阶段无差别吞事件）。统一走一个 helper 而不是各处复制条件，后续新输入框只引一个名字。
+**验证:** `npx vitest run src/shell.test.ts` 7 pass；`npx tsc --noEmit` 净；`npm test` 203 pass（26 文件，基线 201）+ `npm run build` 通过。
+**未验:** 真机 WKWebView/Safari 的中文输入法合成链路需 macOS 打包后实测（test-checklist §4 注明）。
+
 ## 2026-10-31 — Plan 38 书签跨会话持久化（feat/bookmarks-session）
 
 **依据：** `docs/specs/2026-10-31-bookmarks-session-design.md`（Plan 28 spec §3 遗留项）。纯前端，Rust 零改动。
