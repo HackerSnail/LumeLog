@@ -6,13 +6,22 @@ import type { LineOp } from "./editorops";
 
 // ---- macros ------------------------------------------------------------------
 
-/** Named cursor moves recordable in a macro (Plan 30). */
-export type MoveBy = "left" | "right" | "up" | "down" | "line-start" | "line-end";
+/** Named cursor moves recordable in a macro (Plan 30 words + Plan 32 select). */
+export type MoveBy =
+  | "left"
+  | "right"
+  | "up"
+  | "down"
+  | "line-start"
+  | "line-end"
+  | "word-left"
+  | "word-right";
 
 export type MacroOp =
   | { kind: "insert"; text: string }
   | { kind: "delete"; count: number; dir: "forward" | "backward" }
-  | { kind: "move"; by: MoveBy }
+  | { kind: "del-word"; dir: "forward" | "backward" }
+  | { kind: "move"; by: MoveBy; /** true when recorded as a selection extension */ select?: boolean }
   | { kind: "line"; op: LineOp };
 
 /** Hard cap so a runaway recording cannot exhaust memory. */
@@ -91,7 +100,16 @@ export const MACRO_STORE_MAX = 50;
 /** Storage guard: names are truncated to this length. */
 export const MACRO_NAME_MAX = 100;
 
-const MOVE_BYS: readonly MoveBy[] = ["left", "right", "up", "down", "line-start", "line-end"];
+const MOVE_BYS: readonly MoveBy[] = [
+  "left",
+  "right",
+  "up",
+  "down",
+  "line-start",
+  "line-end",
+  "word-left",
+  "word-right",
+];
 const LINE_OPS: readonly LineOp[] = [
   "sort-asc",
   "sort-desc",
@@ -115,7 +133,10 @@ function isMacroOp(v: unknown): v is MacroOp {
       (o.dir === "forward" || o.dir === "backward")
     );
   }
-  if (o.kind === "move") return MOVE_BYS.includes(o.by as MoveBy);
+  if (o.kind === "del-word") return o.dir === "forward" || o.dir === "backward";
+  if (o.kind === "move") {
+    return MOVE_BYS.includes(o.by as MoveBy) && (o.select === undefined || typeof o.select === "boolean");
+  }
   if (o.kind === "line") return LINE_OPS.includes(o.op as LineOp);
   return false;
 }

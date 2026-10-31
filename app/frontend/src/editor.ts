@@ -22,12 +22,26 @@ import {
 import {
   cursorCharLeft,
   cursorCharRight,
+  cursorGroupLeft,
+  cursorGroupRight,
   cursorLineDown,
   cursorLineUp,
   defaultKeymap,
+  deleteGroupBackward,
+  deleteGroupForward,
   history,
   historyKeymap,
   indentWithTab,
+  selectCharLeft,
+  selectCharRight,
+  selectGroupLeft,
+  selectGroupRight,
+  selectLineDown,
+  selectLineUp,
+  selectSyntaxLeft,
+  selectSyntaxRight,
+  cursorSyntaxLeft,
+  cursorSyntaxRight,
 } from "@codemirror/commands";
 import {
   searchKeymap,
@@ -260,6 +274,27 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   const lang = await resolveLanguage(autoModeId(opts.ext));
   // Single font-size holder shared by the wheel handler and `zoomFont`.
   const zoom = { size: FONT_BASE };
+  // True while a keymap-hooked word command is dispatching, so the follow-up
+  // transaction is not captured twice (Plan 32).
+  let suppressCapture = false;
+  const headClass = (tr: Transaction, h0: number, h1: number): ReturnType<typeof classifyMove> => {
+    const bl = tr.startState.doc.lineAt(h0);
+    const al = tr.state.doc.lineAt(h1);
+    return classifyMove(
+      { line: bl.number, col: h0 - bl.from },
+      { line: al.number, col: h1 - al.from },
+      al.length,
+    );
+  };
+  const recordHooked = (op: MacroOp, cmd: (v: EditorView) => boolean): boolean => {
+    if (macro !== null && macro.length < MACRO_MAX_OPS) macro.push(op);
+    suppressCapture = true;
+    try {
+      return cmd(view);
+    } finally {
+      suppressCapture = false;
+    }
+  };
   const view = new EditorView({
     state: buildState(
       text,
@@ -272,7 +307,12 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       onDocChanged,
       {
         capture: (tr) => {
-          if (macro === null || macro.length >= MACRO_MAX_OPS) return;
+          if (suppressCapture || macro === null || macro.length >= MACRO_MAX_OPS) return;
+          // Multi-cursor edits are not modelled (spec §3): skip instead of
+          // recording main-cursor garbage.
+          if (tr.startState.selection.ranges.length > 1 || tr.state.selection.ranges.length > 1) {
+            return;
+          }
           // Backspace must replay as a backward delete, not a forward one.
           const dir = tr.isUserEvent("delete.backward") ? "backward" : "forward";
           tr.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
@@ -286,19 +326,24 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
           });
         },
         captureMove: (tr) => {
-          if (macro === null || macro.length >= MACRO_MAX_OPS) return;
-          const before = tr.startState.selection.main.head;
-          const after = tr.state.selection.main.head;
-          if (before === after) return;
-          const bl = tr.startState.doc.lineAt(before);
-          const al = tr.state.doc.lineAt(after);
-          const by = classifyMove(
-            { line: bl.number, col: before - bl.from },
-            { line: al.number, col: after - al.from },
-            al.length,
-          );
+          if (suppressCapture || macro === null || macro.length >= MACRO_MAX_OPS) return;
+          const s0 = tr.startState.selection.main;
+          const s1 = tr.state.selection.main;
+          if (s0.head === s1.head) return;
+          const by = headClass(tr, s0.head, s1.head);
           if (by) macro.push({ kind: "move", by });
         },
+        captureSelect: (tr) => {
+          if (suppressCapture || macro === null || macro.length >= MACRO_MAX_OPS) return;
+          const s0 = tr.startState.selection.main;
+          const s1 = tr.state.selection.main;
+          // A pure extension keeps the anchor; clicks move it (→ not recorded).
+          if (s1.anchor !== s0.anchor || s1.head === s0.head) return;
+          const by = headClass(tr, s0.head, s1.head);
+          if (by) macro.push({ kind: "move", by, select: true });
+        },
+        wordMove: (by, cmd) => recordHooked({ kind: "move", by }, cmd),
+        wordDelete: (dir, cmd) => recordHooked({ kind: "del-word", dir }, cmd),
         queueOverview: queueOverviewRedraw,
         minimapOn: () => minimapOn,
       },
@@ -504,7 +549,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   };
 }
 
-/** Replay a macro op list `times` times from the current cursor (Plan 30/31). */
+/** Replay a macro op list `times` times from the current cursor (Plan 30–32). */
 function replayOps(view: EditorView, ops: readonly MacroOp[], times: number): void {
   if (ops.length === 0) return;
   for (let t = 0; t < times; t++) {
@@ -516,11 +561,20 @@ function replayOps(view: EditorView, ops: readonly MacroOp[], times: number): vo
           selection: { anchor: cur + op.text.length },
         });
       } else if (op.kind === "delete") {
+        const sel = view.state.selection.main;
+        // "Select a range, then type" records as delete+insert; replaying the
+        // delete over the live selection is what replaces it (spec §1).
+        if (!sel.empty) {
+          view.dispatch({ changes: { from: sel.from, to: sel.to } });
+          continue;
+        }
         const from = op.dir === "backward" ? Math.max(0, cur - op.count) : cur;
         const to = op.dir === "backward" ? cur : Math.min(view.state.doc.length, cur + op.count);
         if (from !== to) view.dispatch({ changes: { from, to } });
+      } else if (op.kind === "del-word") {
+        (op.dir === "backward" ? deleteGroupBackward : deleteGroupForward)(view);
       } else if (op.kind === "move") {
-        applyMove(view, op.by);
+        applyMove(view, op.by, op.select === true);
       } else {
         applyLineOpToView(view, op.op);
       }
@@ -543,25 +597,30 @@ function applyLineOpToView(view: EditorView, op: LineOp): void {
   });
 }
 
-/** Replay one recorded cursor move (Plan 30); plain steps ride CM commands. */
-function applyMove(view: EditorView, by: MoveBy): void {
-  const cmd: Partial<
-    Record<Exclude<MoveBy, "line-start" | "line-end">, (v: EditorView) => boolean>
-  > = {
-    left: cursorCharLeft,
-    right: cursorCharRight,
-    up: cursorLineUp,
-    down: cursorLineDown,
-  };
+/** Replay one recorded cursor move (Plan 30/32); plain steps ride CM commands. */
+function applyMove(view: EditorView, by: MoveBy, select: boolean): void {
   if (by === "line-start" || by === "line-end") {
-    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    const sel = view.state.selection.main;
+    const line = view.state.doc.lineAt(sel.head);
+    const head = by === "line-start" ? line.from : line.to;
     view.dispatch({
-      selection: { anchor: by === "line-start" ? line.from : line.to },
+      selection: select ? { anchor: sel.anchor, head } : { anchor: head },
       scrollIntoView: true,
     });
     return;
   }
-  cmd[by]?.(view);
+  const map: Partial<Record<Exclude<MoveBy, "line-start" | "line-end">, (v: EditorView) => boolean>> =
+    select
+      ? { left: selectCharLeft, right: selectCharRight, up: selectLineUp, down: selectLineDown }
+      : {
+          left: cursorCharLeft,
+          right: cursorCharRight,
+          up: cursorLineUp,
+          down: cursorLineDown,
+          "word-left": cursorGroupLeft,
+          "word-right": cursorGroupRight,
+        };
+  map[by]?.(view);
 }
 
 function buildState(
@@ -576,6 +635,9 @@ function buildState(
   tools: {
     capture(tr: Transaction): void;
     captureMove(tr: Transaction): void;
+    captureSelect(tr: Transaction): void;
+    wordMove(by: "word-left" | "word-right", cmd: (v: EditorView) => boolean): boolean;
+    wordDelete(dir: "forward" | "backward", cmd: (v: EditorView) => boolean): boolean;
     queueOverview(): void;
     minimapOn(): boolean;
   },
@@ -601,6 +663,14 @@ function buildState(
         { key: "F2", run: nextBookmarkCmd },
         { key: "Shift-F2", run: prevBookmarkCmd },
         { key: "Ctrl-F2", run: toggleBookmarkCmd },
+        // Word moves/deletes ride the same commands as defaultKeymap (spec §2):
+        // the hooks only record while a macro recording is active.
+        { key: "Mod-ArrowLeft", mac: "Alt-ArrowLeft", run: () => tools.wordMove("word-left", cursorGroupLeft), shift: selectGroupLeft, preventDefault: true },
+        { key: "Mod-ArrowRight", mac: "Alt-ArrowRight", run: () => tools.wordMove("word-right", cursorGroupRight), shift: selectGroupRight, preventDefault: true },
+        { key: "Alt-ArrowLeft", mac: "Ctrl-ArrowLeft", run: () => tools.wordMove("word-left", cursorSyntaxLeft), shift: selectSyntaxLeft },
+        { key: "Alt-ArrowRight", mac: "Ctrl-ArrowRight", run: () => tools.wordMove("word-right", cursorSyntaxRight), shift: selectSyntaxRight },
+        { key: "Mod-Backspace", mac: "Alt-Backspace", run: () => tools.wordDelete("backward", deleteGroupBackward), preventDefault: true },
+        { key: "Mod-Delete", mac: "Alt-Delete", run: () => tools.wordDelete("forward", deleteGroupForward), preventDefault: true },
         ...defaultKeymap,
         ...historyKeymap,
         ...searchKeymap,
@@ -626,14 +696,20 @@ function buildState(
       fontConf.of(fontTheme(zoom.size)),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       EditorView.updateListener.of((u) => {
-        // Macro capture (Plan 29/30): fold user edits + cursor moves into ops.
-        // Not gated on u.docChanged — a pure cursor move must be captured too.
+        // Macro capture (Plan 29–32): fold user edits, cursor moves and
+        // selection extensions into ops. Not gated on u.docChanged — a pure
+        // cursor move must be captured too. CM cursor commands emit "select"
+        // (NOT "input.move", which only our own synthetic transactions use).
         for (const tr of u.transactions) {
-          if (tr.isUserEvent("input.move") && !tr.docChanged) {
-            tools.captureMove(tr);
+          if (!tr.docChanged) {
+            if (tr.isUserEvent("input.move")) {
+              tools.captureMove(tr);
+            } else if (tr.isUserEvent("select")) {
+              tools.captureSelect(tr);
+            }
             continue;
           }
-          if (!u.docChanged || !tr.docChanged) continue;
+          if (!u.docChanged) continue;
           if (
             tr.isUserEvent("input.type") ||
             tr.isUserEvent("input.replace") ||
