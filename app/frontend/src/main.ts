@@ -122,6 +122,7 @@ import {
 } from "./shell";
 import { filterCommands, type Command } from "./palette";
 import { parseBookmarkStore, serializeBookmarkStore, type BookmarkStore } from "./bookmarks-store";
+import { normalizeSession, parseSession, serializeSession } from "./session";
 import {
   addTag,
   parseTagStore,
@@ -231,6 +232,7 @@ let inspectorCollapsed = false;
 const tabs = new TabStrip(tabsEl, {
   onActivate: (id) => {
     hideSearchPanel(); // stale hit rows belong to the previous doc — drop the panel
+    saveSession();
     if (id >= 0 && blfView) {
       blfView = null; // switching to a real document leaves the BLF view
       if (canDockVisible) switchCanView();
@@ -2008,7 +2010,7 @@ async function openFile(): Promise<void> {
   if (typeof picked === "string") await openPath(picked);
 }
 
-async function openPath(path: string): Promise<boolean> {
+async function openPath(path: string, opts?: { quiet?: boolean }): Promise<boolean> {
   if (busy) return false;
   setBusy(true);
   try {
@@ -2018,9 +2020,10 @@ async function openPath(path: string): Promise<boolean> {
     else await mountDoc(info, path);
     void refreshWatchStatus(); // a new directory may have failed to watch
     void refreshRecent(); // the shell recorded the open; palette list follows
+    saveSession();
     return true;
   } catch (err) {
-    reportError(err);
+    if (!opts?.quiet) reportError(err); // startup restore skips missing files
     return false;
   } finally {
     setBusy(false);
@@ -2282,6 +2285,47 @@ function persistTags(): void {
   } catch {
     /* storage unavailable: session-only tags */
   }
+}
+
+// ---- workspace session restore (Plan 40) -------------------------------------
+
+const SESSION_KEY = "lumelog.session.v1";
+
+/** Snapshot the open tabs (order + active path) to localStorage. */
+function saveSession(): void {
+  const session = normalizeSession({
+    paths: tabs.list().map((t) => t.path),
+    active: tabs.active()?.info.path ?? null,
+  });
+  try {
+    localStorage.setItem(SESSION_KEY, serializeSession(session));
+  } catch {
+    /* storage unavailable: no session restore */
+  }
+}
+
+/** Reopen last session's tabs at startup; missing files skip silently. */
+async function restoreSession(): Promise<void> {
+  const session = parseSession(localStorage.getItem(SESSION_KEY));
+  if (session.paths.length === 0) return;
+  let opened = 0;
+  let missing = 0;
+  let activeDocId: number | null = null;
+  for (const p of session.paths) {
+    if (await openPath(p, { quiet: true })) {
+      opened++;
+      const entry = tabs.list().find((t) => t.path === p);
+      if (p === session.active && entry) activeDocId = entry.docId;
+    } else {
+      missing++;
+    }
+  }
+  if (opened === 0 && missing === 0) return;
+  const parts: string[] = [];
+  if (opened > 0) parts.push(`已恢复 ${opened} 个文档`);
+  if (missing > 0) parts.push(`${missing} 个文件已缺失，已跳过`);
+  toastMsg(parts.join("；"));
+  if (activeDocId !== null) tabs.activate(activeDocId);
 }
 
 // ---- bookmarks across sessions (Plan 38, per file path) ----------------------
@@ -2955,6 +2999,7 @@ async function handleClose(docId: number): Promise<boolean> {
   queryCursor.delete(docId); // late `filter_run` onDone repopulates a closed, never-reused id
   refreshPanels(); // after the maps drop, so a closed doc leaves the sidebar
   void docClose(docId).catch(() => {}); // release the shell-side doc (I5)
+  saveSession();
   return true;
 }
 
@@ -4048,4 +4093,5 @@ void initWatch();
 void initSyntaxPlugins();
 void initKeymap();
 void initRecent();
+void restoreSession();
 initDragDrop();

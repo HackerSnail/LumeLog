@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 40 工作区会话恢复（feat/session-restore）
+
+**依据：** `docs/specs/2026-10-31-session-restore-design.md`（同类盘点第一梯队之首；后端 `doc_list` 是运行态查询，跨重启归前端存储）。纯前端，Rust 零改动。
+
+### Task. `session.ts` 纯函数 + 开/关/激活三处快照 + 启动恢复
+**Files:** Create `app/frontend/src/session.ts`、`session.test.ts`（4）；Modify `app/frontend/src/main.ts`（`saveSession()`：`tabs.list()` 开序 + `tabs.active()` 快照整表落 `localStorage["lumelog.session.v1"]`（normalize 去重保序/过滤空串/上限 50/active 不在集合置 null），挂在打开成功、handleClose 尾部、tabs onActivate 三处——每次开/关/切都写，崩溃也不丢；`restoreSession()` 启动序列末尾逐个 `openPath(path, {quiet: true})`，缺失/损坏文件静默跳过，完成后 toast「已恢复 N 个文档（M 个已缺失）」并激活记录页；`openPath` 加 `opts.quiet`）。
+**Why:** LumeLog 无 untitled 缓冲，路径即会话；未保存改动由崩溃恢复影子另行负责，两者互不越界。恢复用 quiet 跳过错误弹窗——启动时连弹 N 个"文件不存在"不可接受。
+**验证:** `npx vitest run src/session.test.ts` 4 pass（去重保序/上限/active 校验、坏数据、往返）；`npx tsc --noEmit` 净；`npm test` 207 pass（27 文件，基线 201）+ `npm run build` 通过。
+**未验:** 开几个文档→重启→标签恢复且激活页正确需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 39 IME 误提交守卫（跨平台适配，fix/ime-guard）
 
 **依据：** test-checklist §4 最后一项 deferred（WKWebView/Safari 需叠 `keyCode!==229`）。纯前端，Rust 零改动。
