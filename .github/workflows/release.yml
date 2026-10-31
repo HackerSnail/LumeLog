@@ -65,11 +65,13 @@ jobs:
         run: npm ci
 
       # Builds NSIS/MSI (Windows), DMG (macOS), deb/AppImage (Linux) per
-      # tauri.conf.json bundle.targets. `npm run tauri build` runs
-      # beforeBuildCommand (tsc --noEmit + vite) first.
+      # tauri.conf.json bundle.targets. beforeBuildCommand (tsc --noEmit +
+      # vite) runs first, resolved against app/frontend's package.json.
+      # The CLI must run from the repo root: it discovers tauri.conf.json in
+      # subfolders, and from app/frontend the sibling src-tauri is invisible
+      # (tauri-cli panics there — verified locally, Plan 36).
       - name: Tauri build
-        working-directory: app/frontend
-        run: npx tauri build --target ${{ matrix.platform.target }}
+        run: app/frontend/node_modules/.bin/tauri build --target ${{ matrix.platform.target }}
 
       - name: Collect artifacts
         uses: actions/upload-artifact@v4

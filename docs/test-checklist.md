@@ -14,7 +14,7 @@
 | P3 | 1GB 索引耗时 / 内存增量 | ≤3s / ≤400MB | **654ms / 峰值RSS 63MB**（全进程 open=建索引+行数；index-floor 64MB） | 补测 | 补测 |
 | P4 | 取块+解码 | ≤16ms P95 | **p50=0.153ms · p95=0.230ms · p99=0.259ms**（cargo bench chunk_at_gb，1000 次随机 600 行窗） | 补测 | 补测 |
 | P5 | 1GB 字面量搜索 | ≤10s | **1513ms**（全进程含 1.69 万命中逐行打印；criterion 纯扫描 ~580ms） | 补测 | 补测 |
-| P6 | Windows 安装包体积 | ≤15MB | 见 §3 | n/a（产物在 CI） | n/a（产物在 CI） |
+| P6 | Windows 安装包体积 | ≤15MB | **5.66 MiB**（NSIS `LumeLog_0.1.0_x64-setup.exe` 5,934,525 B；MSI 8.95 MiB；裸 exe 21,252,608 B，含 wasmi+git2；LZMA 压缩后大幅缩水） | n/a（产物在 CI） | n/a（产物在 CI） |
 
 ### headless 复跑命令（Windows PowerShell，仓库根）
 
@@ -66,9 +66,9 @@ Measure-Command { .\target\release\lumelog.exe search --file "$env:TEMP\bench_1g
 
 ## 3. 发布物
 
-- [ ] `npm run tauri build`（Windows）：NSIS `.exe` + MSI 产出，路径 `target/release/bundle/`
-- [ ] P6：`-setup.exe` 体积 ≤15MB，数字填入 §1
-- [ ] CI（ci.yml，三平台矩阵）：workspace test + clippy -D warnings + 前端 build + vitest 全绿
+- [x] `npm run tauri build`（Windows）：NSIS `.exe` + MSI 产出，路径 `target/release/bundle/`（Plan 36 实测通过；注意 CLI 须从仓库根调用——`app/frontend/node_modules/.bin/tauri`，在 frontend 下跑会 panic，release.yml 已同步修正）
+- [x] P6：`-setup.exe` 体积 ≤15MB，数字填入 §1（5.66 MiB，2026-10-31）
+- [ ] CI（ci.yml，三平台矩阵）：workspace test + clippy -D warnings + 前端 build + vitest 全绿（工作流已就绪，待 Actions 实跑；Gitee 侧是否跑 .github/workflows 取决于仓库镜像）
 - [ ] release.yml（tag 触发）：三平台 bundle 产出；上传 gitee releases 需仓库 token secret（`GITEE_TOKEN`），首次发布须人工授权
 - [ ] 上传动作：**由维护者手动触发/批准**（安全敏感，不在自动流内）
 
