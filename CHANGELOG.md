@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 41 宏绑定快捷键（feat/macro-keys）
+
+**依据：** `docs/specs/2026-10-31-macro-keys-design.md`（同类盘点第一梯队之二）。纯前端，Rust 零改动。
+
+### Task. `macrokeys.ts` + 快捷键弹窗宏分区 + 键盘分发
+**Files:** Create `app/frontend/src/macrokeys.ts`、`macrokeys.test.ts`（4）；Modify `app/frontend/src/keymap-ui.ts`（`KeymapModalOpts` 加 `macros/onMacroSet`；动作行后渲染「宏」分区（录制/清除，无默认键）；`recording` 放宽为 string（宏行 `macro:<名>` 前缀），录制查重跨动作/宏两张表——首版 `actionOwner` 查找漏排除自身已修，`apply(self)` 需 `as ActionId` 收窄）；Modify `app/frontend/src/main.ts`（`macroBindings` 存 `localStorage["lumelog.keymap.macros.v1"]`（宏名 → 规范化 accel，复用 keymap 的 normalize/validate/F3·Ctrl+F 保留规则）；`registerShortcuts` 在动作查空后 `macroForAccel` 命中即 `playMacro(1, ops)`；已保存宏以 `宏：<名>` 进命令面板、hint 显示绑定键；删宏连带删绑定；`openKeymapSettings` 传宏表与持久化回调）。
+**Why:** 绑定不进 config.toml `[keymap]`——Rust 侧按 13 个动作 id 校验会丢弃动态宏名（unknown），且宏本体在 localStorage，绑定随宏走；查重必须跨动作/宏两张表，否则同一键两处抢。
+**验证:** `npx vitest run src/macrokeys.test.ts` 4 pass（坏 accel/保留键/重名 accel 首到先得/空名丢弃/往返；conflictMacro 排除自身；macroForAccel 映射）；`npx tsc --noEmit` 净；`npm test` 212 pass（28 文件，基线 207）+ `npm run build` 通过。
+**未验:** 录制绑定→按键触发宏需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 40 工作区会话恢复（feat/session-restore）
 
 **依据：** `docs/specs/2026-10-31-session-restore-design.md`（同类盘点第一梯队之首；后端 `doc_list` 是运行态查询，跨重启归前端存储）。纯前端，Rust 零改动。
