@@ -110,6 +110,7 @@ pub fn run() {
             commands::git_commit,
             commands::fif_run,
             commands::fif_cancel,
+            commands::csv_run,
             launch::launch_args,
         ])
         .run(tauri::generate_context!())

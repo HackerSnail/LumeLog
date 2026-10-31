@@ -1349,3 +1349,32 @@ export function fifRun(args: {
 export function fifCancel(requestId: number): Promise<void> {
   return call<void>("fif_cancel", { requestId });
 }
+
+// ---- builtin delimited-table view (Plan 45) -------------------------------------
+
+export interface CsvBatch {
+  rows: ParserRow[];
+  /** Column labels when 首行为表头 is on (first batch only). */
+  columns?: string[] | null;
+}
+
+/** Stream the document through the delimiter splitter into the parser dock. */
+export function csvRun(args: {
+  docId: number;
+  delimiter: string;
+  header: boolean;
+  onBatch: (b: CsvBatch) => void;
+  onDone: (s: ParserStats) => void;
+}): Promise<number> {
+  const batchCh = new Channel<CsvBatch>();
+  batchCh.onmessage = args.onBatch;
+  const doneCh = new Channel<ParserStats>();
+  doneCh.onmessage = args.onDone;
+  return call<number>("csv_run", {
+    docId: args.docId,
+    delimiter: args.delimiter,
+    header: args.header,
+    onBatch: batchCh,
+    onDone: doneCh,
+  });
+}

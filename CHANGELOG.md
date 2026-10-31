@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 45 CSV/分隔日志列表视图（feat/csv-view）
+
+**依据：** `docs/specs/2026-10-31-csv-view-design.md`（同类盘点第二梯队之二，复用解析 dock 基建）。core 新模块 + 命令 + dock 扩展。
+
+### Task. `csv.rs` 切分 + `csv_run` 命令 + 解析 dock 内置模式
+**Files:** Create `crates/lumelog-core/src/csv.rs`（`split_line(line, delim)`：RFC 4180 子集——双引号段内分隔符失效、`""` 字面引号、尾 `\r` 去除；首版闭合引号分支用 `chars.next()` 吞掉了后面的分隔符，改 peek 修复）；Modify `app/src-tauri/src/dto.rs`（`CsvBatchJson{rows, columns?}`）、`commands.rs`（`csv_run`：DocLines 流式、首行作表头时首批带列名、列上限 64 超出并入末列、行上限 50 万、空行 skipped、取消共用注册表——首版把借用的 `state` 传进 spawn_blocking 报 E0521，改 `app.state::<AppDocs>()`）、`lib.rs` 注册；Modify `app/frontend/src/ipc.ts`（`csvRun` + `CsvBatch`）、`main.ts`（dock 加分隔符/表头控件行；插件下拉首项「内置：分隔符表格」；`applyParserColumns` 内置分支显隐控件；`onCsvRunClick` 流式推 store、列标签来自表头批或随行宽增长、50 万行上限提示；palette「分隔符表格（CSV/TSV）…」直达）。
+**Why:** 行形状复用 `ParserRowJson{line, cells}`——ParserPanel/RowStore/行号回跳/取消注册表全零改动，内置视图与解析插件共用同一条表格链路；切分进 core 是为了 RFC 4180 规则可脱离 Tauri 单测。
+**验证:** `cargo test -p lumelog-core csv::` 4 pass（普通/空字段、引号段与 `""` 转义、CRLF 尾、Tab/竖线）；`cargo test --workspace` 全绿 + clippy 净；`npx tsc --noEmit` 净；`npm test` 220 pass + `npm run build` 通过。
+**未验:** CSV/TSV 日志进表格、点行回跳的实机链路需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 44 Find in Files：目录级多文件搜索（feat/find-in-files）
 
 **依据：** `docs/specs/2026-10-31-find-in-files-design.md`（同类盘点第二梯队之首）。core 新模块 + 命令 + 前端面板。
