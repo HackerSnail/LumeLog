@@ -19,7 +19,16 @@ import {
   GutterMarker,
   type DecorationSet,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  cursorCharLeft,
+  cursorCharRight,
+  cursorLineDown,
+  cursorLineUp,
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+} from "@codemirror/commands";
 import {
   searchKeymap,
   search,
@@ -46,6 +55,7 @@ import {
   type LineOp,
 } from "./editorops";
 import {
+  classifyMove,
   extractMacroOps,
   extractSymbols,
   lineAtY,
@@ -53,6 +63,7 @@ import {
   MACRO_MAX_OPS,
   OVERVIEW_MAX_LINES,
   type MacroOp,
+  type MoveBy,
   type SymbolItem,
 } from "./editortools";
 
@@ -171,8 +182,13 @@ export interface EditorHandle {
   /** Stop and return the captured op count. */
   stopRecording(): number;
   isRecording(): boolean;
-  /** Replay the recorded macro `times` times from the current cursor. */
-  playMacro(times?: number): void;
+  /** Copy of the last finished macro (empty while recording). */
+  macroOps(): MacroOp[];
+  /**
+   * Replay a macro `times` times from the current cursor — the last recorded
+   * one, or `ops` (a saved macro) when given (Plan 30).
+   */
+  playMacro(times?: number, ops?: MacroOp[]): void;
   /** Toggle the overview strip; returns the new state. */
   setMinimap(on: boolean): boolean;
   isMinimap(): boolean;
@@ -251,12 +267,31 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       {
         capture: (tr) => {
           if (macro === null || macro.length >= MACRO_MAX_OPS) return;
+          // Backspace must replay as a backward delete, not a forward one.
+          const dir = tr.isUserEvent("delete.backward") ? "backward" : "forward";
           tr.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
             if (macro!.length >= MACRO_MAX_OPS) return;
             macro!.push(
-              ...extractMacroOps([{ removed: toA - fromA, inserted: tr.state.sliceDoc(fromB, toB) }]),
+              ...extractMacroOps(
+                [{ removed: toA - fromA, inserted: tr.state.sliceDoc(fromB, toB) }],
+                dir,
+              ),
             );
           });
+        },
+        captureMove: (tr) => {
+          if (macro === null || macro.length >= MACRO_MAX_OPS) return;
+          const before = tr.startState.selection.main.head;
+          const after = tr.state.selection.main.head;
+          if (before === after) return;
+          const bl = tr.startState.doc.lineAt(before);
+          const al = tr.state.doc.lineAt(after);
+          const by = classifyMove(
+            { line: bl.number, col: before - bl.from },
+            { line: al.number, col: after - al.from },
+            al.length,
+          );
+          if (by) macro.push({ kind: "move", by });
         },
         queueOverview: queueOverviewRedraw,
         minimapOn: () => minimapOn,
@@ -387,17 +422,8 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     },
     isWrap: () => wrapOn,
     lineOp: (op: LineOp) => {
-      const { state } = view;
-      const sel = state.selection.main;
-      // Empty selection → the whole document; otherwise the covered lines.
-      const a = sel.empty ? 1 : state.doc.lineAt(sel.from).number;
-      const b = sel.empty ? state.doc.lines : state.doc.lineAt(sel.to).number;
-      const lines: string[] = [];
-      for (let n = a; n <= b; n++) lines.push(state.doc.line(n).text);
-      const out = applyLineOp(lines, op);
-      view.dispatch({
-        changes: { from: state.doc.line(a).from, to: state.doc.line(b).to, insert: out.join("\n") },
-      });
+      if (macro !== null && macro.length < MACRO_MAX_OPS) macro.push({ kind: "line", op });
+      applyLineOpToView(view, op);
     },
     zoomFont: (delta: number) => {
       zoom.size = clampFontSize(zoom.size + delta);
@@ -423,20 +449,26 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       return ops.length;
     },
     isRecording: () => macro !== null,
-    playMacro: (times = 1) => {
-      const ops = recorded;
-      if (ops.length === 0) return;
+    macroOps: () => recorded.slice(),
+    playMacro: (times = 1, ops?: MacroOp[]) => {
+      const list = ops ?? recorded;
+      if (list.length === 0) return;
       for (let t = 0; t < times; t++) {
-        for (const op of ops) {
+        for (const op of list) {
           const cur = view.state.selection.main.head;
           if (op.kind === "insert") {
             view.dispatch({
               changes: { from: cur, insert: op.text },
               selection: { anchor: cur + op.text.length },
             });
+          } else if (op.kind === "delete") {
+            const from = op.dir === "backward" ? Math.max(0, cur - op.count) : cur;
+            const to = op.dir === "backward" ? cur : Math.min(view.state.doc.length, cur + op.count);
+            if (from !== to) view.dispatch({ changes: { from, to } });
+          } else if (op.kind === "move") {
+            applyMove(view, op.by);
           } else {
-            const end = Math.min(view.state.doc.length, cur + op.count);
-            view.dispatch({ changes: { from: cur, to: end } });
+            applyLineOpToView(view, op.op);
           }
         }
       }
@@ -465,6 +497,42 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   };
 }
 
+/** One named line operation over the selection's line range (Plan 27 semantics). */
+function applyLineOpToView(view: EditorView, op: LineOp): void {
+  const { state } = view;
+  const sel = state.selection.main;
+  // Empty selection → the whole document; otherwise the covered lines.
+  const a = sel.empty ? 1 : state.doc.lineAt(sel.from).number;
+  const b = sel.empty ? state.doc.lines : state.doc.lineAt(sel.to).number;
+  const lines: string[] = [];
+  for (let n = a; n <= b; n++) lines.push(state.doc.line(n).text);
+  const out = applyLineOp(lines, op);
+  view.dispatch({
+    changes: { from: state.doc.line(a).from, to: state.doc.line(b).to, insert: out.join("\n") },
+  });
+}
+
+/** Replay one recorded cursor move (Plan 30); plain steps ride CM commands. */
+function applyMove(view: EditorView, by: MoveBy): void {
+  const cmd: Partial<
+    Record<Exclude<MoveBy, "line-start" | "line-end">, (v: EditorView) => boolean>
+  > = {
+    left: cursorCharLeft,
+    right: cursorCharRight,
+    up: cursorLineUp,
+    down: cursorLineDown,
+  };
+  if (by === "line-start" || by === "line-end") {
+    const line = view.state.doc.lineAt(view.state.selection.main.head);
+    view.dispatch({
+      selection: { anchor: by === "line-start" ? line.from : line.to },
+      scrollIntoView: true,
+    });
+    return;
+  }
+  cmd[by]?.(view);
+}
+
 function buildState(
   text: string,
   lang: LanguageSupport | null,
@@ -476,6 +544,7 @@ function buildState(
   onDocChanged: () => void,
   tools: {
     capture(tr: Transaction): void;
+    captureMove(tr: Transaction): void;
     queueOverview(): void;
     minimapOn(): boolean;
   },
@@ -526,21 +595,24 @@ function buildState(
       fontConf.of(fontTheme(zoom.size)),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       EditorView.updateListener.of((u) => {
-        if (u.docChanged) {
-          onDocChanged();
-          // Macro capture (Plan 29): fold user-typed transactions into ops.
-          for (const tr of u.transactions) {
-            if (!tr.docChanged) continue;
-            if (
-              tr.isUserEvent("input.type") ||
-              tr.isUserEvent("input.replace") ||
-              tr.isUserEvent("delete.backward") ||
-              tr.isUserEvent("delete.forward")
-            ) {
-              tools.capture(tr);
-            }
+        // Macro capture (Plan 29/30): fold user edits + cursor moves into ops.
+        // Not gated on u.docChanged — a pure cursor move must be captured too.
+        for (const tr of u.transactions) {
+          if (tr.isUserEvent("input.move") && !tr.docChanged) {
+            tools.captureMove(tr);
+            continue;
+          }
+          if (!u.docChanged || !tr.docChanged) continue;
+          if (
+            tr.isUserEvent("input.type") ||
+            tr.isUserEvent("input.replace") ||
+            tr.isUserEvent("delete.backward") ||
+            tr.isUserEvent("delete.forward")
+          ) {
+            tools.capture(tr);
           }
         }
+        if (u.docChanged) onDocChanged();
         if (u.docChanged || u.viewportChanged || u.geometryChanged) {
           if (tools.minimapOn()) tools.queueOverview();
         }

@@ -1,12 +1,19 @@
-// Pure helpers for the editor tool trio (Plan 29): macro recording,
-// overview-strip bucketing, and symbol extraction. DOM-free so every rule is
-// unit-testable; the CodeMirror glue lives in editor.ts / main.ts.
+// Pure helpers for the editor tools (Plan 29 recording/overview/symbols; Plan
+// 30 macro actions + persistence). DOM-free so every rule is unit-testable;
+// the CodeMirror glue lives in editor.ts / main.ts.
+
+import type { LineOp } from "./editorops";
 
 // ---- macros ------------------------------------------------------------------
 
+/** Named cursor moves recordable in a macro (Plan 30). */
+export type MoveBy = "left" | "right" | "up" | "down" | "line-start" | "line-end";
+
 export type MacroOp =
   | { kind: "insert"; text: string }
-  | { kind: "delete"; count: number };
+  | { kind: "delete"; count: number; dir: "forward" | "backward" }
+  | { kind: "move"; by: MoveBy }
+  | { kind: "line"; op: LineOp };
 
 /** Hard cap so a runaway recording cannot exhaust memory. */
 export const MACRO_MAX_OPS = 10_000;
@@ -18,13 +25,120 @@ export const MACRO_MAX_OPS = 10_000;
  */
 export function extractMacroOps(
   ranges: ReadonlyArray<{ removed: number; inserted: string }>,
+  dir: "forward" | "backward" = "forward",
 ): MacroOp[] {
   const ops: MacroOp[] = [];
   for (const r of ranges) {
-    if (r.removed > 0) ops.push({ kind: "delete", count: r.removed });
+    if (r.removed > 0) ops.push({ kind: "delete", count: r.removed, dir });
     if (r.inserted.length > 0) ops.push({ kind: "insert", text: r.inserted });
   }
   return ops;
+}
+
+/** Head position in line/column terms, fed to `classifyMove`. */
+export interface MoveProbe {
+  /** 1-based line number. */
+  line: number;
+  /** Column within the line (0 = line start). */
+  col: number;
+}
+
+/**
+ * Classify one cursor move from before/after probes. Only single-step moves
+ * are recordable: same-line ±1 col, adjacent line, or Home/End (column jump
+ * to a line boundary). Word jumps, paging, and wrap-boundary moves yield null
+ * (known limitation, spec §1).
+ */
+export function classifyMove(
+  before: MoveProbe,
+  after: MoveProbe,
+  afterLineLen: number,
+): MoveBy | null {
+  if (after.line === before.line) {
+    if (Math.abs(after.col - before.col) === 1) return after.col > before.col ? "right" : "left";
+    if (before.col !== 0 && after.col === 0) return "line-start";
+    if (afterLineLen > 0 && after.col === afterLineLen && before.col < afterLineLen) {
+      return "line-end";
+    }
+    return null;
+  }
+  if (after.line === before.line - 1) return "up";
+  if (after.line === before.line + 1) return "down";
+  return null;
+}
+
+// ---- macro persistence (Plan 30) ----------------------------------------------
+
+export interface NamedMacro {
+  name: string;
+  ops: MacroOp[];
+}
+
+/** Storage guard: at most this many macros per store. */
+export const MACRO_STORE_MAX = 50;
+/** Storage guard: names are truncated to this length. */
+export const MACRO_NAME_MAX = 100;
+
+const MOVE_BYS: readonly MoveBy[] = ["left", "right", "up", "down", "line-start", "line-end"];
+const LINE_OPS: readonly LineOp[] = [
+  "sort-asc",
+  "sort-desc",
+  "dedupe",
+  "reverse",
+  "upper",
+  "lower",
+  "trim",
+  "drop-empty",
+  "join",
+];
+
+function isMacroOp(v: unknown): v is MacroOp {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  if (o.kind === "insert") return typeof o.text === "string";
+  if (o.kind === "delete") {
+    return (
+      typeof o.count === "number" &&
+      o.count > 0 &&
+      (o.dir === "forward" || o.dir === "backward")
+    );
+  }
+  if (o.kind === "move") return MOVE_BYS.includes(o.by as MoveBy);
+  if (o.kind === "line") return LINE_OPS.includes(o.op as LineOp);
+  return false;
+}
+
+export function serializeMacros(macros: readonly NamedMacro[]): string {
+  return JSON.stringify({ v: 1, macros: macros.map((m) => ({ name: m.name, ops: m.ops })) });
+}
+
+/**
+ * Tolerant parse: one bad macro is dropped, not fatal; caps enforced so a
+ * hand-edited or oversized store cannot exhaust memory. Corrupt JSON → [].
+ */
+export function parseMacros(json: string | null): NamedMacro[] {
+  if (!json) return [];
+  let raw: { macros?: unknown };
+  try {
+    raw = JSON.parse(json) as { macros?: unknown };
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.macros)) return [];
+  const out: NamedMacro[] = [];
+  for (const m of raw.macros) {
+    if (out.length >= MACRO_STORE_MAX) break;
+    if (!m || typeof m !== "object") continue;
+    const name = (m as { name?: unknown }).name;
+    const ops = (m as { ops?: unknown }).ops;
+    if (typeof name !== "string" || name.trim() === "" || !Array.isArray(ops)) continue;
+    if (!ops.every(isMacroOp)) continue;
+    out.push({
+      name: name.slice(0, MACRO_NAME_MAX),
+      ops: (ops as MacroOp[]).slice(0, MACRO_MAX_OPS),
+    });
+  }
+  return out;
 }
 
 // ---- overview strip (document map) -------------------------------------------
