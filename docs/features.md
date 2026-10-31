@@ -35,7 +35,8 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
       ↳ Plan 16 `feat/encoding-extension`：`EncodingLabel` 加 4 变体（`as_str`/`from_label` 含 `EUCJP` 等别名/`encoding()` 映射），解码、编码（不可映射仍单字节 `?`）、前端菜单 13 项全链路；检测双 pass——带 `cn` hint 判成 GBK/GB18030 时无 hint 复核、仅采纳 EUC-JP/EUC-KR（探针实测中文样本不受影响），俄文按 chardetng 结果检出 KOI8-U（与 KOI8-R 俄文字节一致）。UTF-32 无 WHATWG/encoding_rs 编码，不做。
 - [x] 编辑器对齐 Notepad++：行操作/换行切换/字号缩放/选区匹配高亮
       ↳ Plan 27 `feat/editor-parity`：命令面板 13 条新命令（行排序升/降、去重、反转、大小写、Trim、去空行、合并为一行——作用于选区行或整篇、单步撤销；切换自动换行并持久化；字体 ±/重置 + Ctrl+滚轮缩放 9–28px）；查找/替换面板（正则/大小写/整词/全部替换）与转到行（Ctrl+G）此前已随 CodeMirror 内建就位。
-      ↳ Plan 28 `feat/bookmarks` 书签栏：Ctrl+F2 切换、F2/Shift-F2 环绕跳转、清除全部（命令面板同款 4 条），gutter 圆点 + 书签行背景，锚点随编辑自动跟行；会话内状态（跨会话持久化按需后续）。列选择模式已随 `rectangularSelection()` 内建（Alt+拖拽）。宏录制、文档地图、函数列表未做（按需立项）。
+      ↳ Plan 28 `feat/bookmarks` 书签栏：Ctrl+F2 切换、F2/Shift-F2 环绕跳转、清除全部（命令面板同款 4 条），gutter 圆点 + 书签行背景，锚点随编辑自动跟行；会话内状态（跨会话持久化按需后续）。列选择模式已随 `rectangularSelection()` 内建（Alt+拖拽）。
+      ↳ Plan 29 `feat/editor-tools` 三件套：宏录制（命令面板开始/停止/播放，相对光标重放）、概览条（右缘 canvas 文档地图，非空行密度 + 视口窗框，点击/拖拽跳行，>50 万行只画视口框）、函数列表（按语法的正则符号表，泛化列表面板过滤 + 跳行；js/ts/python/rust/java/c/markdown/sql，其余语法暂无规则）。
 - [x] 脚本引擎（QuickJS 逐行变换）
 - [x] 脚本引擎（QuickJS 逐行变换）
       ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。

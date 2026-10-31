@@ -5,7 +5,7 @@
 //! handle (the shell owns line-ending write-back), seeded from the core's
 //! detected style so a CRLF file is not silently rewritten to LF (spec §4.4).
 
-import { EditorState, Compartment, StateEffect, StateField } from "@codemirror/state";
+import { EditorState, Compartment, StateEffect, StateField, type Transaction } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -45,6 +45,16 @@ import {
   FONT_BASE,
   type LineOp,
 } from "./editorops";
+import {
+  extractMacroOps,
+  extractSymbols,
+  lineAtY,
+  overviewBuckets,
+  MACRO_MAX_OPS,
+  OVERVIEW_MAX_LINES,
+  type MacroOp,
+  type SymbolItem,
+} from "./editortools";
 
 /** Editor font-size theme fragment (Plan 27 zoom); rebuilt on every step. */
 function fontTheme(px: number) {
@@ -155,6 +165,19 @@ export interface EditorHandle {
   nextBookmark(): boolean;
   prevBookmark(): boolean;
   clearBookmarks(): void;
+  // ---- Plan 29 editor tools ----
+  /** Begin capturing user input transactions; false if already recording. */
+  startRecording(): boolean;
+  /** Stop and return the captured op count. */
+  stopRecording(): number;
+  isRecording(): boolean;
+  /** Replay the recorded macro `times` times from the current cursor. */
+  playMacro(times?: number): void;
+  /** Toggle the overview strip; returns the new state. */
+  setMinimap(on: boolean): boolean;
+  isMinimap(): boolean;
+  /** Symbols of the CURRENT mode (empty when the mode has no rules). */
+  listSymbols(): SymbolItem[];
   destroy(): void;
 }
 
@@ -193,6 +216,12 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   const wrapConf = new Compartment();
   const fontConf = new Compartment();
   let wrapOn = opts.wrap ?? false;
+  // Plan 29 editor tools state.
+  let macro: MacroOp[] | null = null; // non-null while recording
+  let recorded: MacroOp[] = []; // last finished macro
+  let minimapOn = true;
+  let currentMode: ModeId | null = null;
+  let overviewRedrawQueued = false;
   // Language packages load on demand, so a mode switch resolves asynchronously;
   // the token makes a slow early request lose to a later one instead of
   // overwriting it.
@@ -219,8 +248,93 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       zoom,
       opts.wrap ?? false,
       onDocChanged,
+      {
+        capture: (tr) => {
+          if (macro === null || macro.length >= MACRO_MAX_OPS) return;
+          tr.changes.iterChangedRanges((fromA, toA, fromB, toB) => {
+            if (macro!.length >= MACRO_MAX_OPS) return;
+            macro!.push(
+              ...extractMacroOps([{ removed: toA - fromA, inserted: tr.state.sliceDoc(fromB, toB) }]),
+            );
+          });
+        },
+        queueOverview: queueOverviewRedraw,
+        minimapOn: () => minimapOn,
+      },
     ),
     parent: opts.parent,
+  });
+
+  // ---- overview strip (Plan 29) ----------------------------------------------
+
+  const overview = document.createElement("canvas");
+  overview.className = "cm-overview";
+  view.dom.appendChild(overview);
+  const viewDom = view.dom as HTMLElement & { style: CSSStyleDeclaration };
+  viewDom.style.position = "relative";
+
+  function queueOverviewRedraw(): void {
+    if (overviewRedrawQueued || destroyed) return;
+    overviewRedrawQueued = true;
+    requestAnimationFrame(() => {
+      overviewRedrawQueued = false;
+      drawOverview();
+    });
+  }
+
+  function drawOverview(): void {
+    const px = overview.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    overview.width = Math.max(1, Math.trunc(overview.clientWidth * dpr));
+    overview.height = Math.max(1, Math.trunc(px * dpr));
+    const ctx = overview.getContext("2d");
+    if (!ctx || px <= 0) return;
+    const d = view.state.doc;
+    const total = d.lines;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, overview.clientWidth, px);
+    if (total > OVERVIEW_MAX_LINES) return; // guard: viewport frame only
+    const buckets = overviewBuckets(total, px);
+    const w = overview.clientWidth;
+    for (const [from, to] of buckets) {
+      // Non-empty line ratio → intensity; blank runs show as background.
+      let nonEmpty = 0;
+      for (let n = from; n <= to; n++) if (d.line(n).text.trim() !== "") nonEmpty++;
+      const ratio = nonEmpty / Math.max(1, to - from + 1);
+      const yTop = ((from - 1) / total) * px;
+      const yH = Math.max(1, ((to - from + 1) / total) * px);
+      ctx.fillStyle = `rgba(128,140,155,${0.25 + ratio * 0.55})`;
+      ctx.fillRect(0, yTop, w, yH);
+    }
+    // Viewport window.
+    const ranges = view.visibleRanges;
+    if (ranges.length > 0) {
+      const yTop = ((d.lineAt(ranges[0]!.from).number - 1) / total) * px;
+      const yBot = (d.lineAt(ranges[ranges.length - 1]!.to).number / total) * px;
+      ctx.fillStyle = "rgba(47,111,235,0.22)";
+      ctx.fillRect(0, yTop, w, Math.max(2, yBot - yTop));
+    }
+  }
+
+  function overviewJump(clientY: number): void {
+    const rect = overview.getBoundingClientRect();
+    const line = lineAtY(clientY - rect.top, rect.height, view.state.doc.lines);
+    const ln = view.state.doc.line(Math.max(1, Math.min(line, view.state.doc.lines)));
+    view.dispatch({
+      selection: { anchor: ln.from },
+      effects: EditorView.scrollIntoView(ln.from, { y: "center" }),
+    });
+  }
+  overview.addEventListener("pointerdown", (e) => {
+    overview.setPointerCapture(e.pointerId);
+    overviewJump(e.clientY);
+    const move = (ev: PointerEvent) => overviewJump(ev.clientY);
+    const up = () => {
+      overview.removeEventListener("pointermove", move);
+      overview.removeEventListener("pointerup", up);
+    };
+    overview.addEventListener("pointermove", move);
+    overview.addEventListener("pointerup", up);
   });
 
   return {
@@ -241,6 +355,7 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       opts.onDirty?.();
     },
     setMode: (mode: ModeId | null) => {
+      currentMode = mode;
       const token = ++modeToken;
       void resolveLanguage(mode).then((next) => {
         if (destroyed || token !== modeToken) return;
@@ -296,6 +411,53 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
     nextBookmark: () => nextBookmarkCmd(view),
     prevBookmark: () => prevBookmarkCmd(view),
     clearBookmarks: () => void clearBookmarksCmd(view),
+    startRecording: () => {
+      if (macro !== null) return false;
+      macro = [];
+      return true;
+    },
+    stopRecording: () => {
+      const ops = macro ?? [];
+      recorded = ops;
+      macro = null;
+      return ops.length;
+    },
+    isRecording: () => macro !== null,
+    playMacro: (times = 1) => {
+      const ops = recorded;
+      if (ops.length === 0) return;
+      for (let t = 0; t < times; t++) {
+        for (const op of ops) {
+          const cur = view.state.selection.main.head;
+          if (op.kind === "insert") {
+            view.dispatch({
+              changes: { from: cur, insert: op.text },
+              selection: { anchor: cur + op.text.length },
+            });
+          } else {
+            const end = Math.min(view.state.doc.length, cur + op.count);
+            view.dispatch({ changes: { from: cur, to: end } });
+          }
+        }
+      }
+    },
+    setMinimap: (on: boolean) => {
+      minimapOn = on;
+      overview.style.display = on ? "" : "none";
+      if (on) queueOverviewRedraw();
+      return minimapOn;
+    },
+    isMinimap: () => minimapOn,
+    listSymbols: () =>
+      extractSymbols(
+        Array.from({ length: view.state.doc.lines }, (_, i) => {
+          const line = view.state.doc.line(i + 1);
+          return { n: i + 1, text: line.text };
+        }),
+        typeof currentMode === "string" && !currentMode.startsWith("plugin:")
+          ? currentMode
+          : null,
+      ),
     destroy: () => {
       destroyed = true; // a language still in flight must not touch a dead view
       view.destroy();
@@ -312,6 +474,11 @@ function buildState(
   zoom: { size: number },
   wrap: boolean,
   onDocChanged: () => void,
+  tools: {
+    capture(tr: Transaction): void;
+    queueOverview(): void;
+    minimapOn(): boolean;
+  },
 ): EditorState {
   return EditorState.create({
     doc: text,
@@ -359,7 +526,24 @@ function buildState(
       fontConf.of(fontTheme(zoom.size)),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       EditorView.updateListener.of((u) => {
-        if (u.docChanged) onDocChanged();
+        if (u.docChanged) {
+          onDocChanged();
+          // Macro capture (Plan 29): fold user-typed transactions into ops.
+          for (const tr of u.transactions) {
+            if (!tr.docChanged) continue;
+            if (
+              tr.isUserEvent("input.type") ||
+              tr.isUserEvent("input.replace") ||
+              tr.isUserEvent("delete.backward") ||
+              tr.isUserEvent("delete.forward")
+            ) {
+              tools.capture(tr);
+            }
+          }
+        }
+        if (u.docChanged || u.viewportChanged || u.geometryChanged) {
+          if (tools.minimapOn()) tools.queueOverview();
+        }
       }),
     ],
   });

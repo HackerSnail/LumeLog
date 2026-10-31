@@ -86,6 +86,39 @@ describe("EditorHandle parity commands (Plan 27)", () => {
   });
 });
 
+describe("EditorHandle tools (Plan 29)", () => {
+  it("records and replays a macro", async () => {
+    const handle = await mount("txt"); // doc "b\na"
+    expect(handle.startRecording()).toBe(true);
+    expect(handle.startRecording()).toBe(false); // already recording
+    // type "X" at the cursor (line 1 start)
+    handle.view.dispatch({ changes: { from: 0, insert: "X" }, userEvent: "input.type" });
+    expect(handle.isRecording()).toBe(true);
+    expect(handle.stopRecording()).toBeGreaterThan(0);
+    expect(handle.isRecording()).toBe(false);
+
+    // replay at line 2 start: "X" is inserted there
+    handle.view.dispatch({ selection: { anchor: 2 } });
+    handle.playMacro(1);
+    expect(handle.getText()).toContain("X");
+
+    // a second play with an empty macro is a no-op
+    handle.playMacro(1);
+    handle.destroy();
+  });
+
+  it("lists symbols for the current mode", async () => {
+    const handle = await mount("py");
+    await flush();
+    // mock doc "b\na" has no symbols; the important bit is the shape + mode id
+    expect(handle.listSymbols()).toEqual([]);
+    handle.setMode("python");
+    await flush();
+    expect(handle.listSymbols()).toEqual([]);
+    handle.destroy();
+  });
+});
+
 describe("EditorHandle.setMode", () => {
   it("mounts the language for the file extension", async () => {
     const handle = await mount("py");

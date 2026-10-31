@@ -1234,6 +1234,18 @@ html.has-custom-titlebar .win-btns {
 .cm-bookmarked-line {
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
+/* Overview strip (Plan 29): document map overlay on the editor's right edge. */
+.cm-overview {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 36px;
+  z-index: 8;
+  cursor: pointer;
+  border-left: 1px solid var(--border-soft);
+  background: var(--bg-subtle);
+}
 /* Text layer (Plan 26): minimal pdf.js text-layer CSS — transparent text the
  * browser can select; pdfjs 6 does not inject styles by itself. */
 .textLayer {

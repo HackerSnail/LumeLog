@@ -3383,6 +3383,56 @@ function buildCommands(): Command[] {
     { id: "bookmark-next", title: "书签：下一条", run: () => activeEditor()?.nextBookmark() },
     { id: "bookmark-prev", title: "书签：上一条", run: () => activeEditor()?.prevBookmark() },
     { id: "bookmark-clear", title: "书签：清除全部", run: () => activeEditor()?.clearBookmarks() },
+    {
+      id: "macro-start",
+      title: "宏：开始录制",
+      run: () => {
+        const h = activeEditor();
+        if (!h) return;
+        toastMsg(h.startRecording() ? "开始录制宏" : "已在录制中");
+      },
+    },
+    {
+      id: "macro-stop",
+      title: "宏：停止录制",
+      run: () => {
+        const h = activeEditor();
+        if (!h) return;
+        toastMsg(`已停止录制（${h.stopRecording()} 个操作）`);
+      },
+    },
+    { id: "macro-play", title: "宏：播放", run: () => activeEditor()?.playMacro(1) },
+    {
+      id: "minimap",
+      title: "切换概览条（文档地图）",
+      run: () => {
+        const h = activeEditor();
+        if (h) toastMsg(h.setMinimap(!h.isMinimap()) ? "概览条：开" : "概览条：关");
+      },
+    },
+    {
+      id: "symbol-list",
+      title: "函数列表…",
+      run: () => {
+        const h = activeEditor();
+        if (!h) return;
+        const symbols = h.listSymbols();
+        if (symbols.length === 0) {
+          toastMsg("当前语法没有符号规则");
+          return;
+        }
+        openCommandList(
+          "过滤符号…",
+          symbols.map((s) => ({
+            id: `sym-${s.line}-${s.name}`,
+            title: s.name,
+            hint: `行 ${s.line} · ${s.kind}`,
+            run: () => h.revealLine(s.line),
+          })),
+          "symbols",
+        );
+      },
+    },
     { id: "mf4", title: "测量数据…", run: () => void openMf4File() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
@@ -3393,27 +3443,39 @@ function buildCommands(): Command[] {
 
 /** Ctrl+Shift+P palette: a fuzzy-filtered, keyboard-navigable command list. */
 function openPalette(): void {
-  const already = document.getElementById("palette");
+  openCommandList("输入命令…", buildCommands(), "palette");
+}
+
+
+/**
+ * Generic fuzzy-filtered list overlay (palette + function list share it).
+ * `domId` lets an already-open instance just reclaim focus.
+ */
+function openCommandList(
+  placeholder: string,
+  cmds: Command[],
+  domId: string,
+): void {
+  const already = document.getElementById(domId);
   if (already) {
     (already.querySelector("input") as HTMLInputElement | null)?.focus();
     return;
   }
   const overlay = document.createElement("div");
-  overlay.id = "palette";
+  overlay.id = domId;
   overlay.className = "palette-overlay";
   const box = document.createElement("div");
   box.className = "palette-box";
   const input = document.createElement("input");
   input.type = "text";
   input.className = "palette-input";
-  input.placeholder = "输入命令…";
+  input.placeholder = placeholder;
   const list = document.createElement("div");
   list.className = "palette-list";
   box.append(input, list);
   overlay.append(box);
   document.getElementById("app")?.append(overlay);
 
-  const cmds = buildCommands();
   let view: Command[] = filterCommands("", cmds);
   let sel = 0;
 
