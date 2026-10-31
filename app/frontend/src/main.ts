@@ -122,6 +122,7 @@ import {
 } from "./shell";
 import { filterCommands, type Command } from "./palette";
 import { parseBookmarkStore, serializeBookmarkStore, type BookmarkStore } from "./bookmarks-store";
+import { macroForAccel, parseMacroBindings, serializeMacroBindings, type MacroBindings } from "./macrokeys";
 import { normalizeSession, parseSession, serializeSession } from "./session";
 import {
   addTag,
@@ -2279,6 +2280,25 @@ let tagStore: TagStore = (() => {
   }
 })();
 
+// ---- macro keyboard bindings (Plan 41) ---------------------------------------
+
+const MACRO_BIND_KEY = "lumelog.keymap.macros.v1";
+let macroBindings: MacroBindings = (() => {
+  try {
+    return parseMacroBindings(localStorage.getItem(MACRO_BIND_KEY));
+  } catch {
+    return {};
+  }
+})();
+
+function persistMacroBindings(): void {
+  try {
+    localStorage.setItem(MACRO_BIND_KEY, serializeMacroBindings(macroBindings));
+  } catch {
+    /* storage unavailable: bindings stay session-only */
+  }
+}
+
 function persistTags(): void {
   try {
     localStorage.setItem(TAG_KEY, serializeTagStore(tagStore));
@@ -3670,6 +3690,13 @@ function openKeymapSettings(): void {
     bindings: keymapState.bindings,
     onSet: applyKeymap,
     onResetAll: resetKeymapAll,
+    macros: savedMacros.map((m) => ({ name: m.name, accel: macroBindings[m.name] ?? "" })),
+    onMacroSet: async (name, accel) => {
+      if (accel === null || accel === "") delete macroBindings[name];
+      else macroBindings[name] = accel;
+      persistMacroBindings();
+      return { ...macroBindings };
+    },
     onClose: () => {
       keymapModalOpen = false;
     },
@@ -3788,6 +3815,13 @@ function buildCommands(): Command[] {
       },
     },
     { id: "macro-play", title: "宏：播放", run: () => activeEditor()?.playMacro(1) },
+    // Plan 41: each saved macro as a palette command, hint = bound key (if any).
+    ...savedMacros.map((m) => ({
+      id: `macro-cmd-${m.name}`,
+      title: `宏：${m.name}`,
+      hint: macroBindings[m.name],
+      run: () => activeEditor()?.playMacro(1, m.ops),
+    })),
     {
       id: "macro-play-times",
       title: "宏：重复播放 N 次…",
@@ -3877,6 +3911,10 @@ function buildCommands(): Command[] {
             title: m.name,
             run: () => {
               savedMacros = savedMacros.filter((x) => x.name !== m.name);
+              if (macroBindings[m.name]) {
+                delete macroBindings[m.name];
+                persistMacroBindings();
+              }
               persistMacros();
               toastMsg(`已删除宏「${m.name}」`);
             },
@@ -4073,7 +4111,16 @@ function registerShortcuts(): void {
     const accel = eventToAccel(e);
     if (!accel) return;
     const action = keymapState.accelToAction[accel];
-    if (!action) return;
+    if (!action) {
+      // Plan 41: a macro binding is the last dispatcher after the fixed actions.
+      const macroName = macroForAccel(accel, macroBindings);
+      const macro = macroName ? savedMacros.find((m) => m.name === macroName) : undefined;
+      if (macro) {
+        e.preventDefault();
+        activeEditor()?.playMacro(1, macro.ops);
+      }
+      return;
+    }
     const def = ACTION_DEFS.find((d) => d.id === action);
     if (!def) return;
     e.preventDefault();

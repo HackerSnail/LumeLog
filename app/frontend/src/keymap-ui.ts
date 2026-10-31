@@ -1,7 +1,8 @@
 //! Keyboard-shortcut settings modal (spec §5, M3 子项目 C). Owns the DOM and
 //! the recording state machine; persistence is delegated to the caller through
 //! `onSet`/`onResetAll` so this module never talks to IPC directly.
-import { conflictOf, eventToAccel, validate, type ActionId } from "./keymap";
+import { eventToAccel, validate, type ActionId } from "./keymap";
+import { conflictMacro } from "./macrokeys";
 import { isIMEEvent } from "./shell";
 
 export interface KeymapModalOpts {
@@ -11,6 +12,10 @@ export interface KeymapModalOpts {
   onSet: (id: ActionId, accel: string | null) => Promise<Partial<Record<ActionId, string>>>;
   /** Reset everything and return the freshly merged table. */
   onResetAll: () => Promise<Partial<Record<ActionId, string>>>;
+  /** Saved macros + current bindings (Plan 41); absent → no macro section. */
+  macros?: { name: string; accel: string }[];
+  /** Persist one macro binding (null = unbind) and return the fresh table. */
+  onMacroSet?: (name: string, accel: string | null) => Promise<Record<string, string>>;
   onClose: (changed: boolean) => void;
 }
 
@@ -27,9 +32,13 @@ function el<K extends keyof HTMLElementTagNameMap>(
 
 export function openKeymapModal(opts: KeymapModalOpts): void {
   let local: Partial<Record<ActionId, string>> = { ...opts.bindings };
+  // Macro rows use a `macro:<name>` recording id; errors share the key space.
+  let macroLocal: Record<string, string> = Object.fromEntries(
+    (opts.macros ?? []).map((m) => [m.name, m.accel]),
+  );
   let changed = false;
-  let recording: ActionId | null = null;
-  const errors: Partial<Record<ActionId, string>> = {};
+  let recording: string | null = null;
+  const errors: Record<string, string> = {};
   const titleOf = (id: string): string =>
     opts.actions.find((a) => a.id === id)?.title ?? id;
 
@@ -70,6 +79,22 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
     render();
   };
 
+  const applyMacro = async (name: string, accel: string | null): Promise<void> => {
+    const key = `macro:${name}`;
+    let next: Record<string, string>;
+    try {
+      next = (await opts.onMacroSet?.(name, accel)) ?? {};
+    } catch {
+      errors[key] = "保存失败，请重试";
+      render();
+      return;
+    }
+    macroLocal = { ...next };
+    changed = true;
+    delete errors[key];
+    render();
+  };
+
   const render = (): void => {
     rows.textContent = "";
     for (const a of opts.actions) {
@@ -97,11 +122,41 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
       row.append(name, acc, err, rec, clr, def);
       rows.append(row);
     }
+    if (opts.macros) {
+      rows.append(el("div", "keymap-section", "宏"));
+      if (opts.macros.length === 0) {
+        rows.append(el("div", "keymap-note", "还没有已保存的宏（先录制并保存一个宏）"));
+      }
+      for (const m of opts.macros) {
+        const key = `macro:${m.name}`;
+        const row = el("div", "keymap-row");
+        row.dataset.macro = m.name;
+        const name = el("span", "keymap-name", `宏：${m.name}`);
+        const acc = el("span", "keymap-accel", macroLocal[m.name] || "未绑定");
+        const err = el("span", "keymap-error", errors[key] ?? "");
+        const rec = el(
+          "button",
+          "keymap-record",
+          key === recording ? "录制中…（Esc 取消）" : "录制",
+        );
+        rec.addEventListener("click", () => {
+          recording = key;
+          delete errors[key];
+          render();
+        });
+        const clr = el("button", "keymap-clear", "清除");
+        clr.title = "解绑";
+        clr.addEventListener("click", () => void applyMacro(m.name, ""));
+        row.append(name, acc, err, rec, clr);
+        rows.append(row);
+      }
+    }
     if (recording) {
-      const btn = rows.querySelector<HTMLButtonElement>(
-        `[data-action="${recording}"] .keymap-record`,
-      );
-      btn?.focus();
+      const [kind, id] = recording.startsWith("macro:")
+        ? ["macro", recording.slice(6)]
+        : ["action", recording];
+      const sel = kind === "macro" ? `[data-macro="${id}"]` : `[data-action="${id}"]`;
+      rows.querySelector<HTMLButtonElement>(`${sel} .keymap-record`)?.focus();
     }
   };
 
@@ -132,14 +187,25 @@ export function openKeymapModal(opts: KeymapModalOpts): void {
       render();
       return;
     }
-    const other = conflictOf(accel, local, self);
-    if (other) {
-      errors[self] = `已绑定给《${titleOf(other)}》`;
+    // Dup check spans BOTH tables: an action row may collide with a macro
+    // binding and vice versa (Plan 41).
+    const isMacroRow = self.startsWith("macro:");
+    const macroName = isMacroRow ? self.slice(6) : "";
+    const actionOwner = Object.entries(local).find(([id, a]) => a === accel && id !== self)?.[0];
+    const macroOwner = conflictMacro(accel, macroLocal, macroName);
+    let conflictTitle: string | null = null;
+    if (isMacroRow && actionOwner) conflictTitle = titleOf(actionOwner);
+    else if (isMacroRow && macroOwner) conflictTitle = `宏 ${macroOwner}`;
+    else if (!isMacroRow && actionOwner) conflictTitle = titleOf(actionOwner);
+    else if (!isMacroRow && macroOwner) conflictTitle = `宏 ${macroOwner}`;
+    if (conflictTitle) {
+      errors[self] = `已绑定给《${conflictTitle}》`;
       render();
       return;
     }
     recording = null;
-    void apply(self, accel);
+    if (isMacroRow) void applyMacro(macroName, accel);
+    else void apply(self as ActionId, accel);
   };
 
   const resetAll = el("button", "keymap-reset-all", "全部恢复默认");
