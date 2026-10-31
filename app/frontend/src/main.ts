@@ -1974,6 +1974,26 @@ async function initRecovery(): Promise<void> {
   if (recoveryOn) void checkRecovery();
 }
 
+// ---- editor parity commands (Plan 27: line ops / wrap / font zoom) ----------
+
+let editorWrapOn = loadFlag("lumelog.ui.wrap", true);
+
+function activeEditor() {
+  const a = tabs.active();
+  return a ? editors.get(a.info.docId) : undefined;
+}
+
+function toggleEditorWrap(): void {
+  editorWrapOn = !editorWrapOn;
+  try {
+    localStorage.setItem("lumelog.ui.wrap", editorWrapOn ? "1" : "0");
+  } catch {
+    /* private mode: session-only */
+  }
+  activeEditor()?.setWrap(editorWrapOn);
+  toastMsg(editorWrapOn ? "自动换行：开" : "自动换行：关");
+}
+
 // ---- syntax plugins (plugin interface, increment 1) -------------------------
 
 /** Plugin loads replace the whole registry, so overlapping calls are merged. */
@@ -2302,6 +2322,7 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
     parent: tabsEl,
     info,
     ext: extOf(path),
+    wrap: editorWrapOn,
     onDirty: () => tabs.refreshDirty(info.docId),
     // onDirty fires once per dirty cycle; every edit must re-arm the 2s timer.
     onEdit: () => scheduleRecovery(info.docId),
@@ -3345,6 +3366,19 @@ function buildCommands(): Command[] {
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "script", title: "脚本…", run: () => openScriptManager() },
     { id: "reload-plugins", title: "重载语法插件", run: () => void initSyntaxPlugins() },
+    { id: "wrap", title: "切换自动换行", run: toggleEditorWrap },
+    { id: "font-in", title: "放大编辑器字体", run: () => activeEditor()?.zoomFont(1) },
+    { id: "font-out", title: "缩小编辑器字体", run: () => activeEditor()?.zoomFont(-1) },
+    { id: "font-reset", title: "重置编辑器字体", run: () => activeEditor()?.fontReset() },
+    { id: "sort-asc", title: "行排序（升序）", run: () => activeEditor()?.lineOp("sort-asc") },
+    { id: "sort-desc", title: "行排序（降序）", run: () => activeEditor()?.lineOp("sort-desc") },
+    { id: "dedupe", title: "行去重", run: () => activeEditor()?.lineOp("dedupe") },
+    { id: "reverse-lines", title: "行反转", run: () => activeEditor()?.lineOp("reverse") },
+    { id: "upper", title: "转大写", run: () => activeEditor()?.lineOp("upper") },
+    { id: "lower", title: "转小写", run: () => activeEditor()?.lineOp("lower") },
+    { id: "trim", title: "Trim 行首尾空格", run: () => activeEditor()?.lineOp("trim") },
+    { id: "drop-empty", title: "删除空行", run: () => activeEditor()?.lineOp("drop-empty") },
+    { id: "join-lines", title: "合并为一行", run: () => activeEditor()?.lineOp("join") },
     { id: "mf4", title: "测量数据…", run: () => void openMf4File() },
     { id: "theme-light", title: "主题：浅色", run: () => theme.set("light") },
     { id: "theme-dark", title: "主题：暗黑", run: () => theme.set("dark") },
