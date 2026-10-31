@@ -84,6 +84,7 @@ import {
   viewerPdfBytes,
   gitInit,
   gitProbe,
+  gitCommit,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
 import { PdfView, clampPage, stepZoom } from "./pdfview";
@@ -593,6 +594,83 @@ async function fillGitSection(path: string): Promise<void> {
     row.append(k, v);
     box.append(row);
   }
+  // 有改动才给提交入口；干净文件没有可提交的内容
+  if (info.file_status) {
+    box.append(commitButton(path, info.identity));
+  }
+}
+
+function commitButton(path: string, identity?: { name: string; email: string }): HTMLElement {
+  const btn = document.createElement("button");
+  btn.className = "insp-git-init";
+  btn.textContent = "暂存并提交…";
+  btn.addEventListener("click", () => openCommitDialog(path, identity));
+  return btn;
+}
+
+/** Minimal commit dialog (Plan 35): message + optional author fields. */
+function openCommitDialog(path: string, identity?: { name: string; email: string }): void {
+  if (document.getElementById("commit-dialog")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "commit-dialog";
+  overlay.className = "palette-overlay";
+  const box = document.createElement("div");
+  box.className = "palette-box commit-box";
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.textContent = "暂存并提交当前文件";
+  const msg = document.createElement("textarea");
+  msg.className = "commit-msg";
+  msg.placeholder = "提交信息（必填）";
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "commit-field";
+  name.placeholder = "作者姓名（留空用 git 配置）";
+  name.value = identity?.name ?? "";
+  const email = document.createElement("input");
+  email.type = "text";
+  email.className = "commit-field";
+  email.placeholder = "作者邮箱（留空用 git 配置）";
+  email.value = identity?.email ?? "";
+  const row = document.createElement("div");
+  row.className = "commit-actions";
+  const cancel = document.createElement("button");
+  cancel.className = "insp-git-init";
+  cancel.textContent = "取消";
+  const submit = document.createElement("button");
+  submit.className = "insp-git-init";
+  submit.textContent = "提交";
+  row.append(cancel, submit);
+  box.append(title, msg, name, email, row);
+  overlay.append(box);
+  document.getElementById("app")?.append(overlay);
+  const close = (): void => overlay.remove();
+  cancel.addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+  submit.addEventListener("click", () => {
+    const message = msg.value.trim();
+    if (!message) {
+      toastMsg("提交信息不能为空");
+      return;
+    }
+    const n = name.value.trim();
+    const m = email.value.trim();
+    submit.disabled = true;
+    void gitCommit(path, message, n || undefined, m || undefined)
+      .then((hash) => {
+        close();
+        toastMsg(`已提交 ${hash}`);
+        gitProbeToken++;
+        void fillGitSection(path);
+      })
+      .catch((err) => {
+        submit.disabled = false;
+        reportError(err);
+      });
+  });
+  msg.focus();
 }
 
 let gitProbeToken = 0;

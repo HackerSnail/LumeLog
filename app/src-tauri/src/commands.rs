@@ -2436,14 +2436,14 @@ mod can_parse_tests {
     }
 }
 
-// ---- inspector git section (Plan 34) ----------------------------------------
+// ---- inspector git section (Plan 34/35) -------------------------------------
 
-/// Probe the git repo around `path` (read-only; runs the system git CLI).
+/// Probe the git repo around `path` (read-only, built-in libgit2).
 #[tauri::command]
 pub fn git_probe(path: String) -> Result<crate::gitinfo::GitInfo, IpcError> {
     let p = Path::new(&path);
     let dir = p.parent().unwrap_or_else(|| Path::new("."));
-    Ok(crate::gitinfo::git_probe(dir, &path))
+    Ok(crate::gitinfo::git_probe(dir, p))
 }
 
 /// `git init` in the directory containing `path` (user-confirmed in the UI).
@@ -2451,5 +2451,24 @@ pub fn git_probe(path: String) -> Result<crate::gitinfo::GitInfo, IpcError> {
 pub fn git_init(path: String) -> Result<String, IpcError> {
     let p = Path::new(&path);
     let dir = p.parent().unwrap_or_else(|| Path::new("."));
-    crate::gitinfo::git_init(dir).map_err(|e| IpcError::new("git", e))
+    crate::gitinfo::git_init(dir).map_err(|e| IpcError::new("git", e.to_string()))?;
+    Ok("已创建".to_string())
+}
+
+/// Stage `path` and commit the whole index (Plan 35). Identity: params →
+/// repo/global config.
+#[tauri::command]
+pub fn git_commit(
+    path: String,
+    message: String,
+    name: Option<String>,
+    email: Option<String>,
+) -> Result<String, IpcError> {
+    crate::gitinfo::git_stage_and_commit(
+        Path::new(&path),
+        &message,
+        name.as_deref(),
+        email.as_deref(),
+    )
+    .map_err(|e| IpcError::new("git", e))
 }

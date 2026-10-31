@@ -1270,10 +1270,11 @@ export interface GitInfo {
   branch?: string;
   file_status?: string;
   last_commit?: GitLastCommit;
+  identity?: { name: string; email: string };
   unavailable?: string;
 }
 
-/** Probe the git repo around `path` (read-only, system git CLI). */
+/** Probe the git repo around `path` (read-only, built-in libgit2). */
 export function gitProbe(path: string): Promise<GitInfo> {
   return call<GitInfo>("git_probe", { path });
 }
@@ -1281,4 +1282,14 @@ export function gitProbe(path: string): Promise<GitInfo> {
 /** `git init` in the directory containing `path` (UI confirms first). */
 export function gitInit(path: string): Promise<string> {
   return call<string>("git_init", { path });
+}
+
+/** Stage `path` and commit the whole index (Plan 35). */
+export function gitCommit(
+  path: string,
+  message: string,
+  name?: string,
+  email?: string,
+): Promise<string> {
+  return call<string>("git_commit", { path, message, name, email });
 }

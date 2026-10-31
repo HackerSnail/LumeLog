@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 35 Git 内置化（git2）+ 暂存并提交（feat/git-commit）
+
+**依据：** `docs/specs/2026-10-31-git-commit-design.md`（用户点名：做 add/commit 且要内置 git）。`gitinfo.rs` 重写，命令层/前端扩展。
+
+### Task. `gitinfo.rs` 换 git2 + `git_commit` 命令 + 提交对话框
+**Files:** Modify `app/src-tauri/Cargo.toml`（`git2 = "0.20"`，libgit2 编译期内置）；Rewrite `app/src-tauri/src/gitinfo.rs`（探测走 `Repository::discover`；分支：head() shorthand，空仓库经 HEAD 符号目标抠 `refs/heads/<名>`，分离 HEAD 特判；文件状态 `status_file` 标志位 → 纯函数 `status_label`（暂存列优先，叠加未暂存改动时缀「另有…」）；最近提交 revwalk 逐提交比对该路径在父树中的 oid；`identity` 带出仓库/全局配置的 user.name/email；`git_stage_and_commit`：index add 当前文件 → write_tree → HEAD 为父（空仓库无父）`commit(Some("HEAD"),…)`，身份解析 纯函数 `resolve_identity`（显式参数 → 配置 → 报「缺少提交者身份」；姓名邮箱只填一半整体回退配置）；CLI 版 porcelain 解码与 run_git 全部删除）；Modify `app/src-tauri/src/commands.rs`（`git_commit` 命令，git_init 返回值适配）、`lib.rs` 注册；Modify `app/frontend/src/ipc.ts`（`identity` 字段 + `gitCommit` 封装）；Modify `app/frontend/src/main.ts`（file_status 非空时 Git 小节给「暂存并提交…」按钮；`openCommitDialog` 遮罩对话框：信息 textarea 必填 + 姓名/邮箱预填 identity，成功 toast 短 hash 并刷新小节）；Modify `app/frontend/src/styles.css`（`.commit-box/.commit-msg/.commit-field/.commit-actions`）。
+**Why:** 内置 git 按用户要求换 libgit2——不依赖 PATH、错误结构化（不再解析 CLI 文本）；身份解析抽纯函数是因为集成测试会被开发机全局 git 配置污染，显式/配置/缺省三档只能单测。
+**验证:** `cargo test -p lumelog-app gitinfo::` 3 pass（status_label 各组合；tempdir 集成 init→探测未跟踪→显式身份提交→状态转干净 + last_commit 命中新提交；resolve_identity 三档）；`cargo test --workspace` 全绿（14 个 result 全 ok）+ `clippy --workspace --all-targets -D warnings` 净；`npx tsc --noEmit` 净；`npm test` 196 pass + `npm run build` 通过。体积账：release `lumelog-app.exe` 18,904,576 → 20,553,728（git2 约 +1.6MB）。
+**未验:** 真实仓库提交后与外部 git log/status 核对、对话框观感需 `npm run tauri dev` 人工过；libgit2 不跑钩子、不支持 GPG 签名（spec §3）。
+
 ## 2026-10-31 — Plan 34 检查器 Git 小节：仓库探测 / 初始化（feat/inspector-git）
 
 **依据：** `docs/specs/2026-10-31-git-inspector-design.md`（NoteLume 检查器 Git 块对齐，用户在 Plan 33 后点名）。新增 Rust 模块，前端接线。

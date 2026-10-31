@@ -93,6 +93,7 @@ pub fn run() {
             commands::recovery_set_enabled,
             commands::git_probe,
             commands::git_init,
+            commands::git_commit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");
