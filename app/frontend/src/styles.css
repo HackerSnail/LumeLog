@@ -1182,10 +1182,16 @@ html.has-custom-titlebar .win-btns {
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
 }
-/* PDF render host (Plan 22): scrollable, canvas centered on a page-like card. */
-.pdf-host {
+/* PDF render host (Plan 22): scrollable, canvas centered on a page-like card.
+ * Plan 26 wraps thumbs + host in a horizontal `.pdf-body` row. */
+.pdf-body {
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+}
+.pdf-host {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: auto;
   display: flex;
   justify-content: center;
@@ -1213,6 +1219,74 @@ html.has-custom-titlebar .win-btns {
 .pdf-hit-current {
   background: color-mix(in srgb, #f2820a 55%, transparent);
   outline: 1px solid #c46a00;
+}
+/* Text layer (Plan 26): minimal pdf.js text-layer CSS — transparent text the
+ * browser can select; pdfjs 6 does not inject styles by itself. */
+.textLayer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  line-height: 1;
+  text-align: initial;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  opacity: 1;
+}
+.textLayer span,
+.textLayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+.textLayer ::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: -1;
+  cursor: default;
+  user-select: none;
+}
+/* Thumbnail rail (Plan 26). */
+.pdf-thumbs {
+  flex: 0 0 96px;
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-soft);
+  background: var(--bg-subtle);
+  padding: 6px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+}
+.pdf-thumb {
+  cursor: pointer;
+  border: 2px solid transparent;
+  border-radius: 2px;
+  padding: 2px;
+  text-align: center;
+}
+.pdf-thumb:hover {
+  background: var(--bg-hover);
+}
+.pdf-thumb-current {
+  border-color: var(--accent);
+}
+.pdf-thumb canvas {
+  display: block;
+  background: #fff;
+  box-shadow: 0 0 2px var(--shadow);
+}
+.pdf-thumb-label {
+  font-size: 11px;
+  color: var(--muted);
 }
 /* Parser plugin console output (script-console cap: 200 lines). */
 .parser-console {

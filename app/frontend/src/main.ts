@@ -986,6 +986,8 @@ let viewerPdfSearchInput: HTMLInputElement | null = null;
 let viewerPdfSearchLabel: HTMLElement | null = null;
 let viewerPdfSearchIndex = 0;
 let viewerPdfLastQuery: string | null = null;
+let viewerThumbsRail: HTMLElement | null = null;
+let viewerThumbsOn = true;
 
 const VIEWER_WINDOW = 1000;
 const PDF_ZOOMS = ["0.5", "0.75", "1", "1.25", "1.5", "2", "3", "4"];
@@ -1076,6 +1078,10 @@ function buildViewerDock(): HTMLElement {
   const searchPrev = mkBtn("◀", "上一处命中", () => void onPdfSearch("prev"));
   const searchNext = mkBtn("▶", "下一处命中", () => void onPdfSearch("next"));
   const searchClear = mkBtn("✕", "清除搜索高亮", () => clearPdfSearch());
+  const thumbsBtn = mkBtn("缩略图", "显示 / 隐藏页面缩略图", () => {
+    viewerThumbsOn = !viewerThumbsOn;
+    if (viewerThumbsRail) viewerThumbsRail.style.display = viewerThumbsOn ? "" : "none";
+  });
   viewerPdfBar.append(
     viewerPdfPrev!,
     viewerPdfPageInput!,
@@ -1092,14 +1098,22 @@ function buildViewerDock(): HTMLElement {
     searchNext,
     searchClear,
     viewerPdfSearchLabel!,
+    thumbsBtn,
   );
 
   const pdfHost = document.createElement("div");
   pdfHost.className = "pdf-host";
-  pdfHost.style.display = "none";
   viewerPdfHost = pdfHost;
+  viewerThumbsRail = document.createElement("div");
+  viewerThumbsRail.className = "pdf-thumbs";
+  viewerThumbsRail.style.display = "none";
+  // 缩略图栏与渲染区横向并列（dock 本体是纵向 flex）。
+  const pdfBody = document.createElement("div");
+  pdfBody.className = "pdf-body";
+  pdfBody.style.display = "none";
+  pdfBody.append(viewerThumbsRail, pdfHost);
 
-  dock.append(bar, viewerPdfBar, (viewerHostEl = mkHost()), pdfHost);
+  dock.append(bar, viewerPdfBar, (viewerHostEl = mkHost()), pdfBody);
   viewerDockEl = dock;
   return dock;
 }
@@ -1157,6 +1171,11 @@ async function openViewerFile(): Promise<void> {
       viewerPdfPage = 1;
       viewerPdfBaseWidth = null;
       if (viewerPdfSearchInput) viewerPdfSearchInput.value = "";
+      viewerPdf?.initThumbs(viewerThumbsRail!, (p) => {
+        viewerPdfPage = p;
+        void renderViewerPdf();
+      });
+      viewerThumbsRail!.style.display = viewerThumbsOn ? "" : "none";
       await renderViewerPdf();
       return;
     }
@@ -1183,7 +1202,8 @@ function setViewerMode(mode: "table" | "pdf"): void {
   if (viewerMoreBtn) viewerMoreBtn.style.display = "none";
   if (viewerHostEl) viewerHostEl.style.display = pdf ? "none" : "";
   if (viewerPdfBar) viewerPdfBar.style.display = pdf ? "" : "none";
-  if (viewerPdfHost) viewerPdfHost.style.display = pdf ? "" : "none";
+  const pdfBody = viewerPdfHost?.parentElement;
+  if (pdfBody) pdfBody.style.display = pdf ? "" : "none";
   if (viewerExportBtn) viewerExportBtn.textContent = pdf ? "导出 TXT" : "导出 CSV";
   if (pdf && viewerPanel) {
     // detach the table so its scroll window stops painting behind the canvas
