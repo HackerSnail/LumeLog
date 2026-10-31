@@ -55,6 +55,34 @@ pub struct IndexProgress {
     pub done: bool,
 }
 
+/// One Find-in-Files hit (Plan 44); `path` is relative to the scan root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FifHitJson {
+    pub path: String,
+    pub line: u64,
+    pub text: String,
+}
+
+/// Streaming batch: hits during the scan, `stats` set on the final event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FifBatch {
+    #[serde(default)]
+    pub hits: Vec<FifHitJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<FifStatsJson>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FifStatsJson {
+    pub files: u64,
+    pub skipped: u64,
+    pub hits: u64,
+    pub truncated: bool,
+}
+
 /// A single search hit, batched to the front end (`on_batch`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

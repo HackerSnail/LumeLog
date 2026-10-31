@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 44 Find in Files：目录级多文件搜索（feat/find-in-files）
+
+**依据：** `docs/specs/2026-10-31-find-in-files-design.md`（同类盘点第二梯队之首）。core 新模块 + 命令 + 前端面板。
+
+### Task. `fif.rs` 扫描引擎 + `fif_run/fif_cancel` 命令 + 结果面板
+**Files:** Create `crates/lumelog-core/src/fif.rs`（`FifMatcher::build`（literal 大小写两态 / regex 编译错误透传）+ `scan_dir`：栈式递归、跳过点目录/.git/target/node_modules/符号链接/64MiB 大文件、每文件头 64KB `encoding::detect` + `decode_all` 整体解码逐行匹配、命中行截断 500 字符、批满 200 回调、命中即时收敛 `truncated`、`cancelled` 每文件检查；命中路径相对 root 且 `\`→`/`）；Modify `app/src-tauri/src/dto.rs`（`FifHitJson/FifBatch/FifStatsJson`）、`commands.rs`（`fif_run` spawn_blocking + begin/end_search 取消注册表照 filter_run 模式，root 非目录 `invalid_argument`；`fif_cancel`）、`lib.rs` 注册；Modify `app/frontend/src/ipc.ts`（`fifRun/fifCancel` + 类型）、`main.ts`（`openFindInFiles` 自持面板：目录（预填活动文档目录）+ 浏览 + 查找串 + 字面/正则 + 大小写 + 查找/停止 + 状态行 + 结果列表（渲染上限 1000 条），命中点击 `openPath` 后 `revealSourceLine`（新标签即活动页，编辑器/只读列表各有 reveal）；palette 加「在文件中查找…」）；Modify `app/frontend/src/styles.css`（`.fif-*`）。
+**Why:** 编码检测/解码放 core——GBK/GB18030 台架日志的命中与打开文档一致是 LumeLog 对 N++ 的差异化；扫描复用 `regex` 与 `encoding_rs`（core 既有依赖），app 不新增依赖。
+**验证:** `cargo test -p lumelog-core fif::` 3 pass（literal 大小写两态 + GBK 文件命中（样本经 encoding_rs 编码生成——13 字节小样本 chardetng 不置可否，改用 ~80 字节）、regex 截断即时收敛（首版按文件收敛致 300>10 已修）、大文件/点目录/target 跳过、cancelled 清零）；`cargo test --workspace` 全绿 + clippy 净（`&vec!` 改数组引用）；`npx tsc --noEmit` 净；`npm test` 220 pass + `npm run build` 通过。
+**未验:** 目录搜索→点命中→跨模式定位的实机链路需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 43 文件关联 + 单实例（feat/file-assoc）
 
 **依据：** `docs/specs/2026-10-31-file-assoc-design.md`（同类盘点第一梯队之四）。

@@ -87,6 +87,9 @@ import {
   gitProbe,
   gitCommit,
   launchArgs,
+  fifRun,
+  fifCancel,
+  type FifHit,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
 import { PdfView, clampPage, stepZoom } from "./pdfview";
@@ -2346,6 +2349,172 @@ function persistTags(): void {
 
 const SESSION_KEY = "lumelog.session.v1";
 
+/** Find-in-Files panel (Plan 44): directory scan, hit list, click → open +
+ *  reveal. Render caps at 1000 rows (more hits need a narrower pattern). */
+function openFindInFiles(): void {
+  if (document.getElementById("fif-modal")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "fif-modal";
+  overlay.className = "palette-overlay";
+  const box = document.createElement("div");
+  box.className = "palette-box fif-box";
+
+  const dirRow = document.createElement("div");
+  dirRow.className = "fif-row-inputs";
+  const dir = document.createElement("input");
+  dir.type = "text";
+  dir.className = "commit-field";
+  dir.placeholder = "目录";
+  const a = tabs.active();
+  const ds = a ? docStates.get(a.info.docId) : undefined;
+  if (ds) dir.value = dirOf(ds.path);
+  const browse = document.createElement("button");
+  browse.className = "insp-git-init";
+  browse.textContent = "浏览…";
+  browse.addEventListener("click", () => {
+    void open({ directory: true, multiple: false }).then((p) => {
+      if (typeof p === "string") dir.value = p;
+    });
+  });
+  dirRow.append(dir, browse);
+
+  const patRow = document.createElement("div");
+  patRow.className = "fif-row-inputs";
+  const pat = document.createElement("input");
+  pat.type = "text";
+  pat.className = "commit-field";
+  pat.placeholder = "查找内容";
+  const mode = document.createElement("select");
+  mode.className = "commit-field";
+  for (const [v, t] of [
+    ["literal", "字面量"],
+    ["regex", "正则"],
+  ] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    mode.append(o);
+  }
+  const caseLabel = document.createElement("label");
+  caseLabel.className = "fif-case";
+  const caseChk = document.createElement("input");
+  caseChk.type = "checkbox";
+  caseLabel.append(caseChk, document.createTextNode("区分大小写"));
+  const go = document.createElement("button");
+  go.className = "insp-git-init";
+  go.textContent = "查找";
+  const stop = document.createElement("button");
+  stop.className = "insp-git-init";
+  stop.textContent = "停止";
+  stop.disabled = true;
+  patRow.append(pat, mode, caseLabel, go, stop);
+
+  const status = document.createElement("div");
+  status.className = "fif-status";
+  const results = document.createElement("div");
+  results.className = "fif-results";
+
+  let reqId: number | null = null;
+  let rendered = 0;
+  const addHit = (h: FifHit): void => {
+    rendered++;
+    if (rendered > 1000) {
+      if (rendered === 1001) {
+        const note = document.createElement("div");
+        note.className = "fif-status";
+        note.textContent = "仅显示前 1000 条命中，请收窄查找范围";
+        results.append(note);
+      }
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "fif-hit";
+    row.textContent = `${h.path}:${h.line}: ${h.text}`;
+    row.title = row.textContent;
+    row.addEventListener("click", () => {
+      void openPath(h.path).then((ok) => {
+        if (ok) revealSourceLine(h.line);
+      });
+    });
+    results.append(row);
+  };
+
+  const finish = (s: { files: number; skipped: number; hits: number; truncated: boolean }): void => {
+    reqId = null;
+    stop.disabled = true;
+    go.disabled = false;
+    status.textContent =
+      `已扫 ${s.files} 个文件 · 命中 ${s.hits}` +
+      (s.truncated ? "（达上限截断）" : "") +
+      (s.skipped > 0 ? ` · 跳过 ${s.skipped} 个` : "");
+  };
+  const start = (): void => {
+    const root = dir.value.trim();
+    if (root === "" || pat.value === "") {
+      toastMsg("请填写目录与查找内容");
+      return;
+    }
+    results.textContent = "";
+    rendered = 0;
+    status.textContent = "搜索中…";
+    go.disabled = true;
+    stop.disabled = false;
+    void fifRun({
+      root,
+      pattern: pat.value,
+      mode: mode.value as "literal" | "regex",
+      caseSensitive: caseChk.checked,
+      onBatch: (b) => {
+        for (const h of b.hits) addHit(h);
+      },
+      onDone: finish,
+    })
+      .then((id) => {
+        reqId = id;
+      })
+      .catch((err) => {
+        reqId = null;
+        go.disabled = false;
+        stop.disabled = true;
+        status.textContent = "";
+        reportError(err);
+      });
+  };
+  go.addEventListener("click", start);
+  pat.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !isIMEEvent(e)) start();
+  });
+  stop.addEventListener("click", () => {
+    if (reqId !== null) void fifCancel(reqId);
+  });
+
+  const closeRow = document.createElement("div");
+  closeRow.className = "commit-actions";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "insp-git-init";
+  closeBtn.textContent = "关闭";
+  closeBtn.addEventListener("click", () => {
+    if (reqId !== null) void fifCancel(reqId);
+    overlay.remove();
+  });
+  closeRow.append(closeBtn);
+  box.append(dirRow, patRow, status, results, closeRow);
+  overlay.append(box);
+  document.getElementById("app")?.append(overlay);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) {
+      if (reqId !== null) void fifCancel(reqId);
+      overlay.remove();
+    }
+  });
+  pat.focus();
+}
+
+function dirOf(path: string): string {
+  const i = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return i > 0 ? path.slice(0, i) : path;
+}
+
 /** Snapshot the open tabs (order + active path) to localStorage. */
 function saveSession(): void {
   const session = normalizeSession({
@@ -3810,6 +3979,7 @@ function buildCommands(): Command[] {
     ...recents,
     ...bound,
     { id: "recent-clear", title: "清除最近文件记录", run: () => void clearRecentList() },
+    { id: "fif", title: "在文件中查找…", run: () => openFindInFiles() },
     { id: "keymap", title: "快捷键设置…", run: () => openKeymapSettings() },
     { id: "script", title: "脚本…", run: () => openScriptManager() },
     { id: "reload-plugins", title: "重载语法插件", run: () => void initSyntaxPlugins() },
