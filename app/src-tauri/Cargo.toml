@@ -31,6 +31,8 @@ pdf-extract = "0.12.1"
 wasmi = "2.0.0"
 # Built-in git (Plan 35): libgit2 compiled in, no PATH dependency.
 git2 = "0.20"
+# Single-instance (Plan 43): second launch forwards argv to the first.
+tauri-plugin-single-instance = "2"
 
 [dev-dependencies]
 rust_xlsxwriter = "0.102.0"

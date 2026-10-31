@@ -7,6 +7,7 @@
 
 import { open, save, ask } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import {
   docOpen,
   docClose,
@@ -85,6 +86,7 @@ import {
   gitInit,
   gitProbe,
   gitCommit,
+  launchArgs,
 } from "./ipc";
 import { ParserPanel, RowStore } from "./parserpanel";
 import { PdfView, clampPage, stepZoom } from "./pdfview";
@@ -4183,4 +4185,19 @@ void initSyntaxPlugins();
 void initKeymap();
 void initRecent();
 void restoreSession();
+void openLaunchArgs();
 initDragDrop();
+
+// Plan 43: a second instance hands its file args to this one.
+void listen<string[]>("second-instance-open", (e) => {
+  for (const p of e.payload) void openPath(p);
+});
+
+/** Files from the initial command line (double-click / file association). */
+async function openLaunchArgs(): Promise<void> {
+  try {
+    for (const p of await launchArgs()) await openPath(p);
+  } catch {
+    /* non-Tauri environment */
+  }
+}
