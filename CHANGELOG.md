@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 34 检查器 Git 小节：仓库探测 / 初始化（feat/inspector-git）
+
+**依据：** `docs/specs/2026-10-31-git-inspector-design.md`（NoteLume 检查器 Git 块对齐，用户在 Plan 33 后点名）。新增 Rust 模块，前端接线。
+
+### Task. `gitinfo.rs` 探测/初始化 + 命令 + 检查器小节
+**Files:** Create `app/src-tauri/src/gitinfo.rs`（`run_git` 参数数组不过 shell；`porcelain_file_status` 纯函数把 `status --porcelain` 首行 XY 映射中文（??/已忽略/已暂存×4/未暂存修改删除/其余原样）；`git_probe`：rev-parse → symbolic-ref → status → log -1 文件级，"not a git repository" 归为无仓库、其余失败归 `unavailable`；`git_init`）；Modify `app/src-tauri/src/commands.rs`、`lib.rs`（`git_probe/git_init` 两条命令注册，dir 取 `path.parent()`）；Modify `app/frontend/src/ipc.ts`（`GitInfo/GitLastCommit` 类型 + 封装）；Modify `app/frontend/src/main.ts`（updateInspector 追加 Git 小节壳，`fillGitSection` 异步探测回填——token + `dataset.path` 双重防旧结果覆盖；无仓库给「初始化仓库」按钮，ask 确认后 `gitInit` 并重探）；Modify `app/frontend/src/styles.css`（`.insp-git-init`）。
+**Why:** 走 git CLI 而非 git2——零新依赖、不碰轻量定位；只读 + init 与参考项目对齐，add/commit 属版本管理工作流，塞进检查器反而越界；探测在激活/保存/重载时 on-demand 触发，不进热路径，无超时的风险可接受（spec §3 记录）。
+**验证:** `cargo test -p lumelog-app gitinfo::` 3 pass（porcelain 各分支；tempdir 集成：无仓库探测 → init → 重探出分支/未跟踪 → add+commit 后文件状态转未改动、last_commit 出 hash/主题——无 git CLI 的环境自动跳过集成腿）；`cargo test --workspace` 全绿 + `cargo clippy --workspace --all-targets -- -D warnings` 净（首版 `len() > 0` 违规已改 `!is_empty()`）；`npx tsc --noEmit` 净；`npm test` 196 pass + `npm run build` 通过。
+**未验:** 真实仓库下激活/保存后小节刷新、init 后按钮转信息行的观感需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 33 检查器：文档属性分区 + 文档标签（feat/inspector-tags）
 
 **依据：** `docs/specs/2026-10-31-inspector-tags-design.md`（用户截图 NoteLume 检查器，红框标「文档属性」「标签」两块）。Rust 侧零改动。

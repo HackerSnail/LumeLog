@@ -2435,3 +2435,21 @@ mod can_parse_tests {
         assert!(j.data_hex.starts_with("000102"));
     }
 }
+
+// ---- inspector git section (Plan 34) ----------------------------------------
+
+/// Probe the git repo around `path` (read-only; runs the system git CLI).
+#[tauri::command]
+pub fn git_probe(path: String) -> Result<crate::gitinfo::GitInfo, IpcError> {
+    let p = Path::new(&path);
+    let dir = p.parent().unwrap_or_else(|| Path::new("."));
+    Ok(crate::gitinfo::git_probe(dir, &path))
+}
+
+/// `git init` in the directory containing `path` (user-confirmed in the UI).
+#[tauri::command]
+pub fn git_init(path: String) -> Result<String, IpcError> {
+    let p = Path::new(&path);
+    let dir = p.parent().unwrap_or_else(|| Path::new("."));
+    crate::gitinfo::git_init(dir).map_err(|e| IpcError::new("git", e))
+}

@@ -6,6 +6,7 @@
 mod can_export;
 mod commands;
 mod dto;
+mod gitinfo;
 mod keymap;
 mod mf4;
 mod plugins;
@@ -90,6 +91,8 @@ pub fn run() {
             commands::recovery_discard,
             commands::recovery_enabled,
             commands::recovery_set_enabled,
+            commands::git_probe,
+            commands::git_init,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LumeLog");
