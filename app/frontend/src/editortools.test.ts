@@ -97,7 +97,9 @@ describe("macro persistence (Plan 30)", () => {
         name: "整理",
         ops: [
           { kind: "move", by: "line-start" },
+          { kind: "move", by: "word-right", select: true },
           { kind: "delete", count: 2, dir: "backward" },
+          { kind: "del-word", dir: "forward" },
           { kind: "line", op: "dedupe" },
         ],
       },

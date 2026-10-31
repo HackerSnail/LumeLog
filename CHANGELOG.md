@@ -2,6 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 32 宏补遗：方向键/选区录制修复 + 跳词动作（feat/macro-selection-words）
+
+**依据：** `docs/specs/2026-10-31-macro-selection-words-design.md`（收 Plan 30 留下的三块限制）。Rust 侧零改动。
+
+### Task. `editortools.ts` 动作模型扩展 + `editor.ts` 捕获/键位拦截/重放
+**Files:** Modify `app/frontend/src/editortools.ts`（`MoveBy` 加 `word-left/word-right`；`MacroOp.move` 加 `select?`；新增 `{kind:"del-word",dir}`；isMacroOp 校验同步）；Modify `app/frontend/src/editor.ts`（**修录制 bug**：核对 CM 源码发现光标命令的 userEvent 是 `select`，Plan 29 spec 写的 `input.move` 只在自家测试合成事务里出现——真实方向键从未进过宏；监听器改为 `input.move` 与 `select` 双路由，`select` 按锚点不变 + `classifyMove` 单步判据录 `{move,select:true}`，点击（锚点变）/跳页不录；keymap 在 defaultKeymap 之前加同键位绑定拦 Ctrl+←→（Mod/Alt 两套、含 mac 映射与 shift 处理）与 Ctrl+Backspace/Delete——CM 的 `deleteGroupBackward` 与 Backspace 事件同名，无法从事务区分，只能键位拦截；拦截期间 `suppressCapture` 标志防同一 dispatch 被 select/delete 捕获重复记录；重放：del-word 走 deleteGroup 系、word 走 cursorGroup 系、select 移动走 select 系命令、行首行尾 dispatch 保留锚点；重放 delete 时选区非空则删整个选区，"选中一段再输入"（录制为 delete+insert 对）得以还原；录制期事务涉及多选区直接跳过）；多光标明确不做，理由记录在 spec §3（动作流按主光标建模，忠实重放需逐光标重放再合并，与变更映射/撤销强耦合）。
+**验证:** `npx vitest run src/editortools.test.ts src/editor.test.ts` 31 pass（新增：jsdom keydown 走键位拦截录 del-word 并重放出 "hello "；shift 选区 ×2 + 替换输入的录制形状与重放全文 "Xllo world"；序列化往返覆盖 word/select/del-word）；既有 29 个不回归（Plan 30 测试的合成 `input.move` 事务走 captureMove 路径不变）；`npx tsc --noEmit` 净；`npm test` 190 pass（24 文件，基线 188）+ `npm run build` 通过。
+**未验:** 实机方向键/选区/跳词录制手感需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 31 宏播放变体：重复 N 次 / 运行到文件尾（feat/macro-run-variants）
 
 **依据：** `docs/specs/2026-10-31-macro-run-variants-design.md`（Plan 30 续作，补齐 N++ 的两个播放入口）。Rust 侧零改动。

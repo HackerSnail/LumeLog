@@ -167,6 +167,55 @@ describe("EditorHandle tools (Plan 29)", () => {
     handle.destroy();
   });
 
+  it("records selection extension and word delete via keymap (Plan 32)", async () => {
+    const handle = await mount("txt");
+    handle.replaceText("hello world");
+    handle.view.dispatch({ selection: { anchor: 11 } });
+    handle.startRecording();
+    // Ctrl+Backspace rides the hooked keymap binding (Mod-Backspace)
+    handle.view.contentDOM.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", ctrlKey: true, cancelable: true, bubbles: true }),
+    );
+    expect(handle.stopRecording()).toBe(1);
+    expect(handle.macroOps()).toEqual([{ kind: "del-word", dir: "backward" }]);
+
+    // replay on a fresh doc: deletes the word before the cursor
+    handle.replaceText("hello world");
+    handle.view.dispatch({ selection: { anchor: 11 } });
+    handle.playMacro(1);
+    expect(handle.getText()).toBe("hello ");
+    handle.destroy();
+  });
+
+  it("records shift-selection and replays the replace pattern (Plan 32)", async () => {
+    const handle = await mount("txt");
+    handle.replaceText("hello world");
+    handle.view.dispatch({ selection: { anchor: 0 } });
+    handle.startRecording();
+    // real arrow keys emit userEvent "select" (spec §0)
+    handle.view.dispatch({ selection: { anchor: 0, head: 1 }, userEvent: "select" });
+    handle.view.dispatch({ selection: { anchor: 0, head: 2 }, userEvent: "select" });
+    // typing over the selection: one transaction, delete+insert ops
+    handle.view.dispatch({
+      changes: { from: 0, to: 2, insert: "X" },
+      selection: { anchor: 1 },
+      userEvent: "input.replace",
+    });
+    handle.stopRecording();
+    expect(handle.macroOps()).toEqual([
+      { kind: "move", by: "right", select: true },
+      { kind: "move", by: "right", select: true },
+      { kind: "delete", count: 2, dir: "forward" },
+      { kind: "insert", text: "X" },
+    ]);
+
+    handle.replaceText("hello world");
+    handle.view.dispatch({ selection: { anchor: 0 } });
+    handle.playMacro(1);
+    expect(handle.getText()).toBe("Xllo world");
+    handle.destroy();
+  });
+
   it("lists symbols for the current mode", async () => {
     const handle = await mount("py");
     await flush();
