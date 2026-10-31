@@ -9,6 +9,7 @@ import {
   MACRO_STORE_MAX,
   overviewBuckets,
   parseMacros,
+  parseRepeatCount,
   serializeMacros,
   SYMBOL_PATTERNS,
 } from "./editortools";
@@ -45,6 +46,22 @@ describe("macro extraction", () => {
     expect(extractMacroOps([{ removed: 4, inserted: "" }], "backward")).toEqual([
       { kind: "delete", count: 4, dir: "backward" },
     ]);
+  });
+});
+
+describe("parseRepeatCount (Plan 31)", () => {
+  it("accepts positive integers and clamps", () => {
+    expect(parseRepeatCount("3")).toBe(3);
+    expect(parseRepeatCount(" 5 ")).toBe(5);
+    expect(parseRepeatCount("999999")).toBe(10000);
+  });
+
+  it("rejects garbage and non-positive counts", () => {
+    expect(parseRepeatCount("abc")).toBeNull();
+    expect(parseRepeatCount("")).toBeNull();
+    expect(parseRepeatCount("0")).toBeNull();
+    expect(parseRepeatCount("-2")).toBeNull();
+    expect(parseRepeatCount("2.5")).toBeNull();
   });
 });
 

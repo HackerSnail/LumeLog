@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 31 宏播放变体：重复 N 次 / 运行到文件尾（feat/macro-run-variants）
+
+**依据：** `docs/specs/2026-10-31-macro-run-variants-design.md`（Plan 30 续作，补齐 N++ 的两个播放入口）。Rust 侧零改动。
+
+### Task. `editortools.ts` 次数解析 + `editor.ts` playMacroToEnd + 命令面板
+**Files:** Modify `app/frontend/src/editortools.ts`（`parseRepeatCount` 纯函数：纯数字且 ≥1 才收、钳到 `MACRO_PLAY_MAX` = 1 万，其余 null）；Modify `app/frontend/src/editor.ts`（重放循环从 handle 字面量抽成模块级 `replayOps(view, ops, times)`——`playMacroToEnd` 不能引用尚不存在的 `handle`，首版 `handle.playMacro(1)` 直接 TS2304；`playMacroToEnd()` 连续 `replayOps(recorded, 1)`，每次后比较文档长度与光标，两者都不变即停，返回实际播放次数，上限 1 万次兜底插入型宏）；Modify `app/frontend/src/main.ts`（命令面板加「宏：重复播放 N 次…」（onFreeText 输入次数，非法 toast）与「宏：运行到文件尾（无进展即停）」（播放完 toast 次数，无宏 toast））。
+**Why:** "运行到文件尾"以文档长度 + 光标为无进展判据：下移、插行这类宏能按预期推进到尾部；排序/大小写不改长度且光标不动，播一次即停，与 N++ 以光标为准的行为相近，spec §3 已记录。
+**验证:** `npx vitest run src/editortools.test.ts src/editor.test.ts` 29 pass（parseRepeatCount 合法/非法/钳制；下移宏运行到文件尾在最后一行停住、返回真实次数 2、空宏返回 0）；`npx tsc --noEmit` 净；`npm test` 188 pass（24 文件，基线 185）+ `npm run build` 通过。
+**未验:** 实机播放手感与次数输入观感需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 30 宏高级形态：编辑动作抽象 + 跨会话持久化（feat/macro-advanced）
 
 **依据：** `docs/specs/2026-10-31-macro-advanced-design.md`（Plan 29 宏录制的续作）。Rust 侧零改动。

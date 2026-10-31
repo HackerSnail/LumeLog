@@ -92,7 +92,13 @@ import { openKeymapModal } from "./keymap-ui";
 import { openScriptModal } from "./script-ui";
 import { Mf4View, type Mf4Query } from "./mf4-ui";
 import { openEditable, type EditorHandle } from "./editor";
-import { MACRO_STORE_MAX, parseMacros, serializeMacros, type NamedMacro } from "./editortools";
+import {
+  MACRO_STORE_MAX,
+  parseMacros,
+  parseRepeatCount,
+  serializeMacros,
+  type NamedMacro,
+} from "./editortools";
 import { ListView, isNearBottom } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
 import { type CanFilter } from "./canfilter";
@@ -3423,6 +3429,34 @@ function buildCommands(): Command[] {
       },
     },
     { id: "macro-play", title: "宏：播放", run: () => activeEditor()?.playMacro(1) },
+    {
+      id: "macro-play-times",
+      title: "宏：重复播放 N 次…",
+      run: () => {
+        const h = activeEditor();
+        if (!h) return;
+        openCommandList("输入重复次数后回车（1–10000）", [], "macro-play-times-list", {
+          onFreeText: (raw) => {
+            const n = parseRepeatCount(raw);
+            if (n === null) {
+              toastMsg("次数需为 1–10000 的整数");
+              return;
+            }
+            h.playMacro(n);
+          },
+        });
+      },
+    },
+    {
+      id: "macro-run-to-end",
+      title: "宏：运行到文件尾（无进展即停）",
+      run: () => {
+        const h = activeEditor();
+        if (!h) return;
+        const runs = h.playMacroToEnd();
+        toastMsg(runs === 0 ? "没有已录制的宏" : `已连续播放 ${runs} 次`);
+      },
+    },
     {
       id: "macro-save",
       title: "宏：保存为…",
