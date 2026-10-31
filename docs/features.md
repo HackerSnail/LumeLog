@@ -33,14 +33,17 @@ LumeLog 功能规划与交付记录。`[x]` 已交付，`[ ]` 待做；`↳` 为
       ↳ Plan 15 `feat/syntax-languages` 已交付：`language.ts` 改为注册表（模式 id → 扩展名集合 / 显示名 / 加载器），在原有 Log/INI/JSON/C-C++ 上加 JS/TS、Python、HTML、CSS、XML、Markdown、SQL、Rust、Java（lezer 包）与 YAML/TOML/Shell/Diff/PowerShell（`@codemirror/legacy-modes` 流模式）；`modeIdForExt` 同步推断（AUTO 与未知扩展名都走它），`resolveLanguage` 按需 `import()` 并缓存，语言包不进首屏主 chunk（623.3→506.9KB）；模式 id 与扩展名解耦（`applyMode` 传 id，不再把模式名当扩展名），`setMode` 异步重配带 token 防连切覆盖，destroy 后回包不 dispatch；状态栏下拉显示「C/C++」「TypeScript」等显示名、回传仍是模式 id。大文件只读路径无 CodeMirror，仍不高亮。
 - [x] 编码兼容：EUC-JP、EUC-KR、KOI8-R、KOI8-U（原条目所列 Big5、Shift-JIS v1 已交付，属笔误）
       ↳ Plan 16 `feat/encoding-extension`：`EncodingLabel` 加 4 变体（`as_str`/`from_label` 含 `EUCJP` 等别名/`encoding()` 映射），解码、编码（不可映射仍单字节 `?`）、前端菜单 13 项全链路；检测双 pass——带 `cn` hint 判成 GBK/GB18030 时无 hint 复核、仅采纳 EUC-JP/EUC-KR（探针实测中文样本不受影响），俄文按 chardetng 结果检出 KOI8-U（与 KOI8-R 俄文字节一致）。UTF-32 无 WHATWG/encoding_rs 编码，不做。
+- [x] 编辑器对齐 Notepad++：行操作/换行切换/字号缩放/选区匹配高亮
+      ↳ Plan 27 `feat/editor-parity`：命令面板 13 条新命令（行排序升/降、去重、反转、大小写、Trim、去空行、合并为一行——作用于选区行或整篇、单步撤销；切换自动换行并持久化；字体 ±/重置 + Ctrl+滚轮缩放 9–28px）；查找/替换面板（正则/大小写/整词/全部替换）与转到行（Ctrl+G）此前已随 CodeMirror 内建就位。书签、列选择、宏录制未做（按需立项）。
+- [x] 脚本引擎（QuickJS 逐行变换）
 - [x] 脚本引擎（QuickJS 逐行变换）
       ↳ Plan 12 `feat/roadmap-script`：工具栏/面板“脚本…”开启脚本管理器（`$APP_CONFIG/LumeLog/scripts/*.js`，列表/新建模板/保存/删除 + 控制台）；`onLine(line, ctx)` 对当前文档**逐行流式**变换（返回 string 保留/改写、null 丢弃），输出 UTF-8/LF 新文件；`rquickjs 0.14` 沙箱（无 fs/net/require，64MiB 内存/1MiB 栈/300s 超时/4GiB 输出上限、可取消），workspace MSRV 1.79→1.87。
+- [x] 插件接口，支持用户扩展解析器：冷门编程语言的高亮/解析、冷门日志与报文格式，都应能以插件形式补入，不改主程序
+      ↳ 三增量全部交付：增量1（Plan 17，见上）声明式高亮；增量2（Plan 18）QuickJS 逐行解析；增量3（Plan 23 `feat/plugin-wasm`，spec `docs/specs/2026-10-30-plugin-wasm-impl-design.md`）wasmi Wasm 解析插件——`plugins/*.wasm`（wasm32-unknown-unknown）导出 `memory/alloc/meta/parse/finish` 朴素 ABI，i64 打包 ptr/len 传 UTF-8 JSON（元数据与行记录同增量2 形状），256KB 完整行块喂入、fuel 每调用 5×10⁸ + 16MB 内存上限 + 300s/取消，512 行/批进同一虚拟表格；Rust/Go 等工具链均可产出，模板见 spec §3。体积账：wasmi 使应用 exe +2.07MB（立项预估 2–3MB 内）。
 
 ## 待做
 
-- [x] 插件接口，支持用户扩展解析器：冷门编程语言的高亮/解析、冷门日志与报文格式，都应能以插件形式补入，不改主程序
-      ↳ 三增量全部交付：增量1（Plan 17，见上）声明式高亮；增量2（Plan 18）QuickJS 逐行解析；增量3（Plan 23 `feat/plugin-wasm`，spec `docs/specs/2026-10-30-plugin-wasm-impl-design.md`）wasmi Wasm 解析插件——`plugins/*.wasm`（wasm32-unknown-unknown）导出 `memory/alloc/meta/parse/finish` 朴素 ABI，i64 打包 ptr/len 传 UTF-8 JSON（元数据与行记录同增量2 形状），256KB 完整行块喂入、fuel 每调用 5×10⁸ + 16MB 内存上限 + 300s/取消，512 行/批进同一虚拟表格；Rust/Go 等工具链均可产出，模板见 spec §3。体积账：wasmi 使应用 exe +2.07MB（立项预估 2–3MB 内）。
-      ↳ 增量3（Wasm 宿主）立项预研见 `docs/specs/2026-10-30-plugin-wasm-proposal.md`：建议 wasmi 起步（体积约 1/10 于 wasmtime，接口与运行时解耦）、wit 接口心智稿与沙箱边界已列，批准后另出实现 spec/plan。
+（无——规划内条目已全部交付；衍生增量见各交付注记，如 PDF 文本搜索、Wasm 插件模板文档等。）
       ↳ 增量1 已交付（Plan 17 `feat/plugin-syntax`，spec `docs/specs/2026-10-30-plugin-syntax-design.md`）：声明式语法高亮插件——`$APP_CONFIG/LumeLog/plugins/*.json` 一个文件一个语法（`id/name/extensions/lineComment/keywords/rules`，规则 `regex + tag`，tag 限 className/keyword/number/string/comment/propertyName/operator 七个），Rust `plugins.rs` 校验加载（坏文件逐条报错不阻塞、id 按文件名序去重、`deny_unknown_fields`），前端编译为 StreamLanguage（正则 JS 方言校验在前端，坏规则跳过并回报）；状态栏「语法」下拉出现插件模式（id `plugin:<id>`），AUTO 按扩展名匹配（内置优先）；命令面板「重载语法插件」。
       ↳ 增量2 已交付（Plan 18 `feat/plugin-parser`，spec `docs/specs/2026-10-30-plugin-parser-design.md`）：QuickJS 逐行解析插件——`plugins/*.js` 定义 `var plugin = { id, name, extensions, columns, parseLine(line, ctx) }`，返回对象（列 key→值）或 null 跳过；rquickjs 沙箱（同脚本引擎 64MiB/1MiB 栈/300s/可取消，元数据加载 5s）；工具栏「解析」开 dock（与报文/测量互斥），按文档扩展名预选插件，512 行/批流式进虚拟表格（`parserpanel.ts`，行号列 + 插件列），点行跳源行，插件 console 输出进 dock 控制台（200 行上限）；单元格字符串化截断 4096 字符。无过滤/导出（后续搬 CanPanel 能力）；Wasm host 为增量3，待做。
 - [x] 常见文档格式查看与导出（PPT 等 Office 格式）

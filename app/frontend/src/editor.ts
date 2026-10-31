@@ -16,7 +16,7 @@ import {
   crosshairCursor,
 } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
-import { searchKeymap, search, openSearchPanel } from "@codemirror/search";
+import { searchKeymap, search, openSearchPanel, highlightSelectionMatches } from "@codemirror/search";
 import {
   bracketMatching,
   foldGutter,
@@ -27,6 +27,12 @@ import {
 } from "@codemirror/language";
 import { loadAllText, type DocInfo } from "./ipc";
 import { autoModeId, resolveLanguage, type ModeId } from "./language";
+import { applyLineOp, clampFontSize, FONT_BASE, type LineOp } from "./editorops";
+
+/** Editor font-size theme fragment (Plan 27 zoom); rebuilt on every step. */
+function fontTheme(px: number) {
+  return EditorView.theme({ "&": { fontSize: `${px}px` } });
+}
 
 export interface EditorHandle {
   readonly docId: number;
@@ -46,6 +52,16 @@ export interface EditorHandle {
   openSearch(): void;
   /** Scroll a 1-based source line into view and place the cursor there (CanPanel §7.4). */
   revealLine(line1: number): void;
+  /** Toggle word wrap (Plan 27). */
+  setWrap(on: boolean): void;
+  /** Current wrap flag (kept in JS; jsdom cannot observe the CSS effect). */
+  isWrap(): boolean;
+  /** One line operation over the selection's line range (whole doc if empty). */
+  lineOp(op: LineOp): void;
+  /** Nudge the editor font size (Plan 27 zoom); clamped. */
+  zoomFont(delta: number): void;
+  /** Back to the base font size. */
+  fontReset(): void;
   destroy(): void;
 }
 
@@ -54,6 +70,8 @@ export interface OpenEditableOpts {
   info: DocInfo;
   /** File extension (no dot) used to pick the starting syntax mode. */
   ext: string;
+  /** Initial word-wrap state (persisted UI flag; default off = CodeMirror default). */
+  wrap?: boolean;
   /** Fires once on the first user edit (drives the tab dirty dot). */
   onDirty?: () => void;
   /** Fires on EVERY edit (drives the 2s crash-recovery idle timer). */
@@ -77,6 +95,11 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   // Language lives in a Compartment so a mode switch reconfigures it in place —
   // `setState` would drop undo history, scroll, and wrongly mark the doc dirty.
   const langConf = new Compartment();
+  // Wrap + font-size live in Compartments too (Plan 27): both toggle at runtime
+  // without rebuilding the view (undo/scroll survive).
+  const wrapConf = new Compartment();
+  const fontConf = new Compartment();
+  let wrapOn = opts.wrap ?? false;
   // Language packages load on demand, so a mode switch resolves asynchronously;
   // the token makes a slow early request lose to a later one instead of
   // overwriting it.
@@ -91,8 +114,19 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
   };
 
   const lang = await resolveLanguage(autoModeId(opts.ext));
+  // Single font-size holder shared by the wheel handler and `zoomFont`.
+  const zoom = { size: FONT_BASE };
   const view = new EditorView({
-    state: buildState(text, lang, langConf, onDocChanged),
+    state: buildState(
+      text,
+      lang,
+      langConf,
+      wrapConf,
+      fontConf,
+      zoom,
+      opts.wrap ?? false,
+      onDocChanged,
+    ),
     parent: opts.parent,
   });
 
@@ -139,6 +173,32 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       });
       view.focus();
     },
+    setWrap: (on: boolean) => {
+      wrapOn = on;
+      view.dispatch({ effects: wrapConf.reconfigure(on ? EditorView.lineWrapping : []) });
+    },
+    isWrap: () => wrapOn,
+    lineOp: (op: LineOp) => {
+      const { state } = view;
+      const sel = state.selection.main;
+      // Empty selection → the whole document; otherwise the covered lines.
+      const a = sel.empty ? 1 : state.doc.lineAt(sel.from).number;
+      const b = sel.empty ? state.doc.lines : state.doc.lineAt(sel.to).number;
+      const lines: string[] = [];
+      for (let n = a; n <= b; n++) lines.push(state.doc.line(n).text);
+      const out = applyLineOp(lines, op);
+      view.dispatch({
+        changes: { from: state.doc.line(a).from, to: state.doc.line(b).to, insert: out.join("\n") },
+      });
+    },
+    zoomFont: (delta: number) => {
+      zoom.size = clampFontSize(zoom.size + delta);
+      view.dispatch({ effects: fontConf.reconfigure(fontTheme(zoom.size)) });
+    },
+    fontReset: () => {
+      zoom.size = FONT_BASE;
+      view.dispatch({ effects: fontConf.reconfigure(fontTheme(zoom.size)) });
+    },
     destroy: () => {
       destroyed = true; // a language still in flight must not touch a dead view
       view.destroy();
@@ -150,6 +210,10 @@ function buildState(
   text: string,
   lang: LanguageSupport | null,
   langConf: Compartment,
+  wrapConf: Compartment,
+  fontConf: Compartment,
+  zoom: { size: number },
+  wrap: boolean,
   onDocChanged: () => void,
 ): EditorState {
   return EditorState.create({
@@ -164,13 +228,27 @@ function buildState(
       bracketMatching(),
       rectangularSelection(),
       crosshairCursor(),
-      EditorView.lineWrapping,
+      wrapConf.of(wrap ? EditorView.lineWrapping : []),
+      highlightSelectionMatches(),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
       search(),
+      // Ctrl+wheel font zoom (Plan 27): intercept before the browser page-zoom.
+      EditorView.domEventHandlers({
+        wheel: (event, view) => {
+          if (!event.ctrlKey) return false;
+          event.preventDefault();
+          zoom.size = clampFontSize(zoom.size + (event.deltaY < 0 ? 1 : -1));
+          view.dispatch({
+            effects: fontConf.reconfigure(fontTheme(zoom.size)),
+          });
+          return true;
+        },
+      }),
       // Language (may be none → PlainText) and the default highlight style coexist:
       // `lang-*` packages only emit tags, they carry no style, so the style must
       // always be present (spec §8).
       langConf.of(lang ?? []),
+      fontConf.of(fontTheme(zoom.size)),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       EditorView.updateListener.of((u) => {
         if (u.docChanged) onDocChanged();

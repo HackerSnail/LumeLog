@@ -2,7 +2,19 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — Plan 26 PDF 文本选择 + 缩略图（feat/pdf-select-thumbs）
+## 2026-10-30 — Plan 27 编辑器对齐 Notepad++：行操作/换行切换/字号缩放（feat/editor-parity）
+
+**依据：** `docs/specs/2026-10-30-editor-parity-design.md`。盘点结论：查找/替换（`@codemirror/search` 面板）、转到行（Ctrl+G）、行复制/移动/删除（defaultKeymap）已在，缺口为行批处理、换行切换（原常开）、字号缩放、选区匹配高亮。Rust 侧零改动。
+
+### Task. `editorops.ts` + `editor.ts` Compartments + palette 命令
+**Files:** Create `app/frontend/src/editorops.ts`、`editorops.test.ts`（11）；Modify `app/frontend/src/editor.ts`（`OpenEditableOpts.wrap` 初值；`wrapConf/fontConf` 两个 Compartment（换行与字号，运行时切换不丢撤销/滚动）；`highlightSelectionMatches()` 选区匹配高亮；Ctrl+滚轮字号缩放（`domEventHandlers` 截获防浏览器页面缩放）；handle 加 `setWrap/isWrap/lineOp/zoomFont/fontReset`，`lineOp` 用单次 dispatch 保证一步撤销，空选区 = 整篇）；Create `app/frontend/src/editor.test.ts`（+2：整篇排序/反转/去重、换行开关）；Modify `app/frontend/src/main.ts`（`editorWrapOn` 持久化 `lumelog.ui.wrap` + `activeEditor()`；命令面板新增 13 条：切换自动换行、字体 ±/重置、行排序升/降、去重、反转、大小写、Trim、去空行、合并为一行；`openEditable` 传 wrap 初值）。
+**Why:** 行操作做成纯函数 + 单 dispatch 是为了一步撤销与可测性；换行原是常开静态扩展，与 N++ 的可切换行为不符；字号缩放不持久化与 N++ 会话级行为一致。
+**验证:** `npx vitest run src/editorops.test.ts src/editor.test.ts` 15 pass（9 种行操作含不变形、字号钳制 9–28、整篇排序/反转/去重经真实 EditorView、换行开关三态）；jsdom 缺 `Range.getClientRects`（`highlightSelectionMatches` 依赖），测试里 `beforeAll` 打桩；`npx tsc --noEmit` 净；`npm test` 162 pass（23 文件，基线 148/22）+ `npm run build` 通过。
+**未验:** Ctrl+滚轮缩放与选区行操作的实机手感需 `npm run tauri dev` 人工过。书签/列选择/宏录制不在本 plan（spec §5）。
+
+### Task 2. 文档收尾
+**Files:** Modify `docs/features.md`（新增对齐条目；插件接口条目从「待做」移入「已交付」、删过期提案注记；修复编辑器条目误顶脚本引擎标题的结构问题）。
+**验证:** 纯文档改动，未动代码，不涉及测试。
 
 **依据：** `docs/specs/2026-10-30-pdf-select-thumbs-design.md`（Plan 22/24 的配套增量）。Rust 侧零改动。
 

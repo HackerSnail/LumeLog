@@ -1,14 +1,20 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { language } from "@codemirror/language";
 import type { DocInfo } from "./ipc";
 
 vi.mock("./ipc", () => ({
-  loadAllText: async () => ({ text: "a\nb\n", invalidCount: 0 }),
+  loadAllText: async () => ({ text: "b\na", invalidCount: 0 }),
 }));
 
 const { openEditable } = await import("./editor");
 const { resolveLanguage } = await import("./language");
+
+beforeAll(() => {
+  // jsdom lacks Range.getClientRects; `highlightSelectionMatches` needs it.
+  (Range.prototype as unknown as { getClientRects: () => DOMRectList }).getClientRects =
+    () => [] as unknown as DOMRectList;
+});
 
 function info(): DocInfo {
   return {
@@ -34,6 +40,29 @@ async function mount(ext: string) {
 function flush(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
 }
+
+describe("EditorHandle parity commands (Plan 27)", () => {
+  it("lineOp sorts the whole document when nothing is selected", async () => {
+    const handle = await mount("txt");
+    handle.lineOp("sort-asc");
+    expect(handle.getText()).toBe("a\nb");
+    handle.lineOp("reverse");
+    expect(handle.getText()).toBe("b\na");
+    handle.lineOp("dedupe");
+    expect(handle.getText()).toBe("b\na");
+    handle.destroy();
+  });
+
+  it("toggles word wrap", async () => {
+    const handle = await mount("txt");
+    expect(handle.isWrap()).toBe(false);
+    handle.setWrap(true);
+    expect(handle.isWrap()).toBe(true);
+    handle.setWrap(false);
+    expect(handle.isWrap()).toBe(false);
+    handle.destroy();
+  });
+});
 
 describe("EditorHandle.setMode", () => {
   it("mounts the language for the file extension", async () => {
