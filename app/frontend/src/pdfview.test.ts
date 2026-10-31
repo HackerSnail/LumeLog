@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { clampPage, hitRect, matchItem, PdfView, stepZoom } from "./pdfview";
+import { clampPage, hitRect, matchItem, PdfView, stepZoom, thumbScale } from "./pdfview";
 
 describe("clampPage / stepZoom", () => {
   it("clamps pages into [1, total]", () => {
@@ -19,6 +19,13 @@ describe("clampPage / stepZoom", () => {
     expect(stepZoom(4, "in")).toBe(4);
     expect(stepZoom(0.5, "out")).toBe(0.5);
     expect(stepZoom(3.2, "in")).toBe(4);
+  });
+
+  it("computes thumbnail scales within bounds", () => {
+    expect(thumbScale(595, 88)).toBeCloseTo(88 / 595);
+    expect(thumbScale(0, 88)).toBe(1); // degenerate page → unit scale
+    expect(thumbScale(595, 4000)).toBe(4); // clamped high
+    expect(thumbScale(59500, 88)).toBeCloseTo(0.05); // clamped low
   });
 });
 

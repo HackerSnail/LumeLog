@@ -2,7 +2,15 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
-## 2026-10-30 — Plan 25 PPTX 文本提取查看（feat/pptx-text）
+## 2026-10-30 — Plan 26 PDF 文本选择 + 缩略图（feat/pdf-select-thumbs）
+
+**依据：** `docs/specs/2026-10-30-pdf-select-thumbs-design.md`（Plan 22/24 的配套增量）。Rust 侧零改动。
+
+### Task. TextLayer 文本层 + 缩略图栏
+**Files:** Modify `app/frontend/src/pdfview.ts`（纯函数 `thumbScale`（0.05–4 钳制）；`render()` 后叠 pdf.js `TextLayer`（CSS 像素 viewport，与设备像素 canvas 的 CSS 显示尺寸对齐；fire-and-forget，旧层在下次渲染时整体替换、`textLayer !== layer` 防旧层回写）；`initThumbs(rail, onGoPage)`：每页一个 cell，`IntersectionObserver`（rootMargin 200px）懒渲染 88px 宽缩略图，`setThumbCurrent` 边框跟随当前页；load/destroy 清 rail 与 observer）；Modify `app/frontend/src/main.ts`（dock 里 `.pdf-body` 横向容器包缩略图栏 + 渲染区，pdf 模式下 load 后 `initThumbs`、点击跳页，工具条加「缩略图」显隐切换，默认开）；Modify `app/frontend/src/styles.css`（`.textLayer` 最小样式——pdfjs 6 不自动注入：absolute、`color: transparent`、`::selection` 半透明 accent、`user-select: text`；`.pdf-body/.pdf-thumbs/.pdf-thumb(-current)`）。
+**Why:** TextLayer 的 viewport 必须用 CSS 像素 scale——canvas 是设备像素尺寸再 CSS 缩放显示，文本层跟 CSS 尺寸对齐才能选得准；缩略图懒渲染避免大 PDF 一次性渲染上百页。
+**验证:** `npx vitest run src/pdfview.test.ts` 6 pass（新增 `thumbScale` 钳制/退化页；既有测试不回归——构造后仍是 1 个 canvas、destroy 后 0）；`npx tsc --noEmit` 净（坑：pdfjs 6 的 `TextContent` 类型要求 `styles` 与可空 `lang`，类型从 `pdfjs-dist/types/src/display/api` 深路径导入）；`npm test` 148 pass（22 文件）+ `npm run build` 通过；Rust 零改动。
+**未验:** 文本选择的对齐精度与缩略图懒加载观感需 `npm run tauri dev` 人工过（jsdom 无排版）。
 
 **依据：** `docs/specs/2026-10-30-pptx-text-design.md`。PPT 真渲染（版式/主题/图片）明确不做，本增量以文本提取收口 features.md 的 Office 条目；.ppt 老二进制格式不支持。
 

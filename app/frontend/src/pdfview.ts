@@ -6,6 +6,7 @@
 // previous task instead of queueing.
 
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import type { TextContent, TextItem } from "pdfjs-dist/types/src/display/api";
 
 /** Page numbers are 1-based; clamp into [1, total] (0/negative total → 1). */
 export function clampPage(page: number, total: number): number {
@@ -83,6 +84,15 @@ export function hitRect(
   };
 }
 
+/** Render scale for a thumbnail canvas (Plan 26). */
+export function thumbScale(pageWidthAtScale1: number, thumbPx: number): number {
+  if (!Number.isFinite(pageWidthAtScale1) || pageWidthAtScale1 <= 0) return 1;
+  return Math.min(4, Math.max(0.05, thumbPx / pageWidthAtScale1));
+}
+
+/** Thumbnail cell canvas width in CSS px (rail is 96px wide). */
+const THUMB_PX = 88;
+
 export interface PdfViewOpts {
   /** Surfaces a render-time problem in Chinese (never throws into the host). */
   onError(e: string): void;
@@ -106,6 +116,7 @@ export class PdfView {
   private pageWrap: HTMLElement;
   private canvas: HTMLCanvasElement;
   private hitsLayer: HTMLElement;
+  private textLayer: HTMLElement | null = null;
   private doc: unknown = null; // pdfjs PDFDocumentProxy (untyped: dynamic import)
   private task: { cancel(): void; promise: Promise<unknown> } | null = null;
   private destroyed = false;
@@ -115,6 +126,11 @@ export class PdfView {
   private lastViewportTransform: number[] | null = null;
   private lastDpr = 1;
   private currentPage = 1;
+  // Thumbnails (Plan 26): rail + lazy per-page render bookkeeping.
+  private thumbsRail: HTMLElement | null = null;
+  private thumbObserver: IntersectionObserver | null = null;
+  private thumbState = new Map<number, HTMLCanvasElement>();
+  private thumbPending = new Set<number>();
 
   constructor(host: HTMLElement, opts: PdfViewOpts) {
     this.host = host;
@@ -135,6 +151,9 @@ export class PdfView {
     this.textCache.clear(); // per-document cache
     this.hits = [];
     this.hitsLayer.textContent = "";
+    this.thumbState.clear();
+    this.thumbPending.clear();
+    if (this.thumbsRail) this.thumbsRail.textContent = "";
     try {
       const pdfjs = await import("pdfjs-dist");
       pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -167,14 +186,13 @@ export class PdfView {
           canvasContext: CanvasRenderingContext2D;
           viewport: { width: number; height: number };
         }): { cancel(): void; promise: Promise<unknown> };
-        getTextContent(): Promise<{
-          items: Array<{ str?: string; transform?: number[]; width?: number }>;
-        }>;
+        getTextContent(): Promise<{ items: TextItem[] }>;
       }>;
       destroy(): Promise<void>;
     };
     this.task?.cancel();
     try {
+      const pdfjs = await import("pdfjs-dist");
       const pdfPage = await doc.getPage(clampPage(page, (this.doc as { numPages: number }).numPages));
       if (this.destroyed) return null;
       this.currentPage = clampPage(page, (this.doc as { numPages: number }).numPages);
@@ -199,6 +217,10 @@ export class PdfView {
       this.lastViewportTransform = viewport.transform;
       this.lastDpr = dpr;
       this.drawHits(viewport.transform, dpr);
+      // Text layer for selection/copy — CSS-px viewport (the canvas is
+      // device-px sized and CSS-scaled; the layer must match the CSS size).
+      this.renderTextLayer(pdfjs, pdfPage, scale, viewport.width / dpr, viewport.height / dpr);
+      this.setThumbCurrent(this.currentPage);
       return viewport.width / dpr;
     } catch (e) {
       // A cancelled render (page/zoom changed mid-flight) rejects too — only
@@ -318,9 +340,132 @@ export class PdfView {
     return hitRect(item, this.lastViewportTransform, this.lastDpr, hit.charStart, hit.charLen);
   }
 
+  /**
+   * Fire-and-forget text layer for selection/copy (Plan 26). The previous
+   * layer is discarded on every render; a slow layer landing after a page
+   * switch simply replaces the container, so no cancellation state needed.
+   */
+  private renderTextLayer(
+    pdfjs: typeof import("pdfjs-dist"),
+    pdfPage: {
+      getTextContent(): Promise<{ items: TextItem[] }>;
+      getViewport(o: { scale: number }): unknown;
+    },
+    scale: number,
+    cssWidth: number,
+    cssHeight: number,
+  ): void {
+    this.textLayer?.remove();
+    const layer = document.createElement("div");
+    layer.className = "textLayer";
+    layer.style.width = `${cssWidth}px`;
+    layer.style.height = `${cssHeight}px`;
+    this.pageWrap.insertBefore(layer, this.hitsLayer);
+    this.textLayer = layer;
+    void (async () => {
+      try {
+        const textContent = await pdfPage.getTextContent();
+        if (this.destroyed || this.textLayer !== layer) return;
+        const source: TextContent = { items: textContent.items, styles: {}, lang: null };
+        const cssViewport = pdfPage.getViewport({ scale });
+        const tl = new pdfjs.TextLayer({
+          textContentSource: source,
+          container: layer,
+          viewport: cssViewport as never,
+        });
+        await tl.render();
+      } catch {
+        // A superseded layer or a page with no text: selection is optional.
+      }
+    })();
+  }
+
+  /**
+   * Build the thumbnail rail (Plan 26): one 96px cell per page, rendered
+   * lazily when scrolled near. `onGoPage` receives 1-based page numbers.
+   */
+  initThumbs(rail: HTMLElement, onGoPage: (page: number) => void): void {
+    this.thumbsRail = rail;
+    this.thumbState.clear();
+    this.thumbPending.clear();
+    rail.textContent = "";
+    this.thumbObserver?.disconnect();
+    const total = (this.doc as { numPages: number } | null)?.numPages ?? 0;
+    if (total <= 0) return;
+    this.thumbObserver = new IntersectionObserver(
+      (entries) => {
+        for (const en of entries) {
+          if (!en.isIntersecting) continue;
+          const page = Number((en.target as HTMLElement).dataset.page);
+          this.thumbObserver?.unobserve(en.target);
+          void this.renderThumb(page);
+        }
+      },
+      { root: rail, rootMargin: "200px" },
+    );
+    for (let p = 1; p <= total; p++) {
+      const cell = document.createElement("div");
+      cell.className = "pdf-thumb";
+      cell.dataset.page = String(p);
+      const canvas = document.createElement("canvas");
+      cell.append(canvas);
+      const label = document.createElement("div");
+      label.className = "pdf-thumb-label";
+      label.textContent = String(p);
+      cell.append(label);
+      cell.addEventListener("click", () => onGoPage(p));
+      rail.append(cell);
+      this.thumbState.set(p, canvas);
+      this.thumbObserver.observe(cell);
+    }
+  }
+
+  /** Border the current page's thumbnail; cheap enough to call every render. */
+  setThumbCurrent(page: number): void {
+    if (!this.thumbsRail) return;
+    for (const cell of this.thumbsRail.children) {
+      (cell as HTMLElement).classList.toggle("pdf-thumb-current", (cell as HTMLElement).dataset.page === String(page));
+    }
+  }
+
+  private async renderThumb(page: number): Promise<void> {
+    if (this.destroyed || this.thumbPending.has(page)) return;
+    const canvas = this.thumbState.get(page);
+    const doc = this.doc as {
+      getPage(n: number): Promise<{
+        getViewport(o: { scale: number }): { width: number; height: number };
+        render(o: {
+          canvasContext: CanvasRenderingContext2D;
+          viewport: { width: number; height: number };
+        }): { cancel(): void; promise: Promise<unknown> };
+      }>;
+    } | null;
+    if (!canvas || !doc) return;
+    this.thumbPending.add(page);
+    try {
+      const pdfPage = await doc.getPage(page);
+      if (this.destroyed) return;
+      const base = pdfPage.getViewport({ scale: 1 });
+      const scale = thumbScale(base.width, THUMB_PX * (window.devicePixelRatio || 1));
+      const viewport = pdfPage.getViewport({ scale });
+      canvas.width = Math.trunc(viewport.width);
+      canvas.height = Math.trunc(viewport.height);
+      canvas.style.width = `${THUMB_PX}px`;
+      canvas.style.height = `${Math.round(base.height * scale) / (window.devicePixelRatio || 1)}px`;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      await pdfPage.render({ canvasContext: ctx, viewport }).promise;
+    } catch {
+      // thumbnails are best-effort
+    } finally {
+      this.thumbPending.delete(page);
+    }
+  }
+
   destroy(): void {
     this.destroyed = true;
     this.task?.cancel();
+    this.thumbObserver?.disconnect();
     (this.doc as { destroy?(): Promise<void> } | null)?.destroy?.().catch(() => {});
     this.doc = null;
     this.textCache.clear();
