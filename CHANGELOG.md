@@ -12,7 +12,7 @@
 - **概览条（文档地图）**：编辑器右缘 36px canvas——`overviewBuckets` 分桶绘制非空行灰度、viewport 半透明窗框、点击/拖拽 `lineAtY` 跳行；`docChanged/viewportChanged/geometryChanged` rAF 合并重绘；行数 >50 万只画视口框（性能护栏）；开关默认开，面板切换。
 - **函数列表**：`SYMBOL_PATTERNS` 按内置模式 id 的正则表（js/ts/python/rust/java/c/markdown/sql），`extractSymbols` 每行首命中；面板复用 openPalette 重构出的泛化 `openCommandList(placeholder, cmds, domId)`（符号即 Command：hint 行号、run revealLine）；无规则/只读 → toast。
 **验证:** `npx vitest run src/editortools.test.ts` 8 pass（宏折叠与多 range 顺序、分桶边界/退化输入、y↔行双向映射、python/rust/markdown 符号提取、未知模式空表——修了 `lineAtY` 直传行号与 heading 取第二捕获组两处首版错误）；editor 集成 +2（录制→计数→重放插入"X"、符号形状）；`npx tsc --noEmit` 净；`npm test` 175 pass（24 文件，基线 165/23）+ `npm run build` 通过。openPalette 重构为泛化列表面板（行为不变，palette 测试回归）。
-**未验:** 宏重放手感、概览条拖拽、函数列表观感需 `npm run tauri dev` 人工过。
+**未验:** 宏重放手感、概览条拖拽、函数列表观感需 `npm run tauri dev` 人工过。（附带清理：上一提交混入的临时文件 `npm-out2.txt` 已删除。）
 
 **依据：** `docs/specs/2026-10-30-bookmarks-design.md`（Plan 27 spec §5 开工第一项；§5 盘点：列选择模式已随 `rectangularSelection()` 交付，宏录制/文档地图/函数列表继续缓议）。Rust 侧零改动。
 
