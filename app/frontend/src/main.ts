@@ -117,6 +117,14 @@ import {
   MAX_INSPECTOR,
 } from "./shell";
 import { filterCommands, type Command } from "./palette";
+import {
+  addTag,
+  parseTagStore,
+  removeTag,
+  serializeTagStore,
+  TAGS_PER_DOC_MAX,
+  type TagStore,
+} from "./doctags";
 import "./styles.css";
 
 // Paint the stored theme as early as module eval allows (index.html also runs a
@@ -131,6 +139,9 @@ interface DocState {
   mode: "edit" | "readonly";
   /** Unmappable bytes in the last decoded window (spec §5.4 persistent ⚠). */
   invalid: number;
+  /** Open-time file size / mtime (Plan 33 inspector rows); stale after tail growth. */
+  size: number;
+  mtime: number;
 }
 
 const docStates = new Map<number, DocState>();
@@ -470,7 +481,8 @@ function refreshSidebar(): void {
   }
 }
 
-/** Fill the inspector with the active document's metadata (spec §5.4 ⚠ detail). */
+/** Fill the inspector with the active document's metadata (spec §5.4 ⚠ detail)
+ *  plus per-path tags (Plan 33, NoteLume-style sections). */
 function updateInspector(docId: number | null): void {
   const body = inspectorBodyEl;
   if (!body) return;
@@ -483,8 +495,11 @@ function updateInspector(docId: number | null): void {
     body.append(empty);
     return;
   }
+  body.append(inspSection("文档属性"));
   const rows: [string, string, boolean?][] = [
     ["模式", ds.mode === "edit" ? "编辑（可修改）" : "只读（大文件）"],
+    ["大小", humanSize(ds.size)],
+    ["修改时间", formatSavedAt(ds.mtime)],
     ["编码", ds.encoding],
     ["行尾", ds.eol],
     ["总行数", String(ds.totalLines)],
@@ -505,6 +520,64 @@ function updateInspector(docId: number | null): void {
     row.append(k, v);
     body.append(row);
   }
+
+  body.append(inspSection("标签"));
+  body.append(buildTagBlock(ds.path));
+}
+
+function inspSection(title: string): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "insp-section";
+  el.textContent = title;
+  return el;
+}
+
+/** Chips + input for one document's tags; add/remove re-renders the block. */
+function buildTagBlock(path: string): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "insp-tags";
+  const rerender = (): void => {
+    const next = buildTagBlock(path);
+    wrap.replaceWith(next);
+    next.querySelector("input")?.focus();
+  };
+  for (const tag of tagStore[path] ?? []) {
+    const chip = document.createElement("span");
+    chip.className = "insp-tag";
+    const label = document.createElement("span");
+    label.textContent = tag;
+    const x = document.createElement("button");
+    x.className = "insp-tag-x";
+    x.title = `删除标签 ${tag}`;
+    x.textContent = "×";
+    x.addEventListener("click", () => {
+      tagStore = removeTag(tagStore, path, tag);
+      persistTags();
+      rerender();
+    });
+    chip.append(label, x);
+    wrap.append(chip);
+  }
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "insp-tag-input";
+  input.placeholder = "加标签，回车确认";
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    e.preventDefault();
+    const r = addTag(tagStore, path, input.value);
+    if (r.tag) {
+      tagStore = r.store;
+      persistTags();
+      rerender();
+    } else {
+      if (r.reason === "dup") toastMsg("标签已存在");
+      else if (r.reason === "full") toastMsg(`每个文档最多 ${TAGS_PER_DOC_MAX} 个标签`);
+      input.value = "";
+    }
+  });
+  wrap.append(input);
+  return wrap;
 }
 
 function refreshPanels(): void {
@@ -2004,6 +2077,25 @@ function persistMacros(): void {
   }
 }
 
+// ---- document tags (Plan 33: inspector, keyed by path) -----------------------
+
+const TAG_KEY = "lumelog.doc-tags.v1";
+let tagStore: TagStore = (() => {
+  try {
+    return parseTagStore(localStorage.getItem(TAG_KEY));
+  } catch {
+    return {};
+  }
+})();
+
+function persistTags(): void {
+  try {
+    localStorage.setItem(TAG_KEY, serializeTagStore(tagStore));
+  } catch {
+    /* storage unavailable: session-only tags */
+  }
+}
+
 function activeEditor() {
   const a = tabs.active();
   return a ? editors.get(a.info.docId) : undefined;
@@ -2293,6 +2385,8 @@ async function reloadDocFromDisk(docId: number, path: string): Promise<void> {
     ds.eol = info.eol;
     ds.totalLines = info.totalLines ?? info.lineCountEstimate;
     ds.invalid = 0;
+    ds.size = info.size;
+    ds.mtime = info.mtimeMillis;
     indexed.set(docId, ds.totalLines);
     if (hNow) {
       const { text, invalidCount } = await loadAllText(docId, ds.totalLines);
@@ -2343,6 +2437,8 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
     totalLines: total,
     mode: "edit",
     invalid: 0,
+    size: info.size,
+    mtime: info.mtimeMillis,
   });
   const handle = await openEditable({
     parent: tabsEl,
@@ -2377,6 +2473,8 @@ function mountList(info: DocInfo, path: string): void {
     totalLines: total,
     mode: "readonly",
     invalid: 0,
+    size: info.size,
+    mtime: info.mtimeMillis,
   });
   const list = new ListView({
     docId: info.docId,
