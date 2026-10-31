@@ -77,5 +77,5 @@ Measure-Command { .\target\release\lumelog.exe search --file "$env:TEMP\bench_1g
 - ~~拖放打开、最近 20 文件菜单~~：已交付（Plan 20 `feat/drop-recent`，`recent.json` + webview drag-drop；人工冒烟仍归 §2）
 - Save-As 后再切编码：壳侧 doc 仍绑原始文件（核心 Save-As 不重绑句柄），编码切换会重读原始内容；完整重绑归 Plan 2
 - ~~流式索引（threaded doc_open + 8MB 进度 tick）~~：已交付（Plan 37 `feat/bg-index`，readonly 后台线程逐 8MiB 块建索引 + tick 推进占位行；人工冒烟归 §2）
-- WKWebView/Safari IME 需叠 `keyCode!==229`（当前目标 WebView2 可靠）
+- ~~WKWebView/Safari IME 需叠 `keyCode!==229`~~：已交付（Plan 39 `fix/ime-guard`，`shell.isIMEEvent` 统一守卫全部 Enter 提交点 + 快捷键录制器，跨平台打包时实测）
 - CAN/DBC 解析、行过滤、崩溃恢复、外部监听 → Plan 2/3

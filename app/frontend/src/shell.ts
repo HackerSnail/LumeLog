@@ -46,6 +46,17 @@ export function storeFlag(key: string, on: boolean): void {
   write(key, on ? "1" : "0");
 }
 
+/**
+ * True when this keydown is an IME artifact and must be ignored. Safari and
+ * WKWebView fire the Enter that commits a composition AFTER `compositionend`,
+ * so `isComposing` is already false — keyCode 229 (and `key: "Process"` on
+ * Chromium) is the reliable signal. Checks both; structural input keeps it
+ * headless-testable without constructing real KeyboardEvents.
+ */
+export function isIMEEvent(e: { isComposing?: boolean; keyCode: number }): boolean {
+  return e.isComposing === true || e.keyCode === 229;
+}
+
 export interface ResizableOpts {
   min: number;
   max: number;
