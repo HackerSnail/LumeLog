@@ -92,6 +92,7 @@ import { openKeymapModal } from "./keymap-ui";
 import { openScriptModal } from "./script-ui";
 import { Mf4View, type Mf4Query } from "./mf4-ui";
 import { openEditable, type EditorHandle } from "./editor";
+import { MACRO_STORE_MAX, parseMacros, serializeMacros, type NamedMacro } from "./editortools";
 import { ListView, isNearBottom } from "./listview";
 import { CanPanel, FrameStore } from "./canpanel";
 import { type CanFilter } from "./canfilter";
@@ -1978,6 +1979,25 @@ async function initRecovery(): Promise<void> {
 
 let editorWrapOn = loadFlag("lumelog.ui.wrap", true);
 
+// ---- saved macros (Plan 30: cross-session persistence) -----------------------
+
+const MACRO_KEY = "lumelog.macros.v1";
+let savedMacros: NamedMacro[] = (() => {
+  try {
+    return parseMacros(localStorage.getItem(MACRO_KEY));
+  } catch {
+    return [];
+  }
+})();
+
+function persistMacros(): void {
+  try {
+    localStorage.setItem(MACRO_KEY, serializeMacros(savedMacros));
+  } catch {
+    /* storage unavailable/over quota: keep the session copy, toast on save */
+  }
+}
+
 function activeEditor() {
   const a = tabs.active();
   return a ? editors.get(a.info.docId) : undefined;
@@ -3398,10 +3418,80 @@ function buildCommands(): Command[] {
       run: () => {
         const h = activeEditor();
         if (!h) return;
-        toastMsg(`已停止录制（${h.stopRecording()} 个操作）`);
+        const n = h.stopRecording();
+        toastMsg(`已停止录制（${n} 个操作）`);
       },
     },
     { id: "macro-play", title: "宏：播放", run: () => activeEditor()?.playMacro(1) },
+    {
+      id: "macro-save",
+      title: "宏：保存为…",
+      run: () => {
+        const h = activeEditor();
+        const ops = h?.macroOps() ?? [];
+        if (ops.length === 0) {
+          toastMsg("没有已录制的宏");
+          return;
+        }
+        openCommandList("输入宏名称后回车保存", [], "macro-save-list", {
+          onFreeText: (raw) => {
+            const name = raw.trim();
+            if (!name) return;
+            const i = savedMacros.findIndex((m) => m.name === name);
+            if (i >= 0) savedMacros[i] = { name, ops };
+            else savedMacros.push({ name, ops });
+            if (savedMacros.length > MACRO_STORE_MAX) {
+              savedMacros = savedMacros.slice(-MACRO_STORE_MAX);
+            }
+            persistMacros();
+            toastMsg(`已保存宏「${name}」（${ops.length} 个操作）`);
+          },
+        });
+      },
+    },
+    {
+      id: "macro-run",
+      title: "宏：运行已保存宏",
+      run: () => {
+        if (savedMacros.length === 0) {
+          toastMsg("还没有保存的宏");
+          return;
+        }
+        openCommandList(
+          "选择要运行的宏…",
+          savedMacros.map((m) => ({
+            id: `macro-run-${m.name}`,
+            title: m.name,
+            hint: `${m.ops.length} 个操作`,
+            run: () => activeEditor()?.playMacro(1, m.ops),
+          })),
+          "macro-run-list",
+        );
+      },
+    },
+    {
+      id: "macro-delete",
+      title: "宏：删除已保存宏",
+      run: () => {
+        if (savedMacros.length === 0) {
+          toastMsg("还没有保存的宏");
+          return;
+        }
+        openCommandList(
+          "选择要删除的宏…",
+          savedMacros.map((m) => ({
+            id: `macro-del-${m.name}`,
+            title: m.name,
+            run: () => {
+              savedMacros = savedMacros.filter((x) => x.name !== m.name);
+              persistMacros();
+              toastMsg(`已删除宏「${m.name}」`);
+            },
+          })),
+          "macro-del-list",
+        );
+      },
+    },
     {
       id: "minimap",
       title: "切换概览条（文档地图）",
@@ -3449,12 +3539,15 @@ function openPalette(): void {
 
 /**
  * Generic fuzzy-filtered list overlay (palette + function list share it).
- * `domId` lets an already-open instance just reclaim focus.
+ * `domId` lets an already-open instance just reclaim focus. With `onFreeText`,
+ * Enter on an empty (unmatched) list submits the raw input text instead —
+ * macro naming rides the same panel (Plan 30).
  */
 function openCommandList(
   placeholder: string,
   cmds: Command[],
   domId: string,
+  opts?: { onFreeText?: (text: string) => void },
 ): void {
   const already = document.getElementById(domId);
   if (already) {
@@ -3535,7 +3628,13 @@ function openCommandList(
       paintSel();
     } else if (e.key === "Enter" && !e.isComposing) {
       e.preventDefault();
-      if (view.length) run(sel);
+      if (view.length) {
+        run(sel);
+      } else if (opts?.onFreeText && input.value.trim() !== "") {
+        const text = input.value;
+        close();
+        opts.onFreeText(text);
+      }
     }
   });
   overlay.addEventListener("mousedown", (e) => {

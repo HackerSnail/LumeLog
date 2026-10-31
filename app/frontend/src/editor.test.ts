@@ -107,6 +107,46 @@ describe("EditorHandle tools (Plan 29)", () => {
     handle.destroy();
   });
 
+  it("records moves, delete direction and line ops (Plan 30)", async () => {
+    const handle = await mount("txt"); // doc "b\na"
+    handle.view.dispatch({ selection: { anchor: 0 } });
+    expect(handle.startRecording()).toBe(true);
+
+    // type "X" at 0 (real typing carries the selection along → head 1)
+    handle.view.dispatch({
+      changes: { from: 0, insert: "X" },
+      selection: { anchor: 1 },
+      userEvent: "input.type",
+    });
+    // ArrowLeft: head 1 → 0 (same line, col -1)
+    handle.view.dispatch({ selection: { anchor: 0 }, userEvent: "input.move" });
+    // Delete key removes "X" forward
+    handle.view.dispatch({ changes: { from: 0, to: 1 }, userEvent: "delete.forward" });
+    // palette command rides handle.lineOp → recorded as a named action
+    handle.lineOp("reverse"); // doc is "b\na" again after the forward delete
+    expect(handle.stopRecording()).toBe(4);
+    expect(handle.macroOps()).toHaveLength(4);
+
+    // reset and replay from a clean doc
+    handle.replaceText("b\na");
+    handle.view.dispatch({ selection: { anchor: 0 } });
+    handle.playMacro(1, handle.macroOps());
+    // X inserted at 0 → left → forward delete of "X" → line reverse of ["b", "a"]
+    expect(handle.getText()).toBe("a\nb");
+
+    // backward deletes replay backwards, not forwards
+    handle.replaceText("b\na");
+    handle.startRecording();
+    handle.view.dispatch({ selection: { anchor: 3 } });
+    handle.view.dispatch({ changes: { from: 2, to: 3 }, userEvent: "delete.backward" });
+    handle.stopRecording();
+    handle.replaceText("b\na");
+    handle.view.dispatch({ selection: { anchor: 3 } });
+    handle.playMacro(1);
+    expect(handle.getText()).toBe("b\n");
+    handle.destroy();
+  });
+
   it("lists symbols for the current mode", async () => {
     const handle = await mount("py");
     await flush();

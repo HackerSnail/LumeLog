@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 30 宏高级形态：编辑动作抽象 + 跨会话持久化（feat/macro-advanced）
+
+**依据：** `docs/specs/2026-10-31-macro-advanced-design.md`（Plan 29 宏录制的续作）。Rust 侧零改动。
+
+### Task. `editortools.ts` 动作模型 + `editor.ts` 捕获/重放 + 命令面板
+**Files:** Modify `app/frontend/src/editortools.ts`（`MacroOp` 扩为四类：insert；delete 带 dir——backward 修 Plan 29 把 Backspace 重放成向后删的问题；move，`classifyMove` 纯函数按前后行列坐标归类，仅同行 ±1 列、相邻行、Home/End 可录，跳词/翻页/跨行折行不录；line，命名行操作；`serializeMacros`/`parseMacros` 逐条校验、坏宏丢弃，上限 50 个宏/名 100 字/每宏 1 万操作）；Modify `app/frontend/src/editor.ts`（updateListener 把 `input.move` 路由到新增的 `captureMove`——须放在 `u.docChanged` 分支外，纯移动不改文档；`handle.lineOp` 录制中记 `{kind:"line",op}`，重放共用抽出的 `applyLineOpToView`；`playMacro(times, ops?)` 支持显式 ops 与四类动作：backward 向光标前删、move 走 CodeMirror 命令或行首行尾 dispatch；handle 加 `macroOps()` 只读取已录制序列）；Modify `app/frontend/src/main.ts`（`localStorage["lumelog.macros.v1"]` 读写，启动加载；`openCommandList` 加 `onFreeText`——列表为空时回车提交输入文本，宏命名复用列表面板；命令面板加「宏：保存为…/运行已保存宏/删除已保存宏」三条，同名覆盖、删除即落盘）。
+**Why:** 字节级宏重放完全依赖光标停在同样的相对位置，把移动与行命令做成命名动作后，"到行首再插入"这类序列才能跨内容复用；持久化选 localStorage 而非脚本那样的 `$APP_CONFIG` 文件，是因为宏体量小，且 UI 偏好已有同路。
+**验证:** `npx vitest run src/editortools.test.ts src/editor.test.ts` 26 pass（classifyMove 各分支与不可录移动、序列化往返/坏数据/三项上限、extractMacroOps 方向；集成：录制 插入+移动+前删+行操作 → 重放全文一致、Backspace 重放向光标前删、`playMacro` 显式 ops、`macroOps()`）。首版两处错误已修：监听器的 move 捕获误放在 `u.docChanged` 分支内（纯移动永不触发）；测试里合成的插入事务没带 selection，光标没动导致移动不成立。`npx tsc --noEmit` 净；`npm test` 185 pass（24 文件，基线 175）+ `npm run build` 通过。
+**未验:** 保存→重启→运行已保存宏的跨会话链路、箭头键实机录制手感，需 `npm run tauri dev` 人工过。
+
 ## 2026-10-30 — Plan 29 编辑器工具三件套：宏录制/概览条/函数列表（feat/editor-tools）
 
 **依据：** `docs/specs/2026-10-30-editor-tools-design.md`（spec §5 缓议项开工）。Rust 侧零改动。
