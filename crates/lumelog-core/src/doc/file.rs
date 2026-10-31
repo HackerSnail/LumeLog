@@ -36,6 +36,19 @@ pub struct DocFile {
     /// Decoded-chunk LRU: front = least-recently-used (evicted), back = most.
     cache: VecDeque<(u64, Chunk)>,
     cache_bytes: usize,
+    /// Background-indexing state (Plan 37): bytes scanned so far, whether the
+    /// whole file is indexed, and a UTF-16 odd-byte carry between chunks.
+    indexed_bytes: u64,
+    index_done: bool,
+    u16_carry: Option<u8>,
+}
+
+/// One `index_step` result for the background indexing loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexStep {
+    pub indexed_bytes: u64,
+    pub indexed_lines: u64,
+    pub done: bool,
 }
 
 /// Result of a tail poll (`try_append`).
@@ -54,6 +67,15 @@ impl DocFile {
     /// Open `path`, detect its encoding, build the line index, refusing files
     /// larger than `size_limit` (spec §4.1: oversized files are rejected).
     pub fn open(path: &Path, size_limit: u64) -> Result<DocFile, CoreError> {
+        let mut doc = Self::open_deferred(path, size_limit)?;
+        while !doc.index_step(READ_CHUNK)?.done {}
+        Ok(doc)
+    }
+
+    /// Open `path` WITHOUT building the line index (Plan 37): metadata is
+    /// complete, the index starts empty and fills via `index_step` — either in
+    /// a background thread (GUI readonly path) or a tight loop (this `open`).
+    pub fn open_deferred(path: &Path, size_limit: u64) -> Result<DocFile, CoreError> {
         let mut file = File::open(path)?;
         let meta = file.metadata()?;
         let size = meta.len();
@@ -71,12 +93,10 @@ impl DocFile {
         let sig_len = (size.min(512) as usize).min(head.len());
         let sig = head_sig(&head[..sig_len]);
 
-        let index = build_index(&mut file, size, label)?;
-
         Ok(DocFile {
             file,
             path: path.to_path_buf(),
-            index,
+            index: LineIndex::empty(),
             label,
             eol_style,
             mtime,
@@ -85,7 +105,68 @@ impl DocFile {
             head_len: sig_len,
             cache: VecDeque::new(),
             cache_bytes: 0,
+            indexed_bytes: 0,
+            index_done: size == 0, // an empty file needs no indexing
+            u16_carry: None,
         })
+    }
+
+    /// Index the next READ_CHUNK-sized span; call repeatedly until `done`.
+    /// Holds no locks of its own — the shell locks the doc per step so GUI
+    /// chunk requests interleave with background indexing (Plan 37).
+    pub fn index_step(&mut self, chunk_size: u64) -> Result<IndexStep, CoreError> {
+        if !self.index_done {
+            let off = self.indexed_bytes;
+            let want = chunk_size.max(1).min(self.size - off) as usize;
+            let chunk = read_at(&mut self.file, off, want)?;
+            if chunk.is_empty() {
+                self.index_done = true;
+            } else {
+                match self.label {
+                    EncodingLabel::Utf16Le => {
+                        self.index.extend_u16(
+                            &chunk,
+                            off,
+                            0x000A,
+                            true,
+                            &mut self.u16_carry,
+                        )?;
+                    }
+                    EncodingLabel::Utf16Be => {
+                        self.index.extend_u16(
+                            &chunk,
+                            off,
+                            0x000A,
+                            false,
+                            &mut self.u16_carry,
+                        )?;
+                    }
+                    _ => self.index.extend(&chunk, off)?,
+                }
+                self.indexed_bytes += chunk.len() as u64;
+                if self.indexed_bytes >= self.size {
+                    self.index_done = true;
+                }
+            }
+            if self.index_done {
+                // Trailing carry byte or UTF-16 pairing must not shrink the
+                // last line's end below the real EOF.
+                self.index.set_file_size(self.size);
+            }
+        }
+        Ok(IndexStep {
+            indexed_bytes: self.indexed_bytes,
+            indexed_lines: self.index.line_count() as u64,
+            done: self.index_done,
+        })
+    }
+
+    /// Bytes scanned so far / whether the index covers the whole file.
+    pub fn indexed_bytes(&self) -> u64 {
+        self.indexed_bytes
+    }
+    pub fn index_done(&self) -> bool {
+        self.index_done
     }
 
     pub fn path(&self) -> &Path {
@@ -117,6 +198,11 @@ impl DocFile {
     /// `(size, mtime)` snapshot is refreshed so the external watcher does not
     /// re-report the same growth.
     pub fn try_append(&mut self) -> Result<AppendOutcome, CoreError> {
+        // A half-built index must not be extended by tail growth (Plan 37):
+        // the background loop finishes first; polls before that are no-ops.
+        if !self.index_done {
+            return Ok(AppendOutcome::NoChange);
+        }
         // Probe through the PATH, not our old handle: after `mv new log` the old
         // handle still points at the discarded inode. Rebinding on append keeps
         // the index and the handle on the same file.
@@ -583,5 +669,119 @@ mod append_tests {
         );
         assert!(doc.chunk_at(2, 1).unwrap().text.starts_with('c'));
         fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+}
+
+#[cfg(test)]
+mod deferred_index_tests {
+    use super::*;
+    use std::fs;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lumelog-deferred-{tag}-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn deferred_steps_match_synchronous_open() {
+        let dir = tmpdir("parity");
+        let f = dir.join("log");
+        let mut text = String::new();
+        for i in 0..2000 {
+            text.push_str(&format!("line {i} payload-{:0>4}\n", i % 7));
+        }
+        fs::write(&f, text.as_bytes()).unwrap();
+
+        let mut doc = DocFile::open_deferred(&f, 1 << 30).unwrap();
+        assert!(!doc.index_done());
+        let mut last = doc.index_step(128).unwrap();
+        let mut prev_bytes = last.indexed_bytes;
+        while !last.done {
+            last = doc.index_step(128).unwrap();
+            assert!(last.indexed_bytes > prev_bytes, "monotonic");
+            prev_bytes = last.indexed_bytes;
+        }
+        assert_eq!(last.indexed_bytes as usize, text.len());
+        assert!(doc.index_done());
+
+        // Same view as a synchronous open.
+        let mut whole = DocFile::open(&f, 1 << 30).unwrap();
+        assert_eq!(doc.line_count(), whole.line_count());
+        for line in [0, 1, 17, 1999] {
+            assert_eq!(
+                doc.chunk_at(line, 1).unwrap().text,
+                whole.chunk_at(line, 1).unwrap().text,
+                "line {line}"
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn partial_index_rejects_unindexed_lines_and_tail_poll() {
+        let dir = tmpdir("partial");
+        let f = dir.join("log");
+        let text: String = (0..5000).map(|i| format!("row {i}\n")).collect();
+        fs::write(&f, text.as_bytes()).unwrap();
+
+        let mut doc = DocFile::open_deferred(&f, 1 << 30).unwrap();
+        doc.index_step(64).unwrap(); // a small prefix only
+        assert!(!doc.index_done());
+        assert!(doc.indexed_bytes() < text.len() as u64);
+
+        // Lines inside the indexed prefix serve; beyond it refuse (the GUI
+        // renders placeholders and never asks for them).
+        let early = doc.chunk_at(0, 1).unwrap();
+        assert_eq!(early.text, "row 0\n");
+        assert!(matches!(
+            doc.chunk_at(4000, 1),
+            Err(CoreError::LineOutOfRange)
+        ));
+        // Tail poll on a half-built index is a no-op, not a corruption vector.
+        assert_eq!(doc.try_append().unwrap(), AppendOutcome::NoChange);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deferred_utf16_matches_synchronous_open() {
+        let dir = tmpdir("u16");
+        let f = dir.join("log");
+        // UTF-16LE with an odd total byte length forces a final carry.
+        let mut bytes: Vec<u8> = Vec::new();
+        for i in 0..300u32 {
+            for u in format!("行{i}\n").encode_utf16() {
+                bytes.extend_from_slice(&u.to_le_bytes());
+            }
+        }
+        bytes.push(0x41); // odd tail byte: 1-byte carry at EOF
+        fs::write(&f, &bytes).unwrap();
+
+        let mut doc = DocFile::open_deferred(&f, 1 << 30).unwrap();
+        let mut last = doc.index_step(37).unwrap();
+        while !last.done {
+            last = doc.index_step(37).unwrap();
+        }
+        assert_eq!(last.indexed_bytes as usize, bytes.len());
+
+        let mut whole = DocFile::open(&f, 1 << 30).unwrap();
+        assert_eq!(doc.line_count(), whole.line_count());
+        assert_eq!(
+            doc.chunk_at(5, 2).unwrap().text,
+            whole.chunk_at(5, 2).unwrap().text
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deferred_empty_file_is_done_immediately() {
+        let dir = tmpdir("empty");
+        let f = dir.join("log");
+        fs::write(&f, b"").unwrap();
+        let mut doc = DocFile::open_deferred(&f, 1 << 30).unwrap();
+        let step = doc.index_step(8 << 20).unwrap();
+        assert!(step.done);
+        assert_eq!(doc.line_count(), 1);
+        fs::remove_dir_all(&dir).ok();
     }
 }

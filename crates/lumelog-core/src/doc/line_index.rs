@@ -17,6 +17,14 @@ impl LineIndex {
         self.offsets.len()
     }
 
+    /// Empty index for deferred opens (Plan 37): line 0 exists, nothing indexed.
+    pub fn empty() -> LineIndex {
+        LineIndex {
+            offsets: vec![0],
+            file_size: 0,
+        }
+    }
+
     /// Byte range `[start, end)` of line `n`, inclusive of its trailing `\n`.
     pub fn line_range(&self, n: usize) -> Option<(u64, u64)> {
         let start = *self.offsets.get(n)? as u64;
@@ -70,6 +78,58 @@ impl LineIndex {
         self.offsets.extend(starts);
         self.file_size = new_size;
         Ok(())
+    }
+
+    /// UTF-16 variant of `extend` for background indexing: only even-offset
+    /// code units equal to `pattern` start a new line (same rule as
+    /// `build_aligned`). A trailing odd byte is parked in `carry` and consumed
+    /// by the next call, so chunk boundaries never split a code unit.
+    /// `base_offset` must be even (the position of the carried byte, if any).
+    pub fn extend_u16(
+        &mut self,
+        appended: &[u8],
+        base_offset: u64,
+        pattern: u16,
+        little_endian: bool,
+        carry: &mut Option<u8>,
+    ) -> Result<(), CoreError> {
+        let mut buf: Vec<u8> = Vec::with_capacity(appended.len() + 1);
+        if let Some(c) = *carry {
+            buf.push(c);
+        }
+        buf.extend_from_slice(appended);
+        let pairs = buf.len() / 2;
+        *carry = if buf.len() % 2 == 1 {
+            Some(buf[buf.len() - 1])
+        } else {
+            None
+        };
+        let mut starts: Vec<u32> = Vec::new();
+        for i in 0..pairs {
+            let b0 = buf[i * 2];
+            let b1 = buf[i * 2 + 1];
+            let unit = if little_endian {
+                u16::from_le_bytes([b0, b1])
+            } else {
+                u16::from_be_bytes([b0, b1])
+            };
+            if unit == pattern {
+                let next = base_offset + ((i + 1) * 2) as u64;
+                if next > u32::MAX as u64 {
+                    return Err(CoreError::TooLarge);
+                }
+                starts.push(next as u32);
+            }
+        }
+        self.offsets.extend(starts);
+        self.file_size = base_offset + (pairs * 2) as u64;
+        Ok(())
+    }
+
+    /// Pin the indexed span to the real file size (end of background indexing;
+    /// during streaming `file_size` trails at the last consumed byte).
+    pub fn set_file_size(&mut self, size: u64) {
+        self.file_size = size;
     }
 }
 
@@ -291,5 +351,64 @@ mod tests {
             idx.extend(b"\n", u32::MAX as u64),
             Err(CoreError::TooLarge)
         ));
+    }
+}
+
+#[cfg(test)]
+mod extend_u16_tests {
+    use super::*;
+
+    /// Feed `data` through extend_u16 in `chunk`-byte pieces; result must match
+    /// the whole-buffer build_aligned.
+    fn assert_streaming(data: &[u8], chunk: usize, le: bool) {
+        let whole = build_aligned(data, 0x000A, le).unwrap();
+        let mut idx = LineIndex::empty();
+        let mut carry: Option<u8> = None;
+        let mut base = 0u64;
+        let mut i = 0usize;
+        while i < data.len() {
+            let end = (i + chunk).min(data.len());
+            idx.extend_u16(&data[i..end], base, 0x000A, le, &mut carry).unwrap();
+            base = idx.file_size();
+            i = end;
+        }
+        idx.set_file_size(data.len() as u64);
+        assert_eq!(idx.offsets(), whole.offsets(), "le={le} chunk={chunk}");
+        assert_eq!(idx.file_size(), whole.file_size());
+    }
+
+    #[test]
+    fn extend_u16_matches_whole_scan_with_odd_chunks() {
+        // Noise with 0x0A bytes at BOTH parities: only even-aligned units count.
+        let mut data: Vec<u8> = Vec::new();
+        for i in 0..4096u32 {
+            data.extend_from_slice(&i.to_le_bytes());
+            if i % 3 == 0 {
+                data.push(0x0A); // odd-position LF high byte: NOT a break
+            }
+            if i % 5 == 0 {
+                data.push(0x0A);
+                data.push(0x00); // LE code unit 0x000A at even offset: break
+            }
+        }
+        for &chunk in &[1usize, 2, 3, 7, 64] {
+            assert_streaming(&data, chunk, true);
+            assert_streaming(&data, chunk, false);
+        }
+    }
+
+    #[test]
+    fn extend_u16_carry_survives_into_next_call() {
+        // 0x0A 0x00 split across two calls: the LF unit completes only after
+        // the carry is consumed by the second chunk.
+        let mut idx = LineIndex::empty();
+        let mut carry: Option<u8> = None;
+        idx.extend_u16(&[0x41, 0x42, 0x0A], 0, 0x000A, true, &mut carry).unwrap();
+        assert_eq!(carry, Some(0x0A));
+        idx.extend_u16(&[0x00, 0x41], 2, 0x000A, true, &mut carry).unwrap();
+        // 0x41 is a lone odd tail byte: parked in the carry, not consumed.
+        assert_eq!(carry, Some(0x41));
+        assert_eq!(idx.file_size(), 4);
+        assert_eq!(idx.offsets(), vec![0, 4]);
     }
 }

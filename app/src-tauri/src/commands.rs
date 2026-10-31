@@ -59,8 +59,10 @@ pub fn app_ping() -> &'static str {
 }
 
 /// Open a document: pre-validate (spec §9 codes), then hand the path to the core.
-/// v1 indexes synchronously (fast — ~0.6 s/GB, Task 7 P3) and emits a single
-/// completion tick on `on_progress`; granular 8 MiB ticks arrive with Task 10.
+/// Readonly docs (>200 MiB) index in a background thread (Plan 37): `doc_open`
+/// returns immediately with a line estimate and `total_lines: null`; the thread
+/// streams `IndexProgress` ticks (one per 8 MiB chunk) and the front end grows
+/// the virtual list as offsets appear. Edit docs index inline (fast at ≤200 MB).
 #[tauri::command]
 pub fn doc_open(
     state: tauri::State<'_, AppDocs>,
@@ -70,38 +72,94 @@ pub fn doc_open(
 ) -> Result<DocInfo, IpcError> {
     let p = Path::new(&path);
     lumelog_core::doc::validate_open_path(p, SIZE_LIMIT).map_err(IpcError::from_open_reject)?;
-    let doc = DocFile::open(p, SIZE_LIMIT).map_err(IpcError::from_core)?;
+    let mut doc = DocFile::open_deferred(p, SIZE_LIMIT).map_err(IpcError::from_core)?;
 
     let size = doc.size();
     let encoding = doc.encoding().as_str().to_string();
     let eol = eol_str(doc.eol_style());
-    let lines = doc.line_count() as u64;
     let mtime_millis = doc
         .mtime()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
+    let readonly = size > EDIT_THRESHOLD;
+
+    if readonly {
+        // Rough placeholder count (≈32 B/line) until the done tick corrects it.
+        let estimate = size / 32;
+        let doc_id = state.insert(doc);
+        // Watch the document's directory so external modifications reach the UI.
+        app.state::<AppWatch>().watch_path(Path::new(&path));
+        if let Ok(store) = crate::recent::recent_path(&app) {
+            let _ = crate::recent::record_recent(&store, &path);
+        }
+        // Background indexing: lock the doc per chunk so GUI `doc_chunk`
+        // requests interleave. A closed doc keeps indexing to completion
+        // (bounded, ticks ignored by the front end) — no cancel plumbing.
+        let arc = state
+            .get(doc_id)
+            .ok_or_else(|| IpcError::new("unknown_doc", "doc vanished during open"))?;
+        let channel = on_progress.clone();
+        std::thread::Builder::new()
+            .name(format!("doc-index-{doc_id}"))
+            .spawn(move || loop {
+                let step = {
+                    let mut d = arc.lock().unwrap_or_else(|p| p.into_inner());
+                    match d.index_step(8 * 1024 * 1024) {
+                        Ok(s) => s,
+                        Err(_) => return, // unreadable mid-file: stay partial
+                    }
+                };
+                let done = step.done;
+                let _ = channel.send(IndexProgress {
+                    doc_id,
+                    indexed_bytes: step.indexed_bytes,
+                    indexed_lines: step.indexed_lines,
+                    done,
+                });
+                if done {
+                    break;
+                }
+            })
+            .map_err(|e| IpcError::new("io", e.to_string()))?;
+        return Ok(DocInfo {
+            doc_id,
+            size,
+            mtime_millis,
+            encoding,
+            eol,
+            mode: "readonly".to_string(),
+            line_count_estimate: estimate,
+            total_lines: None,
+        });
+    }
+
+    // Edit mode: index synchronously (≤200 MB ≈ 0.12 s, P3-measured).
+    let lines = loop {
+        let step = doc.index_step(8 * 1024 * 1024).map_err(IpcError::from_core)?;
+        if step.done {
+            break step.indexed_lines;
+        }
+    };
     let doc_id = state.insert(doc);
-    // Watch the document's directory so external modifications reach the UI.
     app.state::<AppWatch>().watch_path(Path::new(&path));
-    // Record the open for the recent-files list (advisory; ignore failures).
     if let Ok(store) = crate::recent::recent_path(&app) {
         let _ = crate::recent::record_recent(&store, &path);
     }
-
     let info = DocInfo {
         doc_id,
         size,
         mtime_millis,
         encoding,
         eol,
-        mode: mode_str(size),
+        mode: "edit".to_string(),
         line_count_estimate: lines,
         total_lines: Some(lines),
     };
     let _ = on_progress.send(IndexProgress {
         doc_id,
         indexed_bytes: size,
+        indexed_lines: lines,
         done: true,
     });
     Ok(info)
@@ -156,6 +214,7 @@ pub fn doc_reload(
     let _ = on_progress.send(IndexProgress {
         doc_id,
         indexed_bytes: info.size,
+        indexed_lines: info.total_lines.unwrap_or(0),
         done: true,
     });
     Ok(info)
