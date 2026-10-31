@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 36 发布物验证：Windows 打包 + P6 体积实测（chore/bundle-verify）
+
+**依据：** `docs/test-checklist.md` §3 剩余可本地验证项。零代码改动（只修 CI 工作流一处调用）。
+
+### Task. 本地 tauri build + P6 实测 + release.yml 修正
+**Files:** Modify `.github/workflows/release.yml`；Modify `docs/test-checklist.md`（§1 P6 填数、§3 勾两项）。
+**Why:** 打包验证时发现两处坑：① bundles 目录里躺着的其实是 10/24 M1 的老产物（时间戳核对才暴露，`npm run tauri build` 从 frontend 跑实际 panic 但 PowerShell 管道把退出码吞了——tauri-cli 的配置探测只看 cwd 与子目录，`src-tauri` 是 frontend 的兄弟目录不可见）；② release.yml 同款写法在 CI 也会踩。修法：从仓库根调 `app/frontend/node_modules/.bin/tauri`（配置向下可探测，beforeBuildCommand 仍解析到 frontend 的 package.json）。
+**验证:** `tauri build`（仓库根）产出 NSIS `LumeLog_0.1.0_x64-setup.exe` **5.66 MiB**、MSI **8.95 MiB**（16:17 新鲜产物；裸 exe 21,252,608 B，含 wasmi+git2），P6 门槛 ≤15MB 达标约 2.6 倍余量，数字已填 test-checklist §1；前端 vite build 的 >500KB chunk 告警为既有现象（pdfjs chunk）。CI 三平台矩阵与 Gitee 发布上传须在 Actions 实跑，仍留 §3 未勾。
+**未验:** macOS/Linux bundle、Actions 实跑、Gitee 发布（须 GITEE_TOKEN 与人工授权）。
+
 ## 2026-10-31 — Plan 35 Git 内置化（git2）+ 暂存并提交（feat/git-commit）
 
 **依据：** `docs/specs/2026-10-31-git-commit-design.md`（用户点名：做 add/commit 且要内置 git）。`gitinfo.rs` 重写，命令层/前端扩展。
