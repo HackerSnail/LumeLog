@@ -120,6 +120,7 @@ import {
   MAX_INSPECTOR,
 } from "./shell";
 import { filterCommands, type Command } from "./palette";
+import { parseBookmarkStore, serializeBookmarkStore, type BookmarkStore } from "./bookmarks-store";
 import {
   addTag,
   parseTagStore,
@@ -2281,6 +2282,25 @@ function persistTags(): void {
   }
 }
 
+// ---- bookmarks across sessions (Plan 38, per file path) ----------------------
+
+const BOOKMARK_KEY = "lumelog.bookmarks.v1";
+let bookmarkStore: BookmarkStore = (() => {
+  try {
+    return parseBookmarkStore(localStorage.getItem(BOOKMARK_KEY));
+  } catch {
+    return {};
+  }
+})();
+
+function persistBookmarks(): void {
+  try {
+    localStorage.setItem(BOOKMARK_KEY, serializeBookmarkStore(bookmarkStore));
+  } catch {
+    /* storage unavailable: session-only bookmarks */
+  }
+}
+
 function activeEditor() {
   const a = tabs.active();
   return a ? editors.get(a.info.docId) : undefined;
@@ -2640,7 +2660,14 @@ async function mountDoc(info: DocInfo, path: string): Promise<void> {
       if (d) d.invalid = n;
       status.setInvalidCount(n);
     },
+    // Plan 38: bookmarks survive document close, keyed by file path.
+    onBookmarksChanged: (lines) => {
+      if (lines.length === 0) delete bookmarkStore[path];
+      else bookmarkStore[path] = lines;
+      persistBookmarks();
+    },
   });
+  handle.loadBookmarkLines(bookmarkStore[path] ?? []);
   editors.set(info.docId, handle);
   tabs.add({ docId: info.docId, path }, handle);
   trackCursor(handle);

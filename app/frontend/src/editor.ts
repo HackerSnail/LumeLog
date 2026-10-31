@@ -152,6 +152,12 @@ function clearBookmarksCmd(view: EditorView): boolean {
   return true;
 }
 
+/** Anchor char offsets → sorted 1-based line numbers (Plan 38 persistence). */
+function bookmarkAnchorsToLines(state: EditorState, anchors: readonly number[]): number[] {
+  const lines = anchors.map((p) => state.doc.lineAt(p).number);
+  return [...new Set(lines)].sort((a, b) => a - b);
+}
+
 /** Read-only bookmark anchors (sorted char offsets) — test/inspection hook. */
 export function bookmarkPositions(view: EditorView): readonly number[] {
   return view.state.field(bookmarksPos, false) ?? [];
@@ -191,6 +197,11 @@ export interface EditorHandle {
   nextBookmark(): boolean;
   prevBookmark(): boolean;
   clearBookmarks(): void;
+  /** Current bookmarks as 1-based line numbers, ascending (Plan 38). */
+  bookmarkLines(): number[];
+  /** Replace bookmarks with these 1-based lines; out-of-range lines are
+   *  dropped (the file may have shrunk between sessions). */
+  loadBookmarkLines(lines: number[]): void;
   // ---- Plan 29 editor tools ----
   /** Begin capturing user input transactions; false if already recording. */
   startRecording(): boolean;
@@ -230,6 +241,8 @@ export interface OpenEditableOpts {
   onEdit?: () => void;
   /** Decoded U+FFFD replacement count from the full load (spec §5). */
   onInvalid?: (count: number) => void;
+  /** Bookmarks changed (toggle/clear) → current 1-based lines (Plan 38). */
+  onBookmarksChanged?: (lines: number[]) => void;
 }
 
 /**
@@ -484,10 +497,25 @@ export async function openEditable(opts: OpenEditableOpts): Promise<EditorHandle
       zoom.size = FONT_BASE;
       view.dispatch({ effects: fontConf.reconfigure(fontTheme(zoom.size)) });
     },
-    toggleBookmark: () => void toggleBookmarkCmd(view),
+    toggleBookmark: () => {
+      toggleBookmarkCmd(view);
+      opts.onBookmarksChanged?.(bookmarkAnchorsToLines(view.state, view.state.field(bookmarksPos)));
+    },
     nextBookmark: () => nextBookmarkCmd(view),
     prevBookmark: () => prevBookmarkCmd(view),
-    clearBookmarks: () => void clearBookmarksCmd(view),
+    clearBookmarks: () => {
+      clearBookmarksCmd(view);
+      opts.onBookmarksChanged?.([]);
+    },
+    bookmarkLines: () =>
+      bookmarkAnchorsToLines(view.state, view.state.field(bookmarksPos, false) ?? []),
+    loadBookmarkLines: (lines) => {
+      const anchors = [...new Set(lines)]
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= view.state.doc.lines)
+        .sort((a, b) => a - b)
+        .map((n) => view.state.doc.line(n).from);
+      view.dispatch({ effects: setBookmarks.of(anchors) });
+    },
     startRecording: () => {
       if (macro !== null) return false;
       macro = [];

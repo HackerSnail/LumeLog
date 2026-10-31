@@ -84,6 +84,29 @@ describe("EditorHandle parity commands (Plan 27)", () => {
     expect(handle.nextBookmark()).toBe(false);
     handle.destroy();
   });
+
+  it("restores bookmarks by line and reports changes (Plan 38)", async () => {
+    const changes: number[][] = [];
+    const handle = await openEditable({
+      parent: document.createElement("div"),
+      info: info(),
+      ext: "txt",
+      onBookmarksChanged: (lines) => changes.push(lines),
+    });
+    document.body.append(handle.root);
+
+    // out-of-range lines are dropped; the rest land on line starts
+    handle.loadBookmarkLines([9, 2, 1]);
+    expect(bookmarkPositions(handle.view)).toEqual([0, 2]);
+    expect(handle.bookmarkLines()).toEqual([1, 2]);
+
+    handle.view.dispatch({ selection: { anchor: 2 } });
+    handle.toggleBookmark();
+    expect(changes).toEqual([[1]]);
+    handle.clearBookmarks();
+    expect(changes).toEqual([[1], []]);
+    handle.destroy();
+  });
 });
 
 describe("EditorHandle tools (Plan 29)", () => {

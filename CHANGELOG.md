@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 38 书签跨会话持久化（feat/bookmarks-session）
+
+**依据：** `docs/specs/2026-10-31-bookmarks-session-design.md`（Plan 28 spec §3 遗留项）。纯前端，Rust 零改动。
+
+### Task. `bookmarks-store.ts` 纯函数 + handle 行号接口 + mountDoc 接线
+**Files:** Create `app/frontend/src/bookmarks-store.ts`、`bookmarks-store.test.ts`（4）；Modify `app/frontend/src/editor.ts`（handle 加 `bookmarkLines()`（锚点 → 1-based 行号升序）与 `loadBookmarkLines(lines)`（越界丢弃、行号 → 行首锚点经既有 `setBookmarks` effect 批量装载）；`OpenEditableOpts.onBookmarksChanged(lines)` 在 toggle/clear 后回调，跳转不回调）；Modify `app/frontend/src/main.ts`（`localStorage["lumelog.bookmarks.v1"]` 读写；mountDoc 打开后 `loadBookmarkLines(已存行号)`，变更时整表替换该路径条目、空表删键）。
+**Why:** 跨会话存**行号**而非字符偏移——磁盘上一次编辑就让偏移失效，行号才是稳定标识（N++ 同款语义）；文件变短后越界行号装载时丢弃。整表替换而非增量 diff，回调只带当前集合，逻辑最短；每次变化即落盘，崩溃也不丢。
+**验证:** `npx vitest run src/bookmarks-store.test.ts src/editor.test.ts` 17 pass（parse 坏 JSON/去重排序/非正数与浮点丢弃/上限 200/往返；loadBookmarkLines 越界钳制 + 锚点就位 + bookmarkLines 回读；toggle/clear 触发 onBookmarksChanged 行号正确）；`npx tsc --noEmit` 净；`npm test` 201 pass（26 文件，基线 196）+ `npm run build` 通过。
+**未验:** 打书签→关文档→重开仍在的跨会话链路需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 37 后台流式索引：threaded doc_open + 8 MiB tick（feat/bg-index）
 
 **依据：** `docs/specs/2026-10-31-background-index-design.md`（M1 遗留欠账，test-checklist §4）。core/shell/前端三层改动。
