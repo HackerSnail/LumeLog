@@ -2,6 +2,16 @@
 
 按 git log 时间倒序（最新在最上方）。每条写清：改了哪些文件、为什么、验证结果。
 
+## 2026-10-31 — Plan 33 检查器：文档属性分区 + 文档标签（feat/inspector-tags）
+
+**依据：** `docs/specs/2026-10-31-inspector-tags-design.md`（用户截图 NoteLume 检查器，红框标「文档属性」「标签」两块）。Rust 侧零改动。
+
+### Task. `doctags.ts` 纯函数 + 检查器分区 + 标签块
+**Files:** Create `app/frontend/src/doctags.ts`、`doctags.test.ts`（6）；Modify `app/frontend/src/main.ts`（信息栏拆「文档属性」「标签」两小节；属性补「大小」「修改时间」——`DocState` 加 `size/mtime`，打开与外部重载两个写入点落值，tail 增长不回刷为已知限制；标签块 chips + 输入框，回车 `addTag`、× `removeTag`，操作即 `persistTags()` 落 `localStorage["lumelog.doc-tags.v1"]`，重复/满额 toast）；Modify `app/frontend/src/styles.css`（`.insp-section/.insp-tags/.insp-tag(-x)/.insp-tag-input`）。
+**Why:** 标签键用文件路径而非 docId——标注属于文件，跨会话与重开都在；大小/修改时间不进 `TabEntry`（只有 docId/path），从打开时刻的 `DocInfo` 落进 `DocState` 最省事，重载点已有 info 可顺手刷新。
+**验证:** `npx vitest run src/doctags.test.ts` 6 pass（normalize 截断、add 去重/满额/非法、remove 清空键、parse 坏 JSON/坏条目/上限钳制、序列化往返）；`npx tsc --noEmit` 净；`npm test` 196 pass（25 文件，基线 190）+ `npm run build` 通过。
+**未验:** 标签增删后重启仍在（跨会话链路）、分区观感需 `npm run tauri dev` 人工过。
+
 ## 2026-10-31 — Plan 32 宏补遗：方向键/选区录制修复 + 跳词动作（feat/macro-selection-words）
 
 **依据：** `docs/specs/2026-10-31-macro-selection-words-design.md`（收 Plan 30 留下的三块限制）。Rust 侧零改动。
